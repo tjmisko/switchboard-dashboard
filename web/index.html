@@ -3,66 +3,70 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>switchboard · activity timeline</title>
+  <title>switchboard · activity monitor</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
-      <span class="dot"></span>
-      <h1>switchboard<span class="sep">·</span><span class="muted">activity timeline</span></h1>
+      <span class="dot" id="live-dot"></span>
+      <h1>switchboard<span class="sep">·</span><span class="muted">activity monitor</span></h1>
     </div>
-    <div id="window-label" class="window-label" title="display window">—</div>
-  </header>
 
-  <section class="controls" aria-label="controls">
-    <label class="field">
-      <span>Day</span>
+    <div class="nav">
+      <button id="prev-day" class="icon" title="previous day">‹</button>
       <input type="date" id="day" />
-    </label>
-    <span class="range-group">
-      <label class="field">
-        <span>Since</span>
-        <input type="date" id="since" />
-      </label>
-      <label class="field">
-        <span>Until</span>
-        <input type="date" id="until" />
-      </label>
-      <button id="clear-range" class="ghost" title="clear the range and use Day">clear range</button>
-    </span>
-    <span class="spacer"></span>
-    <button id="refresh" class="primary">Refresh</button>
-    <label class="toggle" title="re-fetch every 5s">
-      <input type="checkbox" id="autorefresh" />
-      <span>Auto-refresh</span>
-    </label>
-    <span id="status" class="req-status"></span>
-  </section>
+      <button id="next-day" class="icon" title="next day">›</button>
+      <button id="live" class="ghost" title="jump to today / live">live</button>
+      <span class="nav-range">
+        <input type="date" id="since" title="range start" />
+        <span class="dash">–</span>
+        <input type="date" id="until" title="range end" />
+        <button id="clear-range" class="icon" title="clear range">✕</button>
+      </span>
+    </div>
+
+    <div class="live-pill" id="live-pill" title="data is live — polled automatically">
+      <span id="updated">—</span>
+      <span class="win" id="window-label">—</span>
+    </div>
+  </header>
 
   <div id="error" class="error-banner" hidden></div>
 
   <main>
-    <section class="summary" id="summary" aria-label="summary">
-      <!-- summary cards injected here -->
-    </section>
-
+    <!-- Swimlanes: the dominant, full-width hero at the top of the fold. -->
     <section class="timeline-section">
       <div class="section-head">
-        <h2>Swimlanes</h2>
-        <div class="legend" id="legend"></div>
+        <h2>activity</h2>
+        <!-- time-by-status doubles as the swimlane key/legend (all statuses, incl. zeros) -->
+        <div class="status-key" id="status-key" aria-label="time by status (key)"></div>
       </div>
       <div class="timeline-wrap" id="timeline-wrap">
-        <svg id="timeline" role="img" aria-label="session swimlanes"></svg>
+        <svg id="timeline" role="img" aria-label="session swimlanes">
+          <defs>
+            <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+              <rect width="6" height="6" fill="none"></rect>
+              <line x1="0" y1="0" x2="0" y2="6" stroke="#e6edf3" stroke-width="1.1" stroke-opacity="0.55"></line>
+            </pattern>
+          </defs>
+        </svg>
         <div id="empty" class="empty" hidden>No activity for this window.</div>
       </div>
+    </section>
+
+    <!-- Compact strip: consolidated attention + cost. -->
+    <section class="cards" id="cards" aria-label="summary">
+      <div class="card attention" id="card-attention"></div>
+      <div class="card cost" id="card-cost"></div>
     </section>
   </main>
 
   <div id="tooltip" class="tooltip" hidden></div>
+  <div id="popout" class="popout" hidden></div>
 
   <footer class="footer">
-    <span>units: durations are nanoseconds (÷1e9), tokens are raw counts — contract owned by switchboard <code>docs/history-schema.md</code></span>
+    <span>durations are nanoseconds (÷1e9) · tokens raw counts · cost is recomputed from tokens × model price · plan % is read-only from <code>/tmp/claude-plan-usage.json</code> — contract owned by switchboard <code>docs/history-schema.md</code></span>
   </footer>
 
   <script src="app.js"></script>
