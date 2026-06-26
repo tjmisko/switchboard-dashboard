@@ -38,7 +38,10 @@ type TimelineParams struct {
 // can be unit-tested directly. Empty params are omitted, letting ctl apply its
 // own defaults.
 func argvFor(ctl string, p TimelineParams) []string {
-	argv := []string{ctl, "timeline", "--json"}
+	// --plan-window asks ctl to attach the rolling 5h plan_window total (the $
+	// half of the cost gauge). It is always "now"-anchored regardless of the
+	// viewed day, so we request it unconditionally; ctl omits it without the flag.
+	argv := []string{ctl, "timeline", "--json", "--plan-window"}
 	if p.Dir != "" {
 		argv = append(argv, "--dir", p.Dir)
 	}

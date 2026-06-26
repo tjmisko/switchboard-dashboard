@@ -22,28 +22,28 @@ func TestArgvFor_mapsParamsToFlags(t *testing.T) {
 		want []string
 	}{
 		{
-			name: "should emit only base argv when no params set",
+			name: "should emit base argv with plan-window when no params set",
 			ctl:  "switchboard-ctl",
 			in:   TimelineParams{},
-			want: []string{"switchboard-ctl", "timeline", "--json"},
+			want: []string{"switchboard-ctl", "timeline", "--json", "--plan-window"},
 		},
 		{
 			name: "should forward day and dir when set",
 			ctl:  "/usr/bin/ctl",
 			in:   TimelineParams{Day: "2026-06-20", Dir: "/var/hist"},
-			want: []string{"/usr/bin/ctl", "timeline", "--json", "--dir", "/var/hist", "--day", "2026-06-20"},
+			want: []string{"/usr/bin/ctl", "timeline", "--json", "--plan-window", "--dir", "/var/hist", "--day", "2026-06-20"},
 		},
 		{
 			name: "should forward a since/until range",
 			ctl:  "ctl",
 			in:   TimelineParams{Since: "2026-06-20", Until: "2026-06-26"},
-			want: []string{"ctl", "timeline", "--json", "--since", "2026-06-20", "--until", "2026-06-26"},
+			want: []string{"ctl", "timeline", "--json", "--plan-window", "--since", "2026-06-20", "--until", "2026-06-26"},
 		},
 		{
 			name: "should forward every flag together",
 			ctl:  "ctl",
 			in:   TimelineParams{Day: "2026-06-20", Since: "2026-06-01", Until: "2026-06-30", Dir: "/d"},
-			want: []string{"ctl", "timeline", "--json", "--dir", "/d", "--day", "2026-06-20", "--since", "2026-06-01", "--until", "2026-06-30"},
+			want: []string{"ctl", "timeline", "--json", "--plan-window", "--dir", "/d", "--day", "2026-06-20", "--since", "2026-06-01", "--until", "2026-06-30"},
 		},
 	}
 	for _, tc := range tests {
