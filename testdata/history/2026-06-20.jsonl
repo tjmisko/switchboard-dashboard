@@ -1,0 +1,23 @@
+{"ts":"2026-06-20T09:00:00.000Z","type":"session_start","pid":4821,"agent":"claude"}
+{"ts":"2026-06-20T09:00:00.100Z","type":"transition","session_id":"ce13c0f2-1111-4aaa-8bbb-000000000001","pid":4821,"agent":"claude","project":"sb","from":"","to":"working","dur_prev_ms":0,"subagents":0}
+{"ts":"2026-06-20T09:03:00.000Z","type":"session_start","pid":5102,"agent":"claude"}
+{"ts":"2026-06-20T09:03:00.100Z","type":"transition","session_id":"a7f4d201-2222-4ccc-9ddd-000000000002","pid":5102,"agent":"claude","project":"web","from":"","to":"working","dur_prev_ms":0,"subagents":0}
+{"ts":"2026-06-20T09:05:00.000Z","type":"usage_sample","session_id":"ce13c0f2-1111-4aaa-8bbb-000000000001","pid":4821,"agent":"claude","project":"sb","tok_in":4200,"tok_out":1850,"tok_cache_read":920000,"tok_cache_create":15000}
+{"ts":"2026-06-20T09:08:00.000Z","type":"subagent_spawn","session_id":"ce13c0f2-1111-4aaa-8bbb-000000000001","pid":4821,"agent":"claude","project":"sb","tool_use_id":"toolu_abc123","agent_type":"Explore","description":"map the auth code"}
+{"ts":"2026-06-20T09:08:00.100Z","type":"transition","session_id":"ce13c0f2-1111-4aaa-8bbb-000000000001","pid":4821,"agent":"claude","project":"sb","from":"working","to":"delegating","dur_prev_ms":480000,"subagents":1}
+{"ts":"2026-06-20T09:10:00.000Z","type":"transition","session_id":"a7f4d201-2222-4ccc-9ddd-000000000002","pid":5102,"agent":"claude","project":"web","from":"working","to":"idle","dur_prev_ms":420000,"subagents":0}
+{"ts":"2026-06-20T09:12:00.000Z","type":"subagent_stop","session_id":"ce13c0f2-1111-4aaa-8bbb-000000000001","pid":4821,"agent":"claude","project":"sb","tool_use_id":"toolu_abc123","agent_type":"Explore"}
+{"ts":"2026-06-20T09:12:00.100Z","type":"transition","session_id":"ce13c0f2-1111-4aaa-8bbb-000000000001","pid":4821,"agent":"claude","project":"sb","from":"delegating","to":"working","dur_prev_ms":240000,"subagents":0}
+{"ts":"2026-06-20T09:15:00.000Z","type":"transition","session_id":"ce13c0f2-1111-4aaa-8bbb-000000000001","pid":4821,"agent":"claude","project":"sb","from":"working","to":"permission","dur_prev_ms":180000,"subagents":0,"pending":"AskUserQuestion","reason":"tool-name match: AskUserQuestion"}
+{"ts":"2026-06-20T09:16:30.000Z","type":"transition","session_id":"ce13c0f2-1111-4aaa-8bbb-000000000001","pid":4821,"agent":"claude","project":"sb","from":"permission","to":"working","dur_prev_ms":90000,"rule":"case9-approve-toolmatch","subagents":0}
+{"ts":"2026-06-20T09:20:00.000Z","type":"usage_sample","session_id":"ce13c0f2-1111-4aaa-8bbb-000000000001","pid":4821,"agent":"claude","project":"sb","tok_in":3000,"tok_out":1200,"tok_cache_read":500000,"tok_cache_create":8000}
+{"ts":"2026-06-20T09:20:00.100Z","type":"transition","session_id":"ce13c0f2-1111-4aaa-8bbb-000000000001","pid":4821,"agent":"claude","project":"sb","from":"working","to":"idle","dur_prev_ms":240000,"subagents":0}
+{"ts":"2026-06-20T09:25:00.000Z","type":"session_end","session_id":"ce13c0f2-1111-4aaa-8bbb-000000000001","pid":4821,"agent":"claude","project":"sb"}
+{"ts":"2026-06-20T09:30:00.000Z","type":"transition","session_id":"a7f4d201-2222-4ccc-9ddd-000000000002","pid":5102,"agent":"claude","project":"web","from":"idle","to":"working","dur_prev_ms":1200000,"subagents":0}
+{"ts":"2026-06-20T09:35:00.000Z","type":"session_end","session_id":"a7f4d201-2222-4ccc-9ddd-000000000002","pid":5102,"agent":"claude","project":"web"}
+{"ts":"2026-06-20T09:40:00.000Z","type":"session_start","pid":5500,"agent":"codex"}
+{"ts":"2026-06-20T09:40:00.100Z","type":"transition","session_id":"b3e9c7f0-3333-4eee-8fff-000000000003","pid":5500,"agent":"codex","project":"dots","from":"","to":"working","dur_prev_ms":0,"subagents":0}
+{"ts":"2026-06-20T09:42:00.000Z","type":"suspend","session_id":"b3e9c7f0-3333-4eee-8fff-000000000003","pid":5500,"agent":"codex","project":"dots"}
+{"ts":"2026-06-20T09:44:00.000Z","type":"resume","session_id":"b3e9c7f0-3333-4eee-8fff-000000000003","pid":5500,"agent":"codex","project":"dots"}
+{"ts":"2026-06-20T09:46:00.000Z","type":"transition","session_id":"b3e9c7f0-3333-4eee-8fff-000000000003","pid":5500,"agent":"codex","project":"dots","from":"working","to":"idle","dur_prev_ms":120000,"subagents":0}
+{"ts":"2026-06-20T09:48:00.000Z","type":"session_end","session_id":"b3e9c7f0-3333-4eee-8fff-000000000003","pid":5500,"agent":"codex","project":"dots"}

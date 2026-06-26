@@ -1,0 +1,11 @@
+# Compiled binaries
+/switchboard-dashboard
+/.bin/
+
+# Go build/test artifacts
+*.test
+*.out
+
+# Editor/OS cruft
+.DS_Store
+*.swp
