@@ -16,9 +16,10 @@ func main() {
 	port := flag.Int("port", 8080, "HTTP port to listen on")
 	ctl := flag.String("ctl", "switchboard-ctl", "switchboard-ctl binary (resolved via PATH)")
 	dir := flag.String("dir", "", "history dir passed to ctl as --dir; empty uses ctl's own default")
+	plan := flag.String("plan", DefaultPlanPath, "cached OAuth plan-usage file, read read-only for the utilization gauge")
 	flag.Parse()
 
-	srv := &Server{Ctl: *ctl, Dir: *dir}
+	srv := &Server{Ctl: *ctl, Dir: *dir, PlanPath: *plan}
 
 	addr := fmt.Sprintf(":%d", *port)
 	httpServer := &http.Server{
@@ -27,6 +28,6 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	log.Printf("switchboard-dashboard listening on http://localhost%s (ctl=%q dir=%q)", addr, *ctl, *dir)
+	log.Printf("switchboard-dashboard listening on http://localhost%s (ctl=%q dir=%q plan=%q)", addr, *ctl, *dir, *plan)
 	log.Fatal(httpServer.ListenAndServe())
 }
