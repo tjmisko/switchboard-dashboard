@@ -1,0 +1,333 @@
+{
+  "window": "2026-06-26",
+  "lanes": [
+    {
+      "session_id": "ce13c0f2-1111-4aaa-8bbb-000000000001",
+      "pid": 4821,
+      "agent": "claude",
+      "project": "switchboard",
+      "start": "2026-06-26T13:00:00Z",
+      "end": "2026-06-26T14:40:00Z",
+      "intervals": [
+        {
+          "status": "working",
+          "start": "2026-06-26T13:00:00Z",
+          "end": "2026-06-26T13:12:00Z"
+        },
+        {
+          "status": "delegating",
+          "start": "2026-06-26T13:12:00Z",
+          "end": "2026-06-26T13:28:00Z",
+          "subagents": 2
+        },
+        {
+          "status": "working",
+          "start": "2026-06-26T13:28:00Z",
+          "end": "2026-06-26T13:40:00Z"
+        },
+        {
+          "status": "permission",
+          "start": "2026-06-26T13:40:00Z",
+          "end": "2026-06-26T13:44:00Z"
+        },
+        {
+          "status": "working",
+          "start": "2026-06-26T13:44:00Z",
+          "end": "2026-06-26T14:05:00Z",
+          "subagents": 1
+        },
+        {
+          "status": "idle",
+          "start": "2026-06-26T14:05:00Z",
+          "end": "2026-06-26T14:20:00Z"
+        },
+        {
+          "status": "working",
+          "start": "2026-06-26T14:20:00Z",
+          "end": "2026-06-26T14:40:00Z"
+        }
+      ],
+      "labels": [
+        {
+          "label": "switchboard · main",
+          "start": "2026-06-26T13:00:00Z",
+          "end": "2026-06-26T13:25:00Z"
+        },
+        {
+          "label": "switchboard · feat/dashboard-v2",
+          "start": "2026-06-26T13:25:00Z",
+          "end": "2026-06-26T14:40:00Z"
+        }
+      ],
+      "subagents": [
+        {
+          "agent_type": "Explore",
+          "tool_use_id": "toolu_a1",
+          "description": "map the timeline JSON contract",
+          "start": "2026-06-26T13:12:00Z",
+          "end": "2026-06-26T13:21:00Z"
+        },
+        {
+          "agent_type": "general-purpose",
+          "tool_use_id": "toolu_a2",
+          "description": "draft the swimlane SVG renderer",
+          "start": "2026-06-26T13:14:00Z",
+          "end": "2026-06-26T13:28:00Z"
+        },
+        {
+          "agent_type": "general-purpose",
+          "tool_use_id": "toolu_a3",
+          "description": "write handler_test for /api/plan",
+          "start": "2026-06-26T13:46:00Z",
+          "end": "2026-06-26T13:58:00Z"
+        }
+      ],
+      "focus": [
+        {
+          "start": "2026-06-26T13:00:00Z",
+          "end": "2026-06-26T13:12:00Z"
+        },
+        {
+          "start": "2026-06-26T13:28:00Z",
+          "end": "2026-06-26T13:40:00Z"
+        },
+        {
+          "start": "2026-06-26T14:20:00Z",
+          "end": "2026-06-26T14:40:00Z"
+        }
+      ],
+      "cost_usd": 2.18,
+      "tok_in": 38200,
+      "tok_out": 16400,
+      "tok_cache_read": 4200000,
+      "tok_cache_create": 88000
+    },
+    {
+      "session_id": "a7f4d201-2222-4ccc-9ddd-000000000002",
+      "pid": 5102,
+      "agent": "claude",
+      "project": "switchboard-dashboard",
+      "start": "2026-06-26T13:03:00Z",
+      "end": "2026-06-26T14:30:00Z",
+      "intervals": [
+        {
+          "status": "working",
+          "start": "2026-06-26T13:03:00Z",
+          "end": "2026-06-26T13:18:00Z"
+        },
+        {
+          "status": "idle",
+          "start": "2026-06-26T13:18:00Z",
+          "end": "2026-06-26T13:34:00Z"
+        },
+        {
+          "status": "delegating",
+          "start": "2026-06-26T13:34:00Z",
+          "end": "2026-06-26T13:50:00Z",
+          "subagents": 1
+        },
+        {
+          "status": "working",
+          "start": "2026-06-26T13:50:00Z",
+          "end": "2026-06-26T14:30:00Z"
+        }
+      ],
+      "labels": [
+        {
+          "label": "dashboard · feat/dashboard-v2",
+          "start": "2026-06-26T13:03:00Z",
+          "end": "2026-06-26T14:30:00Z"
+        }
+      ],
+      "subagents": [
+        {
+          "agent_type": "frontend-design",
+          "tool_use_id": "toolu_b1",
+          "description": "polish the cost gauge styling",
+          "start": "2026-06-26T13:35:00Z",
+          "end": "2026-06-26T13:49:00Z"
+        }
+      ],
+      "focus": [
+        {
+          "start": "2026-06-26T13:50:00Z",
+          "end": "2026-06-26T14:05:00Z"
+        }
+      ],
+      "cost_usd": 1.05,
+      "tok_in": 21000,
+      "tok_out": 9300,
+      "tok_cache_read": 1800000,
+      "tok_cache_create": 42000
+    },
+    {
+      "session_id": "b3e9c7f0-3333-4eee-8fff-000000000003",
+      "pid": 5500,
+      "agent": "codex",
+      "project": "dots",
+      "start": "2026-06-26T13:40:00Z",
+      "end": "2026-06-26T14:18:00Z",
+      "intervals": [
+        {
+          "status": "working",
+          "start": "2026-06-26T13:40:00Z",
+          "end": "2026-06-26T13:52:00Z"
+        },
+        {
+          "status": "suspended",
+          "start": "2026-06-26T13:52:00Z",
+          "end": "2026-06-26T13:58:00Z"
+        },
+        {
+          "status": "working",
+          "start": "2026-06-26T13:58:00Z",
+          "end": "2026-06-26T14:10:00Z"
+        },
+        {
+          "status": "idle",
+          "start": "2026-06-26T14:10:00Z",
+          "end": "2026-06-26T14:18:00Z"
+        }
+      ],
+      "focus": [
+        {
+          "start": "2026-06-26T13:40:00Z",
+          "end": "2026-06-26T13:52:00Z"
+        }
+      ],
+      "cost_usd": 0.34,
+      "tok_in": 9000,
+      "tok_out": 3200,
+      "tok_cache_read": 410000,
+      "tok_cache_create": 12000
+    },
+    {
+      "session_id": "c4d2e8a9-4444-4fff-9000-000000000004",
+      "pid": 6010,
+      "agent": "claude",
+      "project": "research",
+      "start": "2026-06-26T13:30:00Z",
+      "end": "2026-06-26T14:35:00Z",
+      "intervals": [
+        {
+          "status": "working",
+          "start": "2026-06-26T13:30:00Z",
+          "end": "2026-06-26T13:36:00Z"
+        },
+        {
+          "status": "delegating",
+          "start": "2026-06-26T13:36:00Z",
+          "end": "2026-06-26T14:25:00Z",
+          "subagents": 3
+        },
+        {
+          "status": "working",
+          "start": "2026-06-26T14:25:00Z",
+          "end": "2026-06-26T14:35:00Z"
+        }
+      ],
+      "labels": [
+        {
+          "label": "research · deep-dive",
+          "start": "2026-06-26T13:30:00Z",
+          "end": "2026-06-26T14:35:00Z"
+        }
+      ],
+      "subagents": [
+        {
+          "agent_type": "Explore",
+          "tool_use_id": "toolu_d1",
+          "description": "survey prior art on incremental SVG repaint",
+          "start": "2026-06-26T13:37:00Z",
+          "end": "2026-06-26T13:55:00Z"
+        },
+        {
+          "agent_type": "general-purpose",
+          "tool_use_id": "toolu_d2",
+          "description": "benchmark approach A (full repaint)",
+          "start": "2026-06-26T13:38:00Z",
+          "end": "2026-06-26T14:05:00Z"
+        },
+        {
+          "agent_type": "general-purpose",
+          "tool_use_id": "toolu_d3",
+          "description": "benchmark approach B (diff repaint)",
+          "start": "2026-06-26T13:40:00Z",
+          "end": "2026-06-26T14:10:00Z"
+        },
+        {
+          "agent_type": "claude-code-guide",
+          "tool_use_id": "toolu_d4",
+          "description": "check Agent SDK hook semantics",
+          "start": "2026-06-26T14:06:00Z",
+          "end": "2026-06-26T14:22:00Z"
+        }
+      ],
+      "focus": [
+        {
+          "start": "2026-06-26T13:30:00Z",
+          "end": "2026-06-26T13:36:00Z"
+        }
+      ],
+      "cost_usd": 4.62,
+      "tok_in": 61000,
+      "tok_out": 28000,
+      "tok_cache_read": 7800000,
+      "tok_cache_create": 140000
+    }
+  ],
+  "summary": {
+    "from": "2026-06-26T13:00:00Z",
+    "to": "2026-06-26T14:40:00Z",
+    "sessions": 4,
+    "by_status": {
+      "delegating": 4860000000000,
+      "idle": 2340000000000,
+      "permission": 240000000000,
+      "suspended": 360000000000,
+      "working": 9600000000000
+    },
+    "attention_union": 6000000000000,
+    "attention_per_session": 14460000000000,
+    "attention_fanout": 27420000000000,
+    "prompt_active": 3000000000000,
+    "attended_active": 3360000000000,
+    "delegated_active": 11100000000000,
+    "delegation_effectiveness": 0.7676348547717843
+  },
+  "totals": {
+    "tok_in": 129200,
+    "tok_out": 56900,
+    "tok_cache_read": 14210000,
+    "tok_cache_create": 282000,
+    "subagents": 8,
+    "cost_usd": 8.19
+  },
+  "activity": [
+    {
+      "state": "active",
+      "start": "2026-06-26T13:00:00Z",
+      "end": "2026-06-26T13:46:00Z"
+    },
+    {
+      "state": "idle",
+      "start": "2026-06-26T13:46:00Z",
+      "end": "2026-06-26T14:06:00Z"
+    },
+    {
+      "state": "active",
+      "start": "2026-06-26T14:06:00Z",
+      "end": "2026-06-26T14:40:00Z"
+    }
+  ],
+  "plan_window": {
+    "hours": 5,
+    "from": "2026-06-26T09:40:00Z",
+    "to": "2026-06-26T14:40:00Z",
+    "cost_usd": 8.19,
+    "tok_in": 129200,
+    "tok_out": 56900,
+    "tok_cache_read": 14210000,
+    "tok_cache_create": 282000
+  }
+}
