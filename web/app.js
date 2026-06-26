@@ -398,8 +398,9 @@ function drawLane(lane, i, x, W, haveActivity, activeGlobal) {
 
   const gutter = svgEl("g", { class: "lane-gutter" });
   const main = svgEl("text", { class: "lane-label", x: 10, y: rowTop + 20 });
-  main.textContent = truncate(latest, 30);
-  if (labels.length > 1) {
+  const multi = labels.length > 1;
+  main.textContent = truncate(latest, multi ? 26 : 30); // leave room for the badge
+  if (multi) {
     const badge = svgEl("tspan", { class: "lane-badge", dx: 6 });
     badge.textContent = "•" + labels.length;
     main.appendChild(badge);
