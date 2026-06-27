@@ -157,8 +157,8 @@ main { padding: 16px 18px 36px; }
 .lane-bg { fill: transparent; }
 .lane-bg.odd { fill: rgba(255, 255, 255, 0.014); }
 
-/* operator free-time lane (top row): gold = free, dark red = occupied */
-.op-lane-bg { fill: rgba(212, 175, 55, 0.04); }
+/* operator free-time lane (top row): green = free, dark red = occupied */
+.op-lane-bg { fill: rgba(63, 185, 80, 0.05); }
 .op-bar { stroke: rgba(0, 0, 0, 0.28); stroke-width: 0.5; cursor: default; }
 .op-bar.op-free { fill-opacity: 0.92; }
 .op-bar.op-occupied { fill-opacity: 0.85; }
@@ -192,9 +192,6 @@ main { padding: 16px 18px 36px; }
 
 .focus-overlay { stroke-width: 1.1; stroke-opacity: 0.8; fill-opacity: 1; pointer-events: none; }
 
-/* context-switch markers: dark-red verticals at each focus-arrival instant */
-.ctx-switch { stroke: #8b1a1a; stroke-width: 0.8; stroke-opacity: 0.5; pointer-events: none; }
-.ctx-switch-count { fill: #b32424; font-family: var(--mono); font-size: 10px; font-weight: 600; }
 
 .subagent-bar { stroke: rgba(0, 0, 0, 0.3); stroke-width: 0.4; cursor: pointer; }
 .subagent-bar:hover { stroke: #fff; stroke-width: 1; }

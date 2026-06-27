@@ -114,5 +114,24 @@
     return (lanes || []).map(buildBar);
   }
 
-  return { laneIdentity, leadLabel, nameSegments, buildBar, buildBars };
+  // spanInefficiency: fraction of [segStartMs, segEndMs] (epoch ms) during which
+  // the session was idle or waiting (status in idle/dormant/suspended) rather than
+  // working. The denominator is the FULL span duration. Returns null when the span
+  // is non-positive. Pure: reads only lane.intervals (each {status, start, end}
+  // with RFC3339 start/end).
+  function spanInefficiency(lane, segStartMs, segEndMs) {
+    const dur = segEndMs - segStartMs;
+    if (!(dur > 0)) return null;
+    const WAITING = new Set(["idle", "dormant", "suspended"]);
+    let waited = 0;
+    for (const iv of (lane.intervals || [])) {
+      if (!WAITING.has(iv.status)) continue;
+      const s = Math.max(segStartMs, Date.parse(iv.start));
+      const e = Math.min(segEndMs, Date.parse(iv.end));
+      if (e > s) waited += e - s;
+    }
+    return waited / dur;
+  }
+
+  return { laneIdentity, leadLabel, nameSegments, buildBar, buildBars, spanInefficiency };
 });

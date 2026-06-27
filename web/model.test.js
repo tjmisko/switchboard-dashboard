@@ -7,7 +7,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { laneIdentity, leadLabel, nameSegments, buildBars } = require("./model.js");
+const { laneIdentity, leadLabel, nameSegments, buildBars, spanInefficiency } = require("./model.js");
 
 // ms helper: a fixed base instant + offset minutes, as RFC3339 with offset.
 const BASE = "2026-06-26T17:00:00-07:00";
@@ -132,4 +132,39 @@ test("no leading lead segment when the first /name starts at lane.start", () => 
   assert.equal(segs.length, 1);
   assert.equal(segs[0].kind, "name");
   assert.equal(segs[0].label, "n");
+});
+
+// interval helper: an {status, start, end} run in epoch-ms bounds.
+function interval(status, fromMs, toMs) {
+  return { status, start: new Date(fromMs).toISOString(), end: new Date(toMs).toISOString() };
+}
+
+test("spanInefficiency returns 0.5 when the span is exactly half idle/waiting", () => {
+  const segStart = baseMs;
+  const segEnd = baseMs + 60000; // 60s span
+  const lane = {
+    intervals: [
+      interval("active", segStart, segStart + 30000),
+      interval("idle", segStart + 30000, segEnd),
+    ],
+  };
+  assert.equal(spanInefficiency(lane, segStart, segEnd), 0.5);
+});
+
+test("spanInefficiency returns 0 when the span is fully working with no waiting status", () => {
+  const segStart = baseMs;
+  const segEnd = baseMs + 60000;
+  const lane = {
+    intervals: [
+      interval("active", segStart, segStart + 30000),
+      interval("active", segStart + 30000, segEnd),
+    ],
+  };
+  assert.equal(spanInefficiency(lane, segStart, segEnd), 0);
+});
+
+test("spanInefficiency returns null when the span has zero length", () => {
+  const at0 = baseMs;
+  const lane = { intervals: [interval("idle", at0 - 1000, at0 + 1000)] };
+  assert.equal(spanInefficiency(lane, at0, at0), null);
 });
