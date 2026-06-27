@@ -21,6 +21,17 @@ const SVGNS = "http://www.w3.org/2000/svg";
 const POLL_MS = 3000;       // /api/timeline poll cadence
 const PLAN_POLL_MS = 15000; // /api/plan poll cadence (changes slowly)
 
+// Operator lane colors: green marks "free" time (≥1 agent running while you were
+// neither typing into an agent nor recovering from a context switch — you're a
+// "free agent"); dark red marks "occupied" time. A context switch occupies you
+// for OP_SWITCH_RECOVERY_MS going forward — clustered switches merge, so thrash
+// extends the cost without double-counting. Mirrors the effective-added-time
+// accounting (the topline "effective day" figure).
+const OP_FREE_COLOR = "#3fb950";      // green — free time ("free agent")
+const OP_OCCUPIED_COLOR = "#8c4a4c";  // muted dusty red — occupied (typing or switching)
+const OP_SWITCH_RECOVERY_MS = 90000;  // 90s of occupied time after each switch
+const OP_MIN_ENGAGE_MS = 15000;       // ignore focus spans under 15s — brief glances aren't real editing/switches
+
 // Status -> color. working solid green; delegating faded green; idle yellow;
 // permission red; suspended grey; "" (unknown) dim. Mirrors style.css vars.
 const STATUS_COLORS = {
@@ -40,6 +51,18 @@ const FOCUS_STROKE = "#58a6ff";
 // Fixed render order for the status key. "" renders last, labelled "unknown".
 // delegating is superseded by dormant; if it ever appears it shows via the extra path.
 const STATUS_ORDER = ["working", "dormant", "idle", "permission", "suspended", ""];
+
+// STATUS_MEANING: one-line plain-language gloss per status, surfaced in the
+// status-key hover descriptors so the legend explains itself.
+const STATUS_MEANING = {
+  working: "An agent was actively producing work.",
+  dormant: "A parent agent was waiting on a subagent.",
+  idle: "A session was alive but doing nothing.",
+  permission: "Blocked waiting for your approval.",
+  suspended: "A session was paused/backgrounded.",
+  "": "Status not reported.",
+  delegating: "Legacy: parent delegating to a subagent.",
+};
 
 function statusLabel(s) { return s === "" ? "unknown" : s; }
 function statusColor(s) {
@@ -65,6 +88,23 @@ function humanDuration(ns) {
   return parts.join(" ");
 }
 function humanDurationMs(ms) { return humanDuration(ms * 1e6); }
+
+// humanDurationCoarse renders a duration WITHOUT seconds — for the topline and
+// other headline figures where second-level precision is just noise. Rounds to
+// the nearest minute; sub-minute durations read "<1m".
+function humanDurationCoarse(ns) {
+  if (ns == null) return "—";
+  if (ns <= 0) return "0m";
+  const totalMin = Math.round(ns / 60e9);
+  if (totalMin < 1) return "<1m";
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin - h * 60;
+  const parts = [];
+  if (h) parts.push(h + "h");
+  if (m || !h) parts.push(m + "m");
+  return parts.join(" ");
+}
+function humanDurationCoarseMs(ms) { return humanDurationCoarse(ms * 1e6); }
 
 function humanCount(n) {
   if (n == null) return "0";
@@ -145,6 +185,25 @@ function intersectMs(A, B) {
   }
   return unionMs(out);
 }
+// subtractMs returns A minus B. Both are treated as unioned (sorted, disjoint)
+// via unionMs; the result is the parts of A not covered by any interval of B.
+function subtractMs(A, B) {
+  const a = unionMs(A), b = unionMs(B);
+  if (!b.length) return a;
+  const out = [];
+  for (let [s, e] of a) {
+    let cur = s;
+    for (const [bs, be] of b) {
+      if (be <= cur) continue;
+      if (bs >= e) break;
+      if (bs > cur) out.push([cur, Math.min(bs, e)]);
+      cur = Math.max(cur, be);
+      if (cur >= e) break;
+    }
+    if (cur < e) out.push([cur, e]);
+  }
+  return out;
+}
 
 // ---------------------------------------------------------------------------
 // DOM refs
@@ -170,6 +229,7 @@ const el = {
   popout: document.getElementById("popout"),
   cardAttention: document.getElementById("card-attention"),
   cardCost: document.getElementById("card-cost"),
+  optCtxSwitches: document.getElementById("opt-ctx-switches"),
 };
 
 // ---------------------------------------------------------------------------
@@ -266,6 +326,108 @@ function setDot(kind) {
 }
 
 // ---------------------------------------------------------------------------
+// operator free-time (derived from focus / context switches)
+// ---------------------------------------------------------------------------
+
+// computeOperatorTime partitions the running window into the operator's
+// "occupied" vs "free" intervals:
+//   running   = union over lanes of running-status intervals (≥1 agent working)
+//   typing    = focus ∩ activity-active (you were at the keyboard on an agent)
+//   ctxRecov  = ⋃ [switch, switch + 90s] over every context switch (focus
+//               arrivals after the first) — clustered switches merge
+//   occupied  = (typing ∪ ctxRecov) ∩ running
+//   free      = running MINUS (typing ∪ ctxRecov)
+// "free time" is the headline: time you actually had while the agents ran and
+// you were neither typing nor recovering from a switch. Degrades when focus or
+// activity are absent (no activity → any focus counts as typing).
+//
+// NOTE: the displayed context-switch COUNT (and the ctx-switch overlay) is
+// deliberately decoupled from the time math — it counts EVERY focus arrival,
+// unfiltered by OP_MIN_ENGAGE_MS, while typing/recovery/free stay on the ≥15s set.
+const RUNNING_STATUSES = new Set(["working", "delegating", "dormant"]);
+
+// MIN_SESSION_MS: sessions shorter than a minute aren't rendered anywhere.
+const MIN_SESSION_MS = 60000;
+
+// renderableLanes drops sub-minute sessions — too brief to be worth a row. Lanes
+// with unparseable bounds are kept (don't hide what we can't measure). Applied
+// everywhere lanes are rendered (timeline, operator calc, cost list) so a
+// sub-minute session is excluded consistently.
+function renderableLanes(lanes) {
+  return (lanes || []).filter((lane) => {
+    const s = Date.parse(lane.start), e = Date.parse(lane.end);
+    if (!isFinite(s) || !isFinite(e)) return true;
+    return e - s >= MIN_SESSION_MS;
+  });
+}
+
+function computeOperatorTime(data) {
+  const lanes = renderableLanes((data && data.lanes) || []);
+  // Two focus-arrival sets, deliberately decoupled:
+  //   allFocusStarts — EVERY parseable focus span start, no duration gate. Drives
+  //     the displayed switch COUNT and the ctx-switch overlay (every real arrival
+  //     is a context switch, however brief).
+  //   focusStarts/focusPairs — only spans ≥ OP_MIN_ENGAGE_MS. Drives the TIME math
+  //     (typing / recovery / free); sub-15s glances aren't real editing.
+  const runPairs = [], focusPairs = [], focusStarts = [], allFocusStarts = [];
+  for (const lane of lanes) {
+    for (const iv of lane.intervals || []) {
+      if (!RUNNING_STATUSES.has(iv.status)) continue;
+      const s = Date.parse(iv.start), e = Date.parse(iv.end);
+      if (isFinite(s) && isFinite(e) && e > s) runPairs.push([s, e]);
+    }
+    for (const f of lane.focus || []) {
+      const s = Date.parse(f.start), e = Date.parse(f.end);
+      if (!(isFinite(s) && isFinite(e) && e > s)) continue;
+      allFocusStarts.push(s); // count/overlay: unfiltered
+      // time math only: ignore "little" focus spans under OP_MIN_ENGAGE_MS — brief
+      // glances aren't real editing, so they don't occupy free time.
+      if (e - s >= OP_MIN_ENGAGE_MS) { focusPairs.push([s, e]); focusStarts.push(s); }
+    }
+  }
+  const running = unionMs(runPairs);
+  const engaged = unionMs(focusPairs);
+
+  // Context-switch recovery (TIME): every ≥15s focus arrival after the first
+  // occupies you 90s forward; clustered switches merge via union, so thrash
+  // lengthens the interval without ever double-counting the cost. Recovery stays
+  // on the ≥15s set — a sub-second glance doesn't cost you 90 seconds of focus.
+  focusStarts.sort((a, b) => a - b);
+  const recoveryStarts = focusStarts.slice(1);
+  const ctxRecovery = unionMs(recoveryStarts.map((t) => [t, t + OP_SWITCH_RECOVERY_MS]));
+
+  // Active typing: focused on an agent while globally active (at the keyboard).
+  // Without an activity stream, treat any focus as typing.
+  const active = unionMs(spansToMs((data.activity || []).filter((a) => a.state === "active")));
+  const typing = active.length ? intersectMs(engaged, active) : engaged;
+
+  const occupiedAll = unionMs([...ctxRecovery, ...typing]);
+  const occupied = intersectMs(occupiedAll, running); // drawn only while agents run
+  const free = subtractMs(running, occupiedAll);
+
+  const sum = (pairs) => pairs.reduce((a, [s, e]) => a + (e - s), 0);
+  const runningMs = sum(running);
+  const freeMs = sum(free);
+
+  // Displayed COUNT + overlay = ALL focus arrivals after the first, UNFILTERED by
+  // OP_MIN_ENGAGE_MS. (Decision per handoff T16: count/overlay show every real
+  // arrival; only the time-lost recovery above is gated to the ≥15s set.) Median
+  // focus span is ~1.2s, so the 15s gate would otherwise drop ~85% of switches.
+  allFocusStarts.sort((a, b) => a - b);
+  const switchTimes = allFocusStarts.slice(1);
+  const switches = Math.max(0, allFocusStarts.length - 1);
+  return {
+    running, occupied, free,
+    runningMs, freeMs,
+    occupiedMs: sum(occupied),
+    switches,
+    switchTimes,
+    lostMs: sum(intersectMs(ctxRecovery, running)),
+    freeFrac: runningMs > 0 ? freeMs / runningMs : null,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // render: top-level
 // ---------------------------------------------------------------------------
 
@@ -274,18 +436,51 @@ function render(data) {
   renderTopline(data.summary || {});
   renderStatusKey(data.summary || {});
   renderTimeline(data);
-  renderAttentionCard(data.summary || {});
+  renderAttentionCard(data.summary || {}, computeOperatorTime(data));
   renderCostCard(data, lastPlan);
 }
 
-// renderTopline: the dominant hours figure, pulled out of the attention card to
-// sit top-left. Uses fanout (C) — total agent compute, parallelism counted.
+// renderTopline: two dominant figures framing AI's payoff.
+//   additional time (headline) = the EXTRA output-time AI bought you, where
+//     extra = agent-hours (fanout, parallelism counted) − the wall-clock you
+//     actually spent with ≥1 agent active (union). The subtitle frames it as an
+//     extended day — "as if a 27h day" (24h + extra).
+//   force multiplier = fanout ÷ union — the average number of "you"s working
+//     during active time (≈3 agents in parallel → 3×), assuming you're equally
+//     effective with or without the AI.
 function renderTopline(summary) {
+  const fanout = summary.attention_fanout || 0; // agent-hours, parallelism counted (ns)
+  const union = summary.attention_union || 0;   // wall-clock with ≥1 agent active (ns)
+  const extra = Math.max(0, fanout - union);
+  const DAY = 24 * 3600 * 1e9;                   // ns in a 24h day
+  const mult = union > 0 ? fanout / union : null;
+  // headline figures read WITHOUT seconds (coarse) — second-level precision is noise here.
+  const extraStr = humanDurationCoarse(extra);
+  const dayStr = humanDurationCoarse(DAY + extra);
+  const multStr = mult == null ? "—" : mult.toFixed(1) + "×";
+  const gainedTip = formulaTipHTML({
+    title: "effective time gained",
+    formula: "agent-hours (fanout) − active wall-clock (union)",
+    result: "+" + extraStr,
+    why: `Extra output-time the agents bought you beyond the wall-clock you actually spent — as if your day ran ${dayStr} long.`,
+    color: "var(--c-working)",
+  });
+  const multTip = formulaTipHTML({
+    title: "force multiplier",
+    formula: "fanout ÷ union",
+    result: multStr,
+    why: "Average number of parallel sessions running during active time — how many 'you's were working at once.",
+  });
   el.topline.innerHTML = `
-    <div class="th-block">
-      <div class="th-val green">${humanDuration(summary.attention_fanout)}</div>
-      <div class="th-key">agent hours · fanout (C)</div>
+    <div class="th-block has-tip" data-tip="${escapeHTML(gainedTip)}">
+      <div class="th-val green">+${extraStr}</div>
+      <div class="th-key">effective time gained ~ ${dayStr} day</div>
+    </div>
+    <div class="th-block has-tip" data-tip="${escapeHTML(multTip)}">
+      <div class="th-val">${multStr}</div>
+      <div class="th-key">force multiplier · over ${humanDurationCoarse(union)} active</div>
     </div>`;
+  attachFormulaTips(el.topline);
 }
 
 // renderStatusKey: the time-by-status list doubles as the swimlane legend; show
@@ -298,7 +493,14 @@ function renderStatusKey(summary) {
   el.statusKey.innerHTML = keys.map((k) => {
     const op = k === "delegating" ? DELEGATING_OPACITY : k === "dormant" ? DORMANT_OPACITY : 1;
     const swatchStyle = `background:${statusColor(k)}` + (op !== 1 ? `;opacity:${op}` : "");
-    return `<span class="sk" title="${escapeHTML(statusLabel(k))}">
+    const tip = formulaTipHTML({
+      title: statusLabel(k),
+      formula: `Σ time in '${statusLabel(k)}' across all sessions`,
+      result: humanDuration(byStatus[k] || 0),
+      why: STATUS_MEANING[k] || "",
+      color: statusColor(k),
+    });
+    return `<span class="sk has-tip" data-tip="${escapeHTML(tip)}">
         <span class="sk-left">
           <span class="swatch" style="${swatchStyle}"></span>
           <span class="sk-name">${statusLabel(k)}</span>
@@ -306,6 +508,7 @@ function renderStatusKey(summary) {
         <span class="sk-val">${humanDuration(byStatus[k] || 0)}</span>
       </span>`;
   }).join("");
+  attachFormulaTips(el.statusKey);
 }
 
 // ---------------------------------------------------------------------------
@@ -322,11 +525,15 @@ function svgEl(name, attrs) {
 // stacked directly on the status bar, with the subagent strip reserved only
 // when the session actually delegated — so parallel sessions pack tightly.
 const GEO = {
-  GUTTER: 232, RIGHT: 20, AXIS_Y: 16, PLOT_TOP: 26,
-  PAD_TOP: 4, NAME_H: 13, BAR_H: 15, GAP: 3, PAD_BOTTOM: 6,
-  SUB_ROW_H: 4, SUB_GAP: 2, SUB_ROWS: 2,
-  GROUP_HEAD_H: 24,
-  NAME_MIN_W: 26, // hide a span's text below this px width (tooltip still shows it)
+  GUTTER: 232, RIGHT: 20, AXIS_Y: 17, PLOT_TOP: 28,
+  PAD_TOP: 4, NAME_H: 17, BAR_H: 24, GAP: 3, PAD_BOTTOM: 4,
+  SUB_ROW_H: 5, SUB_GAP: 2, SUB_ROWS: 2,
+  GROUP_HEAD_H: 26,
+  NAME_MIN_W: 28,   // hide a span's name text below this px width (tooltip still shows it)
+  IDENT_MIN_W: 64,  // show the in-span "agent · pid" identity only above this span width
+  IDENT_BOTH_W: 150,// also show the cost (right-aligned) only above this span width
+  OP_LANE_H: 52, OP_BAR_H: 20, // operator free-time lane (sits above the groups)
+  PX_PER_HOUR: 240, // min horizontal density → long windows scroll (see plotW)
 };
 
 // laneHeight is the compact vertical footprint of one session bar: name band +
@@ -338,8 +545,17 @@ function laneHeight(lane) {
   return h;
 }
 
+// rowHeight is the footprint of a PACKED row (one or more time-serializable
+// sessions): the tallest laneHeight over the row's sessions, so the subagent
+// strip is reserved exactly when some session on the row delegated.
+function rowHeight(laneList) {
+  let h = GEO.PAD_TOP + GEO.NAME_H + GEO.BAR_H + GEO.PAD_BOTTOM;
+  for (const lane of laneList) h = Math.max(h, laneHeight(lane));
+  return h;
+}
+
 function renderTimeline(data) {
-  const lanes = data.lanes || [];
+  const lanes = renderableLanes(data.lanes);
   // keep <defs> (first child), drop the rest
   while (el.svg.childNodes.length > 1) el.svg.removeChild(el.svg.lastChild);
   hideTip();
@@ -365,23 +581,41 @@ function renderTimeline(data) {
   }
   const span = t1 - t0;
 
-  const W = Math.max(620, el.wrap.clientWidth);
-  const plotW = Math.max(160, W - GEO.GUTTER - GEO.RIGHT);
+  // Horizontal scroll: the plot keeps a minimum density (px per hour) so long
+  // windows grow WIDER than the viewport and scroll horizontally (the wrap has
+  // overflow-x:auto), instead of squishing a whole day into the visible width.
+  const containerW = Math.max(620, el.wrap.clientWidth);
+  const fitPlotW = Math.max(160, containerW - GEO.GUTTER - GEO.RIGHT);
+  const minPlotW = (span / 3600e3) * GEO.PX_PER_HOUR;
+  const plotW = Math.max(fitPlotW, minPlotW);
+  const W = GEO.GUTTER + plotW + GEO.RIGHT;
 
-  // group lanes by project; lay out a header per group, then its lanes, top-down
+  // operator free-time lane occupies the top row, above all project groups.
+  const opTop = GEO.PLOT_TOP;
+  const op = computeOperatorTime(data);
+
+  // group lanes by project; within each group, PACK time-serializable sessions
+  // onto shared rows (greedy interval partitioning). Lay out a header per group,
+  // then one stacked row per packed row, top-down. Each row reserves the height of
+  // its tallest session (subagent strip included only when a session on the row
+  // delegated). The idx%2 background alternation runs per ROW across all groups.
   const groups = groupByProject(lanes);
-  let yCursor = GEO.PLOT_TOP;
-  let laneIdx = 0;
+  let yCursor = GEO.PLOT_TOP + GEO.OP_LANE_H;
+  let rowIdx = 0;
   for (const g of groups) {
     g.headY = yCursor;
     yCursor += GEO.GROUP_HEAD_H;
-    for (const lane of g.lanes) {
-      lane._top = yCursor;
-      lane._idx = laneIdx++;
-      lane._firstInGroup = lane === g.lanes[0];
-      lane._height = laneHeight(lane);
-      yCursor += lane._height;
-    }
+    g.rows = packLanes(g.lanes).map((laneList, i) => {
+      const row = {
+        lanes: laneList,
+        top: yCursor,
+        height: rowHeight(laneList),
+        idx: rowIdx++,
+        firstInGroup: i === 0,
+      };
+      yCursor += row.height;
+      return row;
+    });
   }
   const plotBottom = yCursor;
   const H = plotBottom + 14;
@@ -410,8 +644,8 @@ function renderTimeline(data) {
     }));
   }
 
-  // axis gridlines + labels
-  const { ticks, step } = axisTicks(t0, t1);
+  // axis gridlines + labels (tick density scales with the scrollable plot width)
+  const { ticks, step } = axisTicks(t0, t1, plotW);
   const showDate = step >= 24 * 3600e3;
   for (const t of ticks) {
     const px = x(t);
@@ -430,33 +664,24 @@ function renderTimeline(data) {
     const ry = g.headY + GEO.GROUP_HEAD_H - 7;
     el.svg.appendChild(svgEl("line", { class: "group-rule", x1: 0, y1: ry, x2: W, y2: ry }));
     const gl = svgEl("text", { class: "group-label", x: 10, y: g.headY + 16 });
-    gl.textContent = (g.project + " · " + g.lanes.length).toUpperCase();
+    gl.textContent = ((g.projectFull || g.project) + " · " + g.lanes.length).toUpperCase();
     el.svg.appendChild(gl);
   }
 
-  for (const g of groups) for (const lane of g.lanes) {
-    drawLane(lane, lane._top, lane._idx, x, W, haveActivity, activeGlobal);
-  }
+  drawOperatorLane(op, opTop, x, W);
 
-  // context switches: each time window focus arrives at a different agent session
-  // (the start of every focus span after the first). Drawn as dark-red verticals
-  // across the whole plot — dense bands read as thrash.
-  const focusStarts = [];
-  for (const lane of lanes) for (const f of (lane.focus || [])) {
-    const s = Date.parse(f.start);
-    if (isFinite(s)) focusStarts.push(s);
+  for (const g of groups) for (const row of g.rows) {
+    drawRow(row, x, W, haveActivity, activeGlobal);
   }
-  focusStarts.sort((a, b) => a - b);
-  const switches = focusStarts.slice(1); // the first arrival is not a switch
-  for (const t of switches) {
-    el.svg.appendChild(svgEl("line", {
-      class: "ctx-switch", x1: x(t), y1: GEO.PLOT_TOP, x2: x(t), y2: plotBottom,
-    }));
-  }
-  if (switches.length) {
-    const lbl = svgEl("text", { class: "ctx-switch-count", x: W - GEO.RIGHT, y: GEO.AXIS_Y, "text-anchor": "end" });
-    lbl.textContent = switches.length + " context switches";
-    el.svg.appendChild(lbl);
+  // context switches (optional, off by default): red verticals at each real
+  // (≥15s-engaged) switch — toggled via the "show context switches" chart option.
+  // The operator lane already carries the switch cost; this is an opt-in overlay.
+  if (el.optCtxSwitches && el.optCtxSwitches.checked) {
+    for (const t of op.switchTimes) {
+      el.svg.appendChild(svgEl("line", {
+        class: "ctx-switch", x1: x(t), y1: GEO.PLOT_TOP, x2: x(t), y2: plotBottom,
+      }));
+    }
   }
 }
 
@@ -474,36 +699,74 @@ function groupByProject(lanes) {
     if (an !== bn) return an ? 1 : -1;
     return a.localeCompare(b);
   });
-  return keys.map((k) => ({ project: k, lanes: map.get(k) }));
+  return keys.map((k) => {
+    const groupLanes = map.get(k);
+    // prefer the pretty full project name (project_full) over the abbreviation
+    const full = groupLanes.map((l) => l.project_full).find(Boolean);
+    return { project: k, projectFull: full || k, lanes: groupLanes };
+  });
 }
 
-function drawLane(lane, rowTop, idx, x, W, haveActivity, activeGlobal) {
-  const height = lane._height;
+// drawOperatorLane renders the top "operator" swimlane: gold = free time, dark
+// red = occupied (you were typing into an agent, or within 90s of a context
+// switch). The two partition the running window.
+function drawOperatorLane(op, rowTop, x, W) {
+  const barY = rowTop + Math.round((GEO.OP_LANE_H - GEO.OP_BAR_H) / 2);
+
+  el.svg.appendChild(svgEl("rect", { class: "lane-bg op-lane-bg", x: 0, y: rowTop, width: W, height: GEO.OP_LANE_H }));
+  // rule along the bottom edge, separating the operator lane from the groups
+  el.svg.appendChild(svgEl("line", { class: "group-rule", x1: 0, y1: rowTop + GEO.OP_LANE_H, x2: W, y2: rowTop + GEO.OP_LANE_H }));
+
+  // gutter identity + headline free figure
+  const gutter = svgEl("g", { class: "lane-gutter" });
+  const main = svgEl("text", { class: "lane-label", x: 10, y: rowTop + 19 });
+  main.textContent = "operator";
+  const pct = op.freeFrac == null ? "" : ` · ${Math.round(op.freeFrac * 100)}% of run`;
+  const sub = svgEl("text", { class: "lane-sub", x: 10, y: rowTop + 35 });
+  sub.textContent = `free ${humanDurationMs(op.freeMs)}${pct}`;
+  gutter.appendChild(main); gutter.appendChild(sub);
+  attachTip(gutter, () => operatorTipHTML(op));
+  el.svg.appendChild(gutter);
+
+  // free (gold) then occupied (dark red, drawn on top); disjoint within running
+  for (const [s, e] of op.free) {
+    const bx = x(s), bw = Math.max(1, x(e) - bx);
+    const r = svgEl("rect", { class: "op-bar op-free", x: bx, y: barY, width: bw, height: GEO.OP_BAR_H, rx: 2, fill: OP_FREE_COLOR });
+    attachTip(r, () => opSegTipHTML("free", s, e));
+    el.svg.appendChild(r);
+  }
+  for (const [s, e] of op.occupied) {
+    const bx = x(s), bw = Math.max(1, x(e) - bx);
+    const r = svgEl("rect", { class: "op-bar op-occupied", x: bx, y: barY, width: bw, height: GEO.OP_BAR_H, rx: 2, fill: OP_OCCUPIED_COLOR });
+    attachTip(r, () => opSegTipHTML("occupied", s, e));
+    el.svg.appendChild(r);
+  }
+}
+
+// drawRow draws one PACKED row: a single full-width background + separator, then
+// every time-serializable session on the row at its own x-range. The gutter no
+// longer carries per-session identity (a packed row can hold several sessions) —
+// identity moved into each span (see drawSession / drawSpanIdentity).
+function drawRow(row, x, W, haveActivity, activeGlobal) {
+  const rowTop = row.top;
+
+  // row background (subtle alternation per ROW) + separator (group header rules the top edge)
+  el.svg.appendChild(svgEl("rect", {
+    class: row.idx % 2 ? "lane-bg odd" : "lane-bg", x: 0, y: rowTop, width: W, height: row.height,
+  }));
+  if (!row.firstInGroup) el.svg.appendChild(svgEl("line", { class: "lane-sep", x1: 0, y1: rowTop, x2: W, y2: rowTop }));
+
+  for (const lane of row.lanes) drawSession(lane, rowTop, x, haveActivity, activeGlobal);
+}
+
+// drawSession draws ONE session at its own x-range (its lifespan) on a packed
+// row: the name-span band, the in-span identity overlay, the status bars, the
+// focus overlay, and the subagent sub-bars. Multiple non-overlapping sessions can
+// share a row, so this never paints a full-width background (drawRow owns that).
+function drawSession(lane, rowTop, x, haveActivity, activeGlobal) {
   const nameY = rowTop + GEO.PAD_TOP;
   const barY = nameY + GEO.NAME_H;
   const subTop = barY + GEO.BAR_H + GEO.GAP;
-
-  // lane row background (subtle alternation) + separator (group header rules the top edge)
-  el.svg.appendChild(svgEl("rect", {
-    class: idx % 2 ? "lane-bg odd" : "lane-bg", x: 0, y: rowTop, width: W, height,
-  }));
-  if (!lane._firstInGroup) el.svg.appendChild(svgEl("line", { class: "lane-sep", x1: 0, y1: rowTop, x2: W, y2: rowTop }));
-
-  // ---- gutter: STABLE session identity (never the name, so a /name rename
-  // can't re-label or split the row) ----
-  const idMain = `pid ${lane.pid}` + (lane.agent ? " · " + lane.agent : "");
-  const idBits = [];
-  if (lane.session_id) idBits.push(lane.session_id.slice(0, 8));
-  if (lane.cost_usd != null) idBits.push(fmtUSD(lane.cost_usd));
-  const gutter = svgEl("g", { class: "lane-gutter" });
-  gutter.setAttribute("data-session", laneIdentity(lane)); // bars are keyed by identity, not name
-  const main = svgEl("text", { class: "lane-label", x: 10, y: rowTop + 15 });
-  main.textContent = truncate(idMain, 32);
-  const sub = svgEl("text", { class: "lane-sub", x: 10, y: rowTop + 29 });
-  sub.textContent = truncate(idBits.join(" · "), 34);
-  gutter.appendChild(main); gutter.appendChild(sub);
-  attachGutterTip(gutter, lane, currentName(lane));
-  el.svg.appendChild(gutter);
 
   // ---- name-span band: each /name slug labels the stretch it was active; the
   // leading pre-/name stretch falls back to project_full/project (see model.js). ----
@@ -513,13 +776,14 @@ function drawLane(lane, rowTop, idx, x, W, haveActivity, activeGlobal) {
     const bg = svgEl("rect", {
       class: "name-seg" + (isLead ? " lead" : ""), x: sx, y: nameY, width: sw, height: GEO.NAME_H, rx: 1,
     });
-    attachTip(bg, () => nameSegTipHTML(seg));
+    bg.setAttribute("data-session", laneIdentity(lane)); // bars are keyed by identity, not name
+    attachTip(bg, () => nameSegTipHTML(lane, seg));
     el.svg.appendChild(bg);
     // a dashed divider marks each rename boundary (skip the redundant left edge)
     if (i > 0) el.svg.appendChild(svgEl("line", { class: "name-div", x1: sx, y1: nameY, x2: sx, y2: barY + GEO.BAR_H }));
     if (sw >= GEO.NAME_MIN_W && seg.label) {
-      const t = svgEl("text", { class: "name-seg-label" + (isLead ? " lead" : ""), x: sx + 4, y: nameY + 9.5 });
-      t.textContent = truncate(seg.label, Math.max(1, Math.floor((sw - 6) / 6.1)));
+      const t = svgEl("text", { class: "name-seg-label" + (isLead ? " lead" : ""), x: sx + 4, y: nameY + 12.5 });
+      t.textContent = truncate(seg.label, Math.max(1, Math.floor((sw - 6) / 7.5)));
       el.svg.appendChild(t);
     }
   });
@@ -554,6 +818,9 @@ function drawLane(lane, rowTop, idx, x, W, haveActivity, activeGlobal) {
     }
   }
 
+  // ---- in-span identity (agent · pid left, cost right), drawn on top of the bar ----
+  drawSpanIdentity(lane, x, barY);
+
   // ---- subagent sub-bars (packed into rows by overlap) ----
   const subs = (lane.subagents || [])
     .map((sa) => ({ ...sa, s: Date.parse(sa.start), e: Date.parse(sa.end) }))
@@ -572,6 +839,40 @@ function drawLane(lane, rowTop, idx, x, W, haveActivity, activeGlobal) {
     attachTip(bar, () => subagentTipHTML(sa));
     bar.addEventListener("click", (ev) => { ev.stopPropagation(); pinPopout(subagentPopoutHTML(sa), ev); });
     el.svg.appendChild(bar);
+  }
+}
+
+// drawSpanIdentity renders the session's stable identity INSIDE its span (the
+// gutter no longer carries it now that a row can hold several sessions): the
+// "agent · pid" tag pinned to the left edge of the status bar and the cost pinned
+// to the right. pid is shown here on purpose. The labels are dark-halo'd overlays
+// drawn on top of the bar (legible over any status color); each carries the full
+// identity + name history on hover. They hide on spans too narrow to read — but
+// the full identity always stays reachable via the name-span hover tooltip, which
+// spans the whole session (see nameSegTipHTML).
+function drawSpanIdentity(lane, x, barY) {
+  const sStart = x(Date.parse(lane.start));
+  const spanW = Math.max(1, x(Date.parse(lane.end)) - sStart);
+  if (spanW < GEO.IDENT_MIN_W) return;
+  const y = barY + GEO.BAR_H / 2 + 3.5; // vertically centered on the status bar
+
+  const costText = lane.cost_usd != null ? fmtUSD(lane.cost_usd) : "";
+  const showCost = costText && spanW >= GEO.IDENT_BOTH_W;
+  const costW = showCost ? costText.length * 6.6 + 10 : 0;
+
+  const idText = [lane.agent, lane.pid != null ? "pid " + lane.pid : null].filter(Boolean).join(" · ");
+  const avail = spanW - 10 - costW;
+  if (idText && avail > 16) {
+    const t = svgEl("text", { class: "span-ident", x: sStart + 5, y });
+    t.textContent = truncate(idText, Math.max(1, Math.floor(avail / 6.6)));
+    attachTip(t, () => gutterTipHTML(lane, currentName(lane)));
+    el.svg.appendChild(t);
+  }
+  if (showCost) {
+    const t = svgEl("text", { class: "span-ident span-cost", x: sStart + spanW - 5, y, "text-anchor": "end" });
+    t.textContent = costText;
+    attachTip(t, () => gutterTipHTML(lane, currentName(lane)));
+    el.svg.appendChild(t);
   }
 }
 
@@ -594,12 +895,14 @@ function currentName(lane) {
 }
 function truncate(s, n) { return s && s.length > n ? s.slice(0, n - 1) + "…" : s; }
 
-function axisTicks(t0, t1) {
+function axisTicks(t0, t1, plotW) {
   const span = t1 - t0;
   const M = 60e3, Hr = 3600e3, D = 24 * Hr;
   const steps = [M, 2 * M, 5 * M, 10 * M, 15 * M, 30 * M, Hr, 2 * Hr, 3 * Hr, 6 * Hr, 12 * Hr, D, 2 * D, 7 * D];
+  // aim for a label roughly every ~150px so a wide, scrolled plot stays legible
+  const target = Math.max(4, Math.min(24, Math.round((plotW || 600) / 150)));
   let step = steps[steps.length - 1];
-  for (const s of steps) { if (span / s <= 8) { step = s; break; } }
+  for (const s of steps) { if (span / s <= target) { step = s; break; } }
   const ticks = [];
   for (let t = Math.ceil(t0 / step) * step; t <= t1; t += step) ticks.push(t);
   return { ticks, step };
@@ -608,6 +911,46 @@ function axisTicks(t0, t1) {
 // ---------------------------------------------------------------------------
 // tooltip HTML builders
 // ---------------------------------------------------------------------------
+
+// formulaTipHTML builds an elegant hover "descriptor" for a derived figure:
+//   title   — what the number is
+//   formula — how it's computed (mono, e.g. "fanout ÷ union")
+//   result  — the computed value (bold)
+//   why     — one line on why it matters / what it means
+// Reuses the global tooltip styling (.t-status + .t-formula/.t-result/.t-why).
+// Any field may be omitted; `color` tints the title. Pass the returned string to
+// an element's data-tip attribute (escaped) and wire it with attachFormulaTips.
+function formulaTipHTML({ title, formula, result, why, color } = {}) {
+  let html = "";
+  if (title) html += `<div class="t-status"${color ? ` style="color:${color}"` : ""}>${escapeHTML(title)}</div>`;
+  if (formula) html += `<div class="t-formula">${escapeHTML(formula)}</div>`;
+  if (result != null && result !== "") html += `<div class="t-result">= <b>${escapeHTML(String(result))}</b></div>`;
+  if (why) html += `<div class="t-why">${escapeHTML(why)}</div>`;
+  return html;
+}
+
+// operatorTipHTML: a proper descriptor for the operator lane — the numeric rows,
+// then a formula box explaining how "free" is derived, then a why-it-matters line.
+function operatorTipHTML(op) {
+  const pct = op.freeFrac == null ? "—" : Math.round(op.freeFrac * 100) + "%";
+  return `<div class="t-status" style="color:${OP_FREE_COLOR}">operator free time</div>`
+    + `<div class="t-row">free <b>${humanDurationMs(op.freeMs)}</b> · ${pct} of run</div>`
+    + `<div class="t-row">occupied ${humanDurationMs(op.occupiedMs)}</div>`
+    + `<div class="t-row">agents running ${humanDurationMs(op.runningMs)}</div>`
+    + `<div class="t-row">${op.switches} context switch${op.switches === 1 ? "" : "es"}</div>`
+    + `<div class="t-formula">free = running − (typing ∪ 90s-per-switch recovery)</div>`
+    + `<div class="t-why">Time you had free while agents ran and you were neither typing nor recovering from a context switch.</div>`;
+}
+
+function opSegTipHTML(kind, s, e) {
+  const free = kind === "free";
+  return `<div class="t-status" style="color:${free ? OP_FREE_COLOR : "#e5534b"}">${free ? "free" : "occupied"}</div>`
+    + `<div class="t-row">${fmtClock(new Date(s).toISOString())} – ${fmtClock(new Date(e).toISOString())}</div>`
+    + `<div class="t-row">${humanDurationMs(e - s)}</div>`
+    + `<div class="t-why">${free
+        ? "Agents were running but you weren't typing or recovering from a switch."
+        : "You were typing, or within 90s of a context switch, while agents ran."}</div>`;
+}
 
 function intervalTipHTML(lane, iv) {
   const durMs = Date.parse(iv.end) - Date.parse(iv.start);
@@ -637,12 +980,22 @@ function subagentPopoutHTML(sa) {
     + (sa.tool_use_id ? `<div class="po-id">${escapeHTML(sa.tool_use_id)}</div>` : "");
 }
 
-function nameSegTipHTML(seg) {
+function nameSegTipHTML(lane, seg) {
   const durMs = seg.end - seg.start;
   const note = seg.kind === "lead" ? " (before first /name)" : "";
+  const ineff = spanInefficiency(lane, seg.start, seg.end);
+  // identity footer: the name band spans the whole session, so this keeps the
+  // FULL identity reachable on hover even when the in-span identity text is hidden
+  // on a narrow span (the gutter no longer carries it).
+  const idBits = [lane.agent || "?"];
+  if (lane.pid != null) idBits.push("pid " + lane.pid);
+  if (lane.cost_usd != null) idBits.push(fmtUSD(lane.cost_usd));
   return `<div class="t-status">${escapeHTML(seg.label || "(unnamed)")}${note}</div>`
     + `<div class="t-row">${fmtClock(seg.start)} – ${fmtClock(seg.end)}</div>`
-    + `<div class="t-row">${humanDurationMs(durMs)}</div>`;
+    + `<div class="t-row">${humanDurationMs(durMs)}</div>`
+    + (ineff != null ? `<div class="t-row">operator inefficiency ${Math.round(ineff * 100)}% <span class="dim">idle/waiting</span></div>` : "")
+    + `<div class="t-id">${escapeHTML(idBits.join(" · "))}</div>`
+    + (lane.session_id ? `<div class="t-id">${escapeHTML(lane.session_id)}</div>` : "");
 }
 
 function gutterTipHTML(lane, name) {
@@ -668,7 +1021,7 @@ function gutterTipHTML(lane, name) {
 // render: consolidated attention + delegation card
 // ---------------------------------------------------------------------------
 
-function renderAttentionCard(summary) {
+function renderAttentionCard(summary, op) {
   const da = summary.delegated_active, aa = summary.attended_active, pa = summary.prompt_active;
   let eff = summary.delegation_effectiveness;
   if (eff == null && (da != null || aa != null)) {
@@ -680,27 +1033,97 @@ function renderAttentionCard(summary) {
   const effColor = effPct == null ? "var(--fg-muted)"
     : effPct >= 66 ? "var(--c-working)" : effPct >= 33 ? "var(--c-idle)" : "var(--c-permission)";
 
-  const detail = (label, val, hint) =>
-    `<div class="kv"><span class="k">${label}</span><span class="v" title="${hint || ""}">${humanDuration(val)}</span></div>`;
+  // tip() → escaped formula-descriptor HTML for a data-tip attribute.
+  const tip = (obj) => escapeHTML(formulaTipHTML(obj));
+  // row() builds a .kv with a hover descriptor on the whole row (larger hit target).
+  const row = (label, valHTML, tipObj, cls = "") =>
+    `<div class="kv ${cls} has-tip" data-tip="${tip(tipObj)}"><span class="k">${label}</span><span class="v">${valHTML}</span></div>`;
+
+  const effTip = tip({
+    title: "delegation effectiveness",
+    formula: "delegated ÷ (delegated + attended)",
+    result: effPct == null ? "—" : effPct + "%",
+    why: "Share of active agent-time where the agent worked while you were away vs. supervising — higher = more leverage.",
+    color: effColor,
+  });
+  const ctxTip = tip({
+    title: "context switches",
+    formula: "focus arrivals − 1",
+    result: op ? String(op.switches) : "—",
+    why: "How many times you moved your attention between sessions.",
+    color: "var(--accent)",
+  });
+  const lostTip = tip({
+    title: "operator time lost to AI",
+    formula: "Σ 90s recovery per switch (clustered merged) ∩ running",
+    result: op ? humanDurationMs(op.lostMs) : "—",
+    why: "Time absorbed re-acquiring context after switches while agents ran.",
+    color: "var(--c-permission)",
+  });
 
   el.cardAttention.innerHTML = `
     <div class="card-label">attention &amp; delegation</div>
     <div class="headline-row">
-      <div class="headline">
+      <div class="headline has-tip" data-tip="${effTip}">
         <div class="hv" style="color:${effColor}">${haveDeleg && effPct != null ? effPct + "%" : "—"}</div>
         <div class="hk">delegation effectiveness</div>
       </div>
     </div>
+
+    <div class="kv-head">attention</div>
     <div class="kv-list">
-      ${detail("union (A) · ≥1 active", summary.attention_union, "wall-clock with ≥1 session active")}
-      <div class="kv deemph"><span class="k">per-session (B) · parallelism</span><span class="v">${humanDuration(summary.attention_per_session)}</span></div>
-      ${haveDeleg ? `
-        <div class="kv-sep"></div>
-        ${detail("delegated · agent works, you away", da)}
-        ${detail("attended · you supervising", aa)}
-        ${detail("prompt · you driving", pa)}
-      ` : `<div class="kv muted-note">delegation metrics not recorded for this window</div>`}
+      ${row("union (A) · ≥1 active", humanDuration(summary.attention_union), {
+        title: "union (A) · ≥1 active",
+        formula: "wall-clock with ≥1 session active",
+        result: humanDuration(summary.attention_union),
+        why: "Real time elapsed while at least one agent was running.",
+      })}
+      ${row("per-session (B) · parallelism", humanDuration(summary.attention_per_session), {
+        title: "per-session (B)",
+        formula: "Σ per-session active time",
+        result: humanDuration(summary.attention_per_session),
+        why: "Total active time counting parallel sessions separately (parallelism counted).",
+      }, "deemph")}
+    </div>
+
+    ${haveDeleg ? `
+      <div class="kv-sep"></div>
+      <div class="kv-head">delegation</div>
+      <div class="kv-list">
+        ${row("delegated · agent works, you away", humanDuration(da), {
+          title: "delegated",
+          formula: "agent active while you were away",
+          result: humanDuration(da),
+          why: "Agent kept working without supervision — pure leverage.",
+          color: "var(--c-working)",
+        })}
+        ${row("attended · you supervising", humanDuration(aa), {
+          title: "attended",
+          formula: "agent active while you supervised",
+          result: humanDuration(aa),
+          why: "Agent worked while you watched — useful, but not leverage.",
+          color: "var(--c-idle)",
+        })}
+        ${row("prompt · you driving", humanDuration(pa), {
+          title: "prompt",
+          formula: "you actively driving (typing)",
+          result: humanDuration(pa),
+          why: "Hands-on time where you were actively prompting.",
+        })}
+      </div>
+    ` : `<div class="kv-sep"></div><div class="kv muted-note">delegation metrics not recorded for this window</div>`}
+
+    <div class="op-overhead">
+      <div class="op-overhead-head">operator overhead</div>
+      <div class="op-overhead-row has-tip" data-tip="${ctxTip}">
+        <span class="oo-k">context switches</span><span class="oo-v">${op ? op.switches : "—"}</span>
+      </div>
+      <div class="op-overhead-row has-tip" data-tip="${lostTip}">
+        <span class="oo-k">operator time lost to AI</span><span class="oo-v">${op ? humanDurationMs(op.lostMs) : "—"}</span>
+      </div>
     </div>`;
+
+  attachFormulaTips(el.cardAttention);
 }
 
 // ---------------------------------------------------------------------------
@@ -719,15 +1142,24 @@ function pctColor(pct) {
 
 function renderCostCard(data, plan) {
   const totals = data.totals || {};
-  const lanes = (data.lanes || []).slice().sort((a, b) => (b.cost_usd || 0) - (a.cost_usd || 0));
+  const lanes = renderableLanes(data.lanes).slice().sort((a, b) => (b.cost_usd || 0) - (a.cost_usd || 0));
   const pw = data.plan_window || null;
+
+  // tip() → escaped formula-descriptor HTML for a data-tip attribute.
+  const tip = (obj) => escapeHTML(formulaTipHTML(obj));
 
   // per-session rows (only those with a cost)
   const costed = lanes.filter((l) => l.cost_usd != null);
   const sessionRows = costed.length ? costed.map((l) => {
     const name = currentName(l);
     const tok = (l.tok_in || 0) + (l.tok_out || 0) + (l.tok_cache_read || 0) + (l.tok_cache_create || 0);
-    return `<div class="kv"><span class="k" title="${escapeHTML(name)}">${escapeHTML(truncate(name, 30))}</span>
+    const rowTip = tip({
+      title: name,
+      formula: "session cost = Σ tokens × model price",
+      result: fmtUSD(l.cost_usd) + " · " + humanCount(tok) + " tok",
+      why: "Recomputed spend for this session from its token usage and model prices.",
+    });
+    return `<div class="kv has-tip" data-tip="${rowTip}"><span class="k" title="${escapeHTML(name)}">${escapeHTML(truncate(name, 30))}</span>
       <span class="v">${fmtUSD(l.cost_usd)} <span class="dim">· ${humanCount(tok)} tok</span></span></div>`;
   }).join("") : `<div class="kv muted-note">no per-session cost in this window</div>`;
 
@@ -746,7 +1178,12 @@ function renderCostCard(data, plan) {
   el.cardCost.innerHTML = `
     <div class="card-label">cost</div>
     <div class="headline-row">
-      <div class="headline">
+      <div class="headline has-tip" data-tip="${tip({
+        title: "window total",
+        formula: "Σ tokens × model price (recomputed)",
+        result: fmtUSD(totals.cost_usd),
+        why: "Total spend for this window, recomputed from token counts and current model prices.",
+      })}">
         <div class="hv">${fmtUSD(totals.cost_usd)}</div>
         <div class="hk">window total · recomputed</div>
       </div>
@@ -756,8 +1193,18 @@ function renderCostCard(data, plan) {
       <div class="gauge-head">
         <span>5h plan window</span>
         <span class="gauge-figs">
-          ${windowDollars != null ? `<b>${fmtUSD(windowDollars)}</b> <span class="dim">ours</span>` : ""}
-          ${fhPct != null ? `<b style="color:${pctColor(fhPct)}">${fmtPct(fhPct)}</b>` : `<span class="dim">—</span>`}
+          ${windowDollars != null ? `<span class="has-tip" data-tip="${tip({
+            title: "5h window — ours",
+            formula: "our $ spent this 5h plan window",
+            result: fmtUSD(windowDollars),
+            why: "Cost we recomputed for sessions in the current 5-hour plan window.",
+          })}"><b>${fmtUSD(windowDollars)}</b> <span class="dim">ours</span></span>` : ""}
+          ${fhPct != null ? `<b class="has-tip" style="color:${pctColor(fhPct)}" data-tip="${tip({
+            title: "5h plan usage — official",
+            formula: "from the read-only plan-usage cache",
+            result: fmtPct(fhPct),
+            why: "Official utilization of your 5-hour plan window, read from the local plan-usage cache.",
+          })}">${fmtPct(fhPct)}</b>` : `<span class="dim">—</span>`}
         </span>
       </div>
       ${gaugeBar(fhPct)}
@@ -768,7 +1215,12 @@ function renderCostCard(data, plan) {
       ${wkPct != null ? `
         <div class="gauge-head week">
           <span>weekly</span>
-          <span class="gauge-figs"><b style="color:${pctColor(wkPct)}">${fmtPct(wkPct)}</b></span>
+          <span class="gauge-figs"><b class="has-tip" style="color:${pctColor(wkPct)}" data-tip="${tip({
+            title: "weekly plan usage",
+            formula: "7-day plan utilization",
+            result: fmtPct(wkPct),
+            why: "Utilization of your 7-day (weekly) plan allowance.",
+          })}">${fmtPct(wkPct)}</b></span>
         </div>
         ${gaugeBar(wkPct)}
       ` : ""}
@@ -778,6 +1230,8 @@ function renderCostCard(data, plan) {
       <div class="kv-head">per session</div>
       ${sessionRows}
     </div>`;
+
+  attachFormulaTips(el.cardCost);
 }
 
 // ---------------------------------------------------------------------------
@@ -789,11 +1243,21 @@ function attachTip(node, htmlFn) {
   node.addEventListener("mousemove", moveTip);
   node.addEventListener("mouseleave", hideTip);
 }
-function attachGutterTip(node, lane, latest) {
-  node.addEventListener("mouseenter", (ev) => showTip(gutterTipHTML(lane, latest), ev));
-  node.addEventListener("mousemove", moveTip);
-  node.addEventListener("mouseleave", hideTip);
+// attachFormulaTips wires the hover descriptor box onto every [data-tip] element
+// inside `container`. Each element carries data-tip set to a pre-built HTML string
+// (use formulaTipHTML, embedded escaped: data-tip="${escapeHTML(formulaTipHTML(...))}").
+// The DOM decodes the attribute on read, so showTip renders the box. Reuses the
+// global tooltip; call AFTER setting the container's innerHTML.
+function attachFormulaTips(container) {
+  if (!container) return;
+  container.querySelectorAll("[data-tip]").forEach((node) => {
+    const html = node.getAttribute("data-tip");
+    node.addEventListener("mouseenter", (ev) => showTip(html, ev));
+    node.addEventListener("mousemove", moveTip);
+    node.addEventListener("mouseleave", hideTip);
+  });
 }
+
 function showTip(html, ev) { el.tooltip.innerHTML = html; el.tooltip.hidden = false; moveTip(ev); }
 function moveTip(ev) {
   const pad = 14, r = el.tooltip.getBoundingClientRect();
@@ -851,6 +1315,7 @@ function init() {
   el.nextDay.addEventListener("click", () => { el.day.value = shiftDay(el.day.value, +1); el.since.value = el.until.value = ""; reloadNow(); });
   el.live.addEventListener("click", () => { el.day.value = todayLocal(); el.since.value = el.until.value = ""; reloadNow(); });
   el.clearRange.addEventListener("click", () => { el.since.value = el.until.value = ""; reloadNow(); });
+  el.optCtxSwitches.addEventListener("change", () => { if (lastData) renderTimeline(lastData); });
 
   // dismiss popout on outside click / Escape
   document.addEventListener("click", (ev) => {

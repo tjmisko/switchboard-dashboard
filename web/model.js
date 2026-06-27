@@ -114,5 +114,59 @@
     return (lanes || []).map(buildBar);
   }
 
-  return { laneIdentity, leadLabel, nameSegments, buildBar, buildBars };
+  // spanInefficiency: fraction of [segStartMs, segEndMs] (epoch ms) during which
+  // the session was idle or waiting (status in idle/dormant/suspended) rather than
+  // working. The denominator is the FULL span duration. Returns null when the span
+  // is non-positive. Pure: reads only lane.intervals (each {status, start, end}
+  // with RFC3339 start/end).
+  function spanInefficiency(lane, segStartMs, segEndMs) {
+    const dur = segEndMs - segStartMs;
+    if (!(dur > 0)) return null;
+    const WAITING = new Set(["idle", "dormant", "suspended"]);
+    let waited = 0;
+    for (const iv of (lane.intervals || [])) {
+      if (!WAITING.has(iv.status)) continue;
+      const s = Math.max(segStartMs, Date.parse(iv.start));
+      const e = Math.min(segEndMs, Date.parse(iv.end));
+      if (e > s) waited += e - s;
+    }
+    return waited / dur;
+  }
+
+  // packLanes performs greedy interval partitioning on a group's lanes: it
+  // returns an array of ROWS, each row an array of lanes sorted by start, with no
+  // two lanes on a row overlapping in time. Time-serializable sessions (one ends
+  // before the next begins) therefore share a row, so the number of rows equals
+  // the group's MAX simultaneous overlap.
+  //
+  // Algorithm: sort the time-bounded lanes by start (then end, for determinism);
+  // for each, assign it to the FIRST row whose last lane ends at or before this
+  // lane's start (any non-overlap, nextStart >= prevEnd, is packable); else open a
+  // new row. Lanes whose start/end can't be parsed each get their own row,
+  // appended at the end — we never drop or merge what we can't measure. Pure and
+  // DOM-free; reads only lane.start / lane.end (RFC3339, via Date.parse).
+  function packLanes(lanes) {
+    const bounded = [], unbounded = [];
+    for (const lane of lanes || []) {
+      const s = Date.parse(lane.start), e = Date.parse(lane.end);
+      if (isFinite(s) && isFinite(e)) bounded.push({ lane, s, e });
+      else unbounded.push(lane);
+    }
+    bounded.sort((a, b) => a.s - b.s || a.e - b.e);
+
+    const rows = [];     // array of arrays of lanes
+    const rowEnds = [];  // end ms of each row's last (latest-starting) lane
+    for (const { lane, s, e } of bounded) {
+      let r = -1;
+      for (let i = 0; i < rowEnds.length; i++) {
+        if (rowEnds[i] <= s) { r = i; break; }
+      }
+      if (r === -1) { rows.push([lane]); rowEnds.push(e); }
+      else { rows[r].push(lane); rowEnds[r] = e; }
+    }
+    for (const lane of unbounded) rows.push([lane]);
+    return rows;
+  }
+
+  return { laneIdentity, leadLabel, nameSegments, buildBar, buildBars, spanInefficiency, packLanes };
 });
