@@ -909,30 +909,97 @@ function renderAttentionCard(summary, op) {
   const effColor = effPct == null ? "var(--fg-muted)"
     : effPct >= 66 ? "var(--c-working)" : effPct >= 33 ? "var(--c-idle)" : "var(--c-permission)";
 
-  const detail = (label, val, hint) =>
-    `<div class="kv"><span class="k">${label}</span><span class="v" title="${hint || ""}">${humanDuration(val)}</span></div>`;
+  // tip() → escaped formula-descriptor HTML for a data-tip attribute.
+  const tip = (obj) => escapeHTML(formulaTipHTML(obj));
+  // row() builds a .kv with a hover descriptor on the whole row (larger hit target).
+  const row = (label, valHTML, tipObj, cls = "") =>
+    `<div class="kv ${cls} has-tip" data-tip="${tip(tipObj)}"><span class="k">${label}</span><span class="v">${valHTML}</span></div>`;
+
+  const effTip = tip({
+    title: "delegation effectiveness",
+    formula: "delegated ÷ (delegated + attended)",
+    result: effPct == null ? "—" : effPct + "%",
+    why: "Share of active agent-time where the agent worked while you were away vs. supervising — higher = more leverage.",
+    color: effColor,
+  });
+  const ctxTip = tip({
+    title: "context switches",
+    formula: "focus arrivals − 1",
+    result: op ? String(op.switches) : "—",
+    why: "How many times you moved your attention between sessions.",
+    color: "var(--accent)",
+  });
+  const lostTip = tip({
+    title: "operator time lost to AI",
+    formula: "Σ 90s recovery per switch (clustered merged) ∩ running",
+    result: op ? humanDurationMs(op.lostMs) : "—",
+    why: "Time absorbed re-acquiring context after switches while agents ran.",
+    color: "var(--c-permission)",
+  });
 
   el.cardAttention.innerHTML = `
     <div class="card-label">attention &amp; delegation</div>
     <div class="headline-row">
-      <div class="headline">
+      <div class="headline has-tip" data-tip="${effTip}">
         <div class="hv" style="color:${effColor}">${haveDeleg && effPct != null ? effPct + "%" : "—"}</div>
         <div class="hk">delegation effectiveness</div>
       </div>
     </div>
+
+    <div class="kv-head">attention</div>
     <div class="kv-list">
-      ${detail("union (A) · ≥1 active", summary.attention_union, "wall-clock with ≥1 session active")}
-      <div class="kv deemph"><span class="k">per-session (B) · parallelism</span><span class="v">${humanDuration(summary.attention_per_session)}</span></div>
-      ${haveDeleg ? `
-        <div class="kv-sep"></div>
-        ${detail("delegated · agent works, you away", da)}
-        ${detail("attended · you supervising", aa)}
-        ${detail("prompt · you driving", pa)}
-      ` : `<div class="kv muted-note">delegation metrics not recorded for this window</div>`}
-        <div class="kv-sep"></div>
-        <div class="kv"><span class="k">context switches</span><span class="v">${op ? op.switches : "—"}</span></div>
-        <div class="kv"><span class="k" title="time lost to context-switch recovery (~90s/switch)">operator time lost to AI</span><span class="v">${op ? humanDurationMs(op.lostMs) : "—"}</span></div>
+      ${row("union (A) · ≥1 active", humanDuration(summary.attention_union), {
+        title: "union (A) · ≥1 active",
+        formula: "wall-clock with ≥1 session active",
+        result: humanDuration(summary.attention_union),
+        why: "Real time elapsed while at least one agent was running.",
+      })}
+      ${row("per-session (B) · parallelism", humanDuration(summary.attention_per_session), {
+        title: "per-session (B)",
+        formula: "Σ per-session active time",
+        result: humanDuration(summary.attention_per_session),
+        why: "Total active time counting parallel sessions separately (parallelism counted).",
+      }, "deemph")}
+    </div>
+
+    ${haveDeleg ? `
+      <div class="kv-sep"></div>
+      <div class="kv-head">delegation</div>
+      <div class="kv-list">
+        ${row("delegated · agent works, you away", humanDuration(da), {
+          title: "delegated",
+          formula: "agent active while you were away",
+          result: humanDuration(da),
+          why: "Agent kept working without supervision — pure leverage.",
+          color: "var(--c-working)",
+        })}
+        ${row("attended · you supervising", humanDuration(aa), {
+          title: "attended",
+          formula: "agent active while you supervised",
+          result: humanDuration(aa),
+          why: "Agent worked while you watched — useful, but not leverage.",
+          color: "var(--c-idle)",
+        })}
+        ${row("prompt · you driving", humanDuration(pa), {
+          title: "prompt",
+          formula: "you actively driving (typing)",
+          result: humanDuration(pa),
+          why: "Hands-on time where you were actively prompting.",
+        })}
+      </div>
+    ` : `<div class="kv-sep"></div><div class="kv muted-note">delegation metrics not recorded for this window</div>`}
+
+    <div class="op-overhead">
+      <div class="op-overhead-head">operator overhead</div>
+      <div class="op-overhead-row has-tip" data-tip="${ctxTip}">
+        <span class="oo-k">context switches</span><span class="oo-v">${op ? op.switches : "—"}</span>
+      </div>
+      <div class="op-overhead-row has-tip" data-tip="${lostTip}">
+        <span class="oo-k">operator time lost to AI</span><span class="oo-v">${op ? humanDurationMs(op.lostMs) : "—"}</span>
+      </div>
     </div>`;
+
+  attachFormulaTips(el.cardAttention);
 }
 
 // ---------------------------------------------------------------------------
@@ -954,12 +1021,21 @@ function renderCostCard(data, plan) {
   const lanes = renderableLanes(data.lanes).slice().sort((a, b) => (b.cost_usd || 0) - (a.cost_usd || 0));
   const pw = data.plan_window || null;
 
+  // tip() → escaped formula-descriptor HTML for a data-tip attribute.
+  const tip = (obj) => escapeHTML(formulaTipHTML(obj));
+
   // per-session rows (only those with a cost)
   const costed = lanes.filter((l) => l.cost_usd != null);
   const sessionRows = costed.length ? costed.map((l) => {
     const name = currentName(l);
     const tok = (l.tok_in || 0) + (l.tok_out || 0) + (l.tok_cache_read || 0) + (l.tok_cache_create || 0);
-    return `<div class="kv"><span class="k" title="${escapeHTML(name)}">${escapeHTML(truncate(name, 30))}</span>
+    const rowTip = tip({
+      title: name,
+      formula: "session cost = Σ tokens × model price",
+      result: fmtUSD(l.cost_usd) + " · " + humanCount(tok) + " tok",
+      why: "Recomputed spend for this session from its token usage and model prices.",
+    });
+    return `<div class="kv has-tip" data-tip="${rowTip}"><span class="k" title="${escapeHTML(name)}">${escapeHTML(truncate(name, 30))}</span>
       <span class="v">${fmtUSD(l.cost_usd)} <span class="dim">· ${humanCount(tok)} tok</span></span></div>`;
   }).join("") : `<div class="kv muted-note">no per-session cost in this window</div>`;
 
@@ -978,7 +1054,12 @@ function renderCostCard(data, plan) {
   el.cardCost.innerHTML = `
     <div class="card-label">cost</div>
     <div class="headline-row">
-      <div class="headline">
+      <div class="headline has-tip" data-tip="${tip({
+        title: "window total",
+        formula: "Σ tokens × model price (recomputed)",
+        result: fmtUSD(totals.cost_usd),
+        why: "Total spend for this window, recomputed from token counts and current model prices.",
+      })}">
         <div class="hv">${fmtUSD(totals.cost_usd)}</div>
         <div class="hk">window total · recomputed</div>
       </div>
@@ -988,8 +1069,18 @@ function renderCostCard(data, plan) {
       <div class="gauge-head">
         <span>5h plan window</span>
         <span class="gauge-figs">
-          ${windowDollars != null ? `<b>${fmtUSD(windowDollars)}</b> <span class="dim">ours</span>` : ""}
-          ${fhPct != null ? `<b style="color:${pctColor(fhPct)}">${fmtPct(fhPct)}</b>` : `<span class="dim">—</span>`}
+          ${windowDollars != null ? `<span class="has-tip" data-tip="${tip({
+            title: "5h window — ours",
+            formula: "our $ spent this 5h plan window",
+            result: fmtUSD(windowDollars),
+            why: "Cost we recomputed for sessions in the current 5-hour plan window.",
+          })}"><b>${fmtUSD(windowDollars)}</b> <span class="dim">ours</span></span>` : ""}
+          ${fhPct != null ? `<b class="has-tip" style="color:${pctColor(fhPct)}" data-tip="${tip({
+            title: "5h plan usage — official",
+            formula: "from the read-only plan-usage cache",
+            result: fmtPct(fhPct),
+            why: "Official utilization of your 5-hour plan window, read from the local plan-usage cache.",
+          })}">${fmtPct(fhPct)}</b>` : `<span class="dim">—</span>`}
         </span>
       </div>
       ${gaugeBar(fhPct)}
@@ -1000,7 +1091,12 @@ function renderCostCard(data, plan) {
       ${wkPct != null ? `
         <div class="gauge-head week">
           <span>weekly</span>
-          <span class="gauge-figs"><b style="color:${pctColor(wkPct)}">${fmtPct(wkPct)}</b></span>
+          <span class="gauge-figs"><b class="has-tip" style="color:${pctColor(wkPct)}" data-tip="${tip({
+            title: "weekly plan usage",
+            formula: "7-day plan utilization",
+            result: fmtPct(wkPct),
+            why: "Utilization of your 7-day (weekly) plan allowance.",
+          })}">${fmtPct(wkPct)}</b></span>
         </div>
         ${gaugeBar(wkPct)}
       ` : ""}
@@ -1010,6 +1106,8 @@ function renderCostCard(data, plan) {
       <div class="kv-head">per session</div>
       ${sessionRows}
     </div>`;
+
+  attachFormulaTips(el.cardCost);
 }
 
 // ---------------------------------------------------------------------------
