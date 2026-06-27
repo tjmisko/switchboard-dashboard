@@ -6,6 +6,7 @@
       "pid": 4821,
       "agent": "claude",
       "project": "switchboard",
+      "project_full": "switchboard",
       "start": "2026-06-26T13:00:00Z",
       "end": "2026-06-26T14:40:00Z",
       "intervals": [
@@ -59,6 +60,19 @@
           "end": "2026-06-26T14:40:00Z"
         }
       ],
+      "name": "dashboard-name-spans",
+      "names": [
+        {
+          "label": "switchboard-monitor",
+          "start": "2026-06-26T13:25:00Z",
+          "end": "2026-06-26T14:05:00Z"
+        },
+        {
+          "label": "dashboard-name-spans",
+          "start": "2026-06-26T14:05:00Z",
+          "end": "2026-06-26T14:40:00Z"
+        }
+      ],
       "subagents": [
         {
           "agent_type": "Explore",
@@ -107,6 +121,7 @@
       "pid": 5102,
       "agent": "claude",
       "project": "switchboard-dashboard",
+      "project_full": "switchboard-dashboard",
       "start": "2026-06-26T13:03:00Z",
       "end": "2026-06-26T14:30:00Z",
       "intervals": [
@@ -136,6 +151,14 @@
         {
           "label": "dashboard · feat/dashboard-v2",
           "start": "2026-06-26T13:03:00Z",
+          "end": "2026-06-26T14:30:00Z"
+        }
+      ],
+      "name": "cost-gauge-polish",
+      "names": [
+        {
+          "label": "cost-gauge-polish",
+          "start": "2026-06-26T13:10:00Z",
           "end": "2026-06-26T14:30:00Z"
         }
       ],
@@ -230,6 +253,14 @@
         {
           "label": "research · deep-dive",
           "start": "2026-06-26T13:30:00Z",
+          "end": "2026-06-26T14:35:00Z"
+        }
+      ],
+      "name": "incremental-repaint-bench",
+      "names": [
+        {
+          "label": "incremental-repaint-bench",
+          "start": "2026-06-26T13:34:00Z",
           "end": "2026-06-26T14:35:00Z"
         }
       ],

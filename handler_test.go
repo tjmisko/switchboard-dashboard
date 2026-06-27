@@ -173,6 +173,72 @@ func TestHandleTimeline_nonZeroExitYields502(t *testing.T) {
 	}
 }
 
+// nameSpanFixture mirrors the v2 contract fields the dashboard renders session
+// name-spans from: stable identity (session_id), the slug-only names[] history,
+// and the optional pretty project_full. It carries two concurrent sessions, one
+// of which was renamed mid-life (two names[] spans).
+const nameSpanFixture = `{"window":"2026-06-26","lanes":[` +
+	`{"session_id":"s-rename","pid":111,"project":"sb","project_full":"switchboard","start":"2026-06-26T17:00:00-07:00","end":"2026-06-26T18:00:00-07:00","names":[{"label":"first","start":"2026-06-26T17:10:00-07:00","end":"2026-06-26T17:40:00-07:00"},{"label":"second","start":"2026-06-26T17:40:00-07:00","end":"2026-06-26T18:00:00-07:00"}],"intervals":[]},` +
+	`{"session_id":"s-concurrent","pid":222,"project":"sspi","start":"2026-06-26T17:05:00-07:00","end":"2026-06-26T18:05:00-07:00","names":[{"label":"beta","start":"2026-06-26T17:05:00-07:00","end":"2026-06-26T18:05:00-07:00"}],"intervals":[]}` +
+	`],"summary":{"from":"2026-06-26T17:00:00-07:00","to":"2026-06-26T18:05:00-07:00","sessions":2,"by_status":{},"attention_union":0,"attention_per_session":0,"attention_fanout":0},"totals":{}}`
+
+// TestHandleTimeline_preservesSessionNameSpanContract pins the proxy boundary:
+// the dashboard renders name-spans entirely client-side, so the handler must
+// pass session_id, names[], and project_full through untouched. A future change
+// that re-encodes or filters the timeline would silently break the feature; this
+// catches that.
+func TestHandleTimeline_preservesSessionNameSpanContract(t *testing.T) {
+	stub := writeStub(t, "#!/bin/sh\ncat <<'JSONEOF'\n"+nameSpanFixture+"\nJSONEOF\n")
+	srv := &Server{Ctl: stub}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/timeline?day=2026-06-26", nil)
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Result().StatusCode)
+	}
+
+	type nameSpan struct {
+		Label string `json:"label"`
+		Start string `json:"start"`
+		End   string `json:"end"`
+	}
+	type lane struct {
+		SessionID   string     `json:"session_id"`
+		PID         int        `json:"pid"`
+		ProjectFull string     `json:"project_full"`
+		Names       []nameSpan `json:"names"`
+	}
+	var body struct {
+		Lanes []lane `json:"lanes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("timeline body not json: %v (%q)", err, rec.Body.String())
+	}
+
+	// Two distinct concurrent sessions survive the proxy (never merged by name).
+	byID := map[string]lane{}
+	for _, l := range body.Lanes {
+		byID[l.SessionID] = l
+	}
+	if len(byID) != 2 {
+		t.Fatalf("expected 2 distinct sessions, got %d: %+v", len(byID), body.Lanes)
+	}
+
+	// The renamed session keeps its full slug-span history and pretty name.
+	r, ok := byID["s-rename"]
+	if !ok {
+		t.Fatalf("s-rename session missing from proxied body")
+	}
+	if r.ProjectFull != "switchboard" {
+		t.Fatalf("project_full not preserved: %q", r.ProjectFull)
+	}
+	if len(r.Names) != 2 || r.Names[0].Label != "first" || r.Names[1].Label != "second" {
+		t.Fatalf("names[] span history not preserved: %+v", r.Names)
+	}
+}
+
 func TestServer_servesEmbeddedIndex(t *testing.T) {
 	srv := &Server{Ctl: "unused"}
 	rec := httptest.NewRecorder()

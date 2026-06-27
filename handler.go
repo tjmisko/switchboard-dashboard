@@ -11,7 +11,9 @@ import (
 	"time"
 )
 
-//go:embed web
+// Embed only the served assets (not web/*.test.js, which is dev-only).
+//
+//go:embed web/index.html web/model.js web/app.js web/style.css
 var webFS embed.FS
 
 // DefaultPlanPath is the cached OAuth plan-usage file Claude Code writes while a

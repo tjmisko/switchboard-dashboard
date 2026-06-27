@@ -162,17 +162,23 @@ main { padding: 16px 18px 36px; }
 .axis-label { fill: var(--fg-dim); font-family: var(--mono); font-size: 10px; }
 
 .lane-gutter { cursor: default; }
-.lane-label { fill: var(--fg); font-family: var(--mono); font-size: 12px; font-weight: 600; }
-.lane-badge { fill: var(--accent); font-size: 10px; font-weight: 600; }
+.lane-label { fill: var(--fg-muted); font-family: var(--mono); font-size: 11.5px; font-weight: 600; }
 .lane-sub { fill: var(--fg-dim); font-family: var(--mono); font-size: 10.5px; }
 
 /* project group headers */
 .group-rule { stroke: var(--border); stroke-width: 1; }
 .group-label { fill: var(--fg-muted); font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: 0.6px; }
 
-.label-seg { fill: rgba(163, 113, 247, 0.35); cursor: pointer; }
-.label-seg:hover { fill: rgba(163, 113, 247, 0.7); }
-.label-div { stroke: rgba(163, 113, 247, 0.5); stroke-width: 1; stroke-dasharray: 2 2; }
+/* name-span band: each /name slug labels the stretch it was active, drawn just
+   above the session's status bar. The leading pre-/name stretch (".lead") is
+   dimmer/italic so it reads as a project fallback rather than a chosen name. */
+.name-seg { fill: rgba(88, 166, 255, 0.13); cursor: default; }
+.name-seg:hover { fill: rgba(88, 166, 255, 0.24); }
+.name-seg.lead { fill: rgba(110, 118, 129, 0.10); }
+.name-seg.lead:hover { fill: rgba(110, 118, 129, 0.18); }
+.name-div { stroke: rgba(88, 166, 255, 0.5); stroke-width: 1; stroke-dasharray: 2 2; }
+.name-seg-label { fill: var(--fg); font-family: var(--mono); font-size: 10px; font-weight: 600; pointer-events: none; }
+.name-seg-label.lead { fill: var(--fg-dim); font-weight: 400; font-style: italic; }
 
 .bar { stroke: rgba(0, 0, 0, 0.25); stroke-width: 0.5; cursor: pointer; }
 .bar:hover { stroke: #fff; stroke-width: 1; }
@@ -270,7 +276,8 @@ main { padding: 16px 18px 36px; }
 .tooltip .t-hint { color: var(--fg-dim); margin-top: 5px; font-style: italic; }
 .tooltip .t-hist { color: var(--fg-dim); margin-top: 6px; text-transform: uppercase; font-size: 10px; letter-spacing: 0.5px; }
 .tooltip .t-histrow { color: var(--fg-muted); font-family: var(--mono); font-size: 11px; margin-top: 2px; }
-.tooltip .t-histrow span { color: var(--fg-dim); margin-right: 6px; }
+.tooltip .t-histrow > span { color: var(--fg-dim); margin-right: 6px; }
+.tooltip .t-histrow .lead { color: var(--fg-dim); font-style: italic; }
 
 /* ---------- popout (pinned subagent) ---------- */
 .popout {
