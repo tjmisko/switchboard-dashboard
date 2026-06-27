@@ -1,0 +1,22 @@
+[Unit]
+Description=Switchboard dashboard — web activity monitor (http://localhost:8080)
+# The dashboard shells out to switchboard-ctl, which reads the history log
+# straight off disk, so it does not require the daemon to be running — but order
+# after it (and the graphical session) when they start in the same transaction.
+After=graphical-session.target switchboard.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+# Pass switchboard-ctl explicitly: the user PATH may not include ~/go/bin, and
+# the dashboard resolves -ctl via PATH otherwise. The web assets are embedded in
+# the binary (go:embed), so no working directory is required.
+ExecStart=%h/go/bin/switchboard-dashboard -ctl %h/go/bin/switchboard-ctl -port 8080
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+
+[Install]
+# default.target (not graphical-session.target) so the service also recovers when
+# the per-user systemd is restarted on its own — mirrors switchboard.service.
+WantedBy=default.target
