@@ -77,6 +77,23 @@ function humanDuration(ns) {
 }
 function humanDurationMs(ms) { return humanDuration(ms * 1e6); }
 
+// humanDurationCoarse renders a duration WITHOUT seconds — for the topline and
+// other headline figures where second-level precision is just noise. Rounds to
+// the nearest minute; sub-minute durations read "<1m".
+function humanDurationCoarse(ns) {
+  if (ns == null) return "—";
+  if (ns <= 0) return "0m";
+  const totalMin = Math.round(ns / 60e9);
+  if (totalMin < 1) return "<1m";
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin - h * 60;
+  const parts = [];
+  if (h) parts.push(h + "h");
+  if (m || !h) parts.push(m + "m");
+  return parts.join(" ");
+}
+function humanDurationCoarseMs(ms) { return humanDurationCoarse(ms * 1e6); }
+
 function humanCount(n) {
   if (n == null) return "0";
   const abs = Math.abs(n);
@@ -785,6 +802,23 @@ function axisTicks(t0, t1, plotW) {
 // tooltip HTML builders
 // ---------------------------------------------------------------------------
 
+// formulaTipHTML builds an elegant hover "descriptor" for a derived figure:
+//   title   — what the number is
+//   formula — how it's computed (mono, e.g. "fanout ÷ union")
+//   result  — the computed value (bold)
+//   why     — one line on why it matters / what it means
+// Reuses the global tooltip styling (.t-status + .t-formula/.t-result/.t-why).
+// Any field may be omitted; `color` tints the title. Pass the returned string to
+// an element's data-tip attribute (escaped) and wire it with attachFormulaTips.
+function formulaTipHTML({ title, formula, result, why, color } = {}) {
+  let html = "";
+  if (title) html += `<div class="t-status"${color ? ` style="color:${color}"` : ""}>${escapeHTML(title)}</div>`;
+  if (formula) html += `<div class="t-formula">${escapeHTML(formula)}</div>`;
+  if (result != null && result !== "") html += `<div class="t-result">= <b>${escapeHTML(String(result))}</b></div>`;
+  if (why) html += `<div class="t-why">${escapeHTML(why)}</div>`;
+  return html;
+}
+
 function operatorTipHTML(op) {
   const pct = op.freeFrac == null ? "—" : Math.round(op.freeFrac * 100) + "%";
   return `<div class="t-status" style="color:${OP_FREE_COLOR}">operator free time</div>`
@@ -992,6 +1026,21 @@ function attachGutterTip(node, lane, latest) {
   node.addEventListener("mousemove", moveTip);
   node.addEventListener("mouseleave", hideTip);
 }
+// attachFormulaTips wires the hover descriptor box onto every [data-tip] element
+// inside `container`. Each element carries data-tip set to a pre-built HTML string
+// (use formulaTipHTML, embedded escaped: data-tip="${escapeHTML(formulaTipHTML(...))}").
+// The DOM decodes the attribute on read, so showTip renders the box. Reuses the
+// global tooltip; call AFTER setting the container's innerHTML.
+function attachFormulaTips(container) {
+  if (!container) return;
+  container.querySelectorAll("[data-tip]").forEach((node) => {
+    const html = node.getAttribute("data-tip");
+    node.addEventListener("mouseenter", (ev) => showTip(html, ev));
+    node.addEventListener("mousemove", moveTip);
+    node.addEventListener("mouseleave", hideTip);
+  });
+}
+
 function showTip(html, ev) { el.tooltip.innerHTML = html; el.tooltip.hidden = false; moveTip(ev); }
 function moveTip(ev) {
   const pad = 14, r = el.tooltip.getBoundingClientRect();

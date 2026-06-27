@@ -281,6 +281,17 @@ main { padding: 16px 18px 36px; }
 }
 .tooltip .t-status { font-weight: 600; font-family: var(--mono); }
 .tooltip .t-row { color: var(--fg-muted); margin-top: 3px; font-family: var(--mono); }
+/* formula descriptor box (hover any computed figure): formula → result → why */
+.tooltip .t-formula {
+  margin-top: 6px; font-family: var(--mono); font-size: 11.5px; color: var(--accent);
+  background: rgba(88, 166, 255, 0.08); border: 1px solid var(--border-soft);
+  border-radius: 5px; padding: 3px 6px; white-space: pre-wrap;
+}
+.tooltip .t-result { margin-top: 5px; font-family: var(--mono); color: var(--fg-muted); }
+.tooltip .t-result b { color: var(--fg); font-weight: 700; }
+.tooltip .t-why { margin-top: 6px; color: var(--fg-muted); line-height: 1.45; }
+/* cursor affordance for a computed figure that reveals a descriptor on hover */
+.has-tip { cursor: help; }
 .tooltip .t-desc { color: var(--fg); margin-top: 5px; }
 .tooltip .t-sub { color: #7ee787; margin-top: 4px; }
 .tooltip .t-id { color: var(--fg-dim); margin-top: 4px; font-family: var(--mono); font-size: 11px; word-break: break-all; }
