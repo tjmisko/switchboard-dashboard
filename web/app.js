@@ -30,6 +30,7 @@ const PLAN_POLL_MS = 15000; // /api/plan poll cadence (changes slowly)
 const OP_FREE_COLOR = "#3fb950";      // green — free time ("free agent")
 const OP_OCCUPIED_COLOR = "#8c4a4c";  // muted dusty red — occupied (typing or switching)
 const OP_SWITCH_RECOVERY_MS = 90000;  // 90s of occupied time after each switch
+const OP_MIN_ENGAGE_MS = 15000;       // ignore focus spans under 15s — brief glances aren't real editing/switches
 
 // Status -> color. working solid green; delegating faded green; idle yellow;
 // permission red; suspended grey; "" (unknown) dim. Mirrors style.css vars.
@@ -199,6 +200,7 @@ const el = {
   popout: document.getElementById("popout"),
   cardAttention: document.getElementById("card-attention"),
   cardCost: document.getElementById("card-cost"),
+  optCtxSwitches: document.getElementById("opt-ctx-switches"),
 };
 
 // ---------------------------------------------------------------------------
@@ -311,8 +313,23 @@ function setDot(kind) {
 // activity are absent (no activity → any focus counts as typing).
 const RUNNING_STATUSES = new Set(["working", "delegating", "dormant"]);
 
+// MIN_SESSION_MS: sessions shorter than a minute aren't rendered anywhere.
+const MIN_SESSION_MS = 60000;
+
+// renderableLanes drops sub-minute sessions — too brief to be worth a row. Lanes
+// with unparseable bounds are kept (don't hide what we can't measure). Applied
+// everywhere lanes are rendered (timeline, operator calc, cost list) so a
+// sub-minute session is excluded consistently.
+function renderableLanes(lanes) {
+  return (lanes || []).filter((lane) => {
+    const s = Date.parse(lane.start), e = Date.parse(lane.end);
+    if (!isFinite(s) || !isFinite(e)) return true;
+    return e - s >= MIN_SESSION_MS;
+  });
+}
+
 function computeOperatorTime(data) {
-  const lanes = (data && data.lanes) || [];
+  const lanes = renderableLanes((data && data.lanes) || []);
   const runPairs = [], focusPairs = [], focusStarts = [];
   for (const lane of lanes) {
     for (const iv of lane.intervals || []) {
@@ -322,7 +339,9 @@ function computeOperatorTime(data) {
     }
     for (const f of lane.focus || []) {
       const s = Date.parse(f.start), e = Date.parse(f.end);
-      if (isFinite(s) && isFinite(e) && e > s) { focusPairs.push([s, e]); focusStarts.push(s); }
+      // ignore "little" context switches: focus spans under OP_MIN_ENGAGE_MS aren't
+      // real editing time and don't count as a switch.
+      if (isFinite(s) && isFinite(e) && e - s >= OP_MIN_ENGAGE_MS) { focusPairs.push([s, e]); focusStarts.push(s); }
     }
   }
   const running = unionMs(runPairs);
@@ -353,6 +372,7 @@ function computeOperatorTime(data) {
     runningMs, freeMs,
     occupiedMs: sum(occupied),
     switches: switches.length,
+    switchTimes: switches,
     lostMs: sum(intersectMs(ctxRecovery, running)),
     freeFrac: runningMs > 0 ? freeMs / runningMs : null,
   };
@@ -372,10 +392,10 @@ function render(data) {
 }
 
 // renderTopline: two dominant figures framing AI's payoff.
-//   effective day = a normal 24h day + the EXTRA output-time AI bought you, where
+//   additional time (headline) = the EXTRA output-time AI bought you, where
 //     extra = agent-hours (fanout, parallelism counted) − the wall-clock you
-//     actually spent with ≥1 agent active (union). A day that yields 3h of extra
-//     output reads as a "27h day".
+//     actually spent with ≥1 agent active (union). The subtitle frames it as an
+//     extended day — "as if a 27h day" (24h + extra).
 //   force multiplier = fanout ÷ union — the average number of "you"s working
 //     during active time (≈3 agents in parallel → 3×), assuming you're equally
 //     effective with or without the AI.
@@ -387,12 +407,12 @@ function renderTopline(summary) {
   const mult = union > 0 ? fanout / union : null;
   el.topline.innerHTML = `
     <div class="th-block">
-      <div class="th-val green">${humanDuration(DAY + extra)}</div>
-      <div class="th-key">effective day · +${humanDuration(extra)} from AI</div>
+      <div class="th-val green">+${humanDuration(extra)}</div>
+      <div class="th-key">effective time gained ~ ${humanDuration(DAY + extra)} day</div>
     </div>
     <div class="th-block">
       <div class="th-val">${mult == null ? "—" : mult.toFixed(1) + "×"}</div>
-      <div class="th-key">force multiplier · agent ÷ clock</div>
+      <div class="th-key">force multiplier · over ${humanDuration(union)} active</div>
     </div>`;
 }
 
@@ -430,12 +450,12 @@ function svgEl(name, attrs) {
 // stacked directly on the status bar, with the subagent strip reserved only
 // when the session actually delegated — so parallel sessions pack tightly.
 const GEO = {
-  GUTTER: 232, RIGHT: 20, AXIS_Y: 16, PLOT_TOP: 26,
-  PAD_TOP: 3, NAME_H: 13, BAR_H: 19, GAP: 3, PAD_BOTTOM: 3,
-  SUB_ROW_H: 4, SUB_GAP: 2, SUB_ROWS: 2,
-  GROUP_HEAD_H: 24,
-  NAME_MIN_W: 26, // hide a span's text below this px width (tooltip still shows it)
-  OP_LANE_H: 46, OP_BAR_H: 16, // operator free-time lane (sits above the groups)
+  GUTTER: 232, RIGHT: 20, AXIS_Y: 17, PLOT_TOP: 28,
+  PAD_TOP: 4, NAME_H: 15, BAR_H: 24, GAP: 3, PAD_BOTTOM: 4,
+  SUB_ROW_H: 5, SUB_GAP: 2, SUB_ROWS: 2,
+  GROUP_HEAD_H: 26,
+  NAME_MIN_W: 28, // hide a span's text below this px width (tooltip still shows it)
+  OP_LANE_H: 52, OP_BAR_H: 20, // operator free-time lane (sits above the groups)
   PX_PER_HOUR: 240, // min horizontal density → long windows scroll (see plotW)
 };
 
@@ -449,7 +469,7 @@ function laneHeight(lane) {
 }
 
 function renderTimeline(data) {
-  const lanes = data.lanes || [];
+  const lanes = renderableLanes(data.lanes);
   // keep <defs> (first child), drop the rest
   while (el.svg.childNodes.length > 1) el.svg.removeChild(el.svg.lastChild);
   hideTip();
@@ -559,9 +579,16 @@ function renderTimeline(data) {
   for (const g of groups) for (const lane of g.lanes) {
     drawLane(lane, lane._top, lane._idx, x, W, haveActivity, activeGlobal);
   }
-  // (Per-switch context-switch verticals were removed — the operator lane's
-  // free/occupied split now carries the context-switch cost; the switch count
-  // lives in the operator tooltip.)
+  // context switches (optional, off by default): red verticals at each real
+  // (≥15s-engaged) switch — toggled via the "show context switches" chart option.
+  // The operator lane already carries the switch cost; this is an opt-in overlay.
+  if (el.optCtxSwitches && el.optCtxSwitches.checked) {
+    for (const t of op.switchTimes) {
+      el.svg.appendChild(svgEl("line", {
+        class: "ctx-switch", x1: x(t), y1: GEO.PLOT_TOP, x2: x(t), y2: plotBottom,
+      }));
+    }
+  }
 }
 
 // groupByProject buckets lanes by lane.project, preserving lane order within a
@@ -644,9 +671,9 @@ function drawLane(lane, rowTop, idx, x, W, haveActivity, activeGlobal) {
   if (lane.cost_usd != null) idBits.push(fmtUSD(lane.cost_usd));
   const gutter = svgEl("g", { class: "lane-gutter" });
   gutter.setAttribute("data-session", laneIdentity(lane)); // bars are keyed by identity, not name
-  const main = svgEl("text", { class: "lane-label", x: 10, y: rowTop + 15 });
+  const main = svgEl("text", { class: "lane-label", x: 10, y: rowTop + 16 });
   main.textContent = truncate(idMain, 32);
-  const sub = svgEl("text", { class: "lane-sub", x: 10, y: rowTop + 29 });
+  const sub = svgEl("text", { class: "lane-sub", x: 10, y: rowTop + 35 });
   sub.textContent = truncate(idBits.join(" · "), 34);
   gutter.appendChild(main); gutter.appendChild(sub);
   attachGutterTip(gutter, lane, currentName(lane));
@@ -665,8 +692,8 @@ function drawLane(lane, rowTop, idx, x, W, haveActivity, activeGlobal) {
     // a dashed divider marks each rename boundary (skip the redundant left edge)
     if (i > 0) el.svg.appendChild(svgEl("line", { class: "name-div", x1: sx, y1: nameY, x2: sx, y2: barY + GEO.BAR_H }));
     if (sw >= GEO.NAME_MIN_W && seg.label) {
-      const t = svgEl("text", { class: "name-seg-label" + (isLead ? " lead" : ""), x: sx + 4, y: nameY + 9.5 });
-      t.textContent = truncate(seg.label, Math.max(1, Math.floor((sw - 6) / 6.1)));
+      const t = svgEl("text", { class: "name-seg-label" + (isLead ? " lead" : ""), x: sx + 4, y: nameY + 11 });
+      t.textContent = truncate(seg.label, Math.max(1, Math.floor((sw - 6) / 6.6)));
       el.svg.appendChild(t);
     }
   });
@@ -890,7 +917,7 @@ function pctColor(pct) {
 
 function renderCostCard(data, plan) {
   const totals = data.totals || {};
-  const lanes = (data.lanes || []).slice().sort((a, b) => (b.cost_usd || 0) - (a.cost_usd || 0));
+  const lanes = renderableLanes(data.lanes).slice().sort((a, b) => (b.cost_usd || 0) - (a.cost_usd || 0));
   const pw = data.plan_window || null;
 
   // per-session rows (only those with a cost)
@@ -1022,6 +1049,7 @@ function init() {
   el.nextDay.addEventListener("click", () => { el.day.value = shiftDay(el.day.value, +1); el.since.value = el.until.value = ""; reloadNow(); });
   el.live.addEventListener("click", () => { el.day.value = todayLocal(); el.since.value = el.until.value = ""; reloadNow(); });
   el.clearRange.addEventListener("click", () => { el.since.value = el.until.value = ""; reloadNow(); });
+  el.optCtxSwitches.addEventListener("change", () => { if (lastData) renderTimeline(lastData); });
 
   // dismiss popout on outside click / Escape
   document.addEventListener("click", (ev) => {
