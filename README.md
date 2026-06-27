@@ -20,17 +20,23 @@ no frameworks, no CDN, no external fetches. It works offline and loads instantly
   `/api/timeline` every ~3s and repaints only when the data changes, with a small
   "updated _Xs_ ago" indicator and a status dot (green = fresh, amber = aging,
   red = error/stale).
-- **Dominant swimlanes** at the top of the fold: one full-width, tall lane per
-  session.
+- **Dominant swimlanes** at the top of the fold: one **compact bar per session**,
+  keyed by **stable session identity** (`session_id`, falling back to `pid`) — so
+  renaming a session never splits its history into a second row, and parallel
+  sessions pack tightly as separate bars.
   - `working` is solid green; **`delegating` is faded green** (the agent handed
     work to subagents).
   - Each lane draws its **subagent spans** as thin violet sub-bars (packed into
     rows by overlap). Hover for a tooltip; **click to pin a popout** with the
     subagent's `agent_type`, `description`, and duration.
-  - **Session-name labels** (multilabel over time): the lane label is the latest
-    `labels[]` entry; if the name changed mid-window a violet ribbon marks the
-    segments and the full history shows on hover. Falls back to
-    `project · agent · pid` when no label was recorded.
+  - **Session-name spans, drawn along the bar.** A session's name is attached to
+    its bar as ordered segments from `names[]` (the slug-only `/name` history), so
+    each slug labels the stretch it was active and a **mid-life rename reads as one
+    bar with multiple labeled segments**. The leading pre-`/name` stretch falls
+    back to `project_full` (pretty name) if present, else the `project`
+    abbreviation, else `labels[]` — rendered dim/italic to read as a fallback. The
+    gutter shows the **identity** (`pid · agent`, short `session_id`, cost), never
+    the name, and the full span history is on hover.
   - **Focus/attention overlay**: spans where you were focused on that session
     **and** active (not idle) are outlined/hatched in blue, so attended-vs-
     delegated work is visible at a glance. Global idle periods are dimmed.
@@ -84,9 +90,11 @@ go build -o switchboard-dashboard .
 ```
 
 - `testdata/timeline/2026-06-26-full.json` — a `timeline --json` document
-  exercising every v2 field (multi-label lanes, subagent spans, focus spans,
-  per-lane + total cost, `plan_window`, global `activity`, and the delegation
-  summary metrics).
+  exercising every v2 field: **session-name spans** (`names[]`, including a
+  session renamed mid-window → one bar with multiple segments, and a no-`/name`
+  lane that falls back to the project), `project_full`, multi-`labels[]` lanes,
+  subagent spans, focus spans, per-lane + total cost, `plan_window`, global
+  `activity`, and the delegation summary metrics.
 - `testdata/stub-ctl.sh` — a fake ctl that ignores its flags and prints that
   fixture.
 - `testdata/plan-usage.json` — a sample of the read-only OAuth plan cache for the
@@ -138,9 +146,9 @@ Claude Code writes that file while a session runs; the dashboard only reads it.
   subscription (the `*_dollars` fields are always null), which is why the `$` half
   of the gauge is switchboard's own recompute.
 
-Static assets (`index.html`, `app.js`, `style.css`) are served from `/`. The UI
-also reads `?day=`, `?since=`, `?until=` from its own URL so a window is
-shareable/bookmarkable.
+Static assets (`index.html`, `model.js`, `app.js`, `style.css`) are served from
+`/`. The UI also reads `?day=`, `?since=`, `?until=` from its own URL so a window
+is shareable/bookmarkable.
 
 ## The data contract
 
@@ -164,8 +172,12 @@ degrades gracefully. New/changed fields the dashboard consumes:
 
 | Field                                   | Meaning                                                        |
 | --------------------------------------- | -------------------------------------------------------------- |
+| `lanes[].session_id`, `lanes[].pid`     | stable bar identity (renaming never re-keys or splits a bar)    |
 | `lanes[].intervals[].status`            | adds `delegating` (faded green: agent handed work to subagents)|
-| `lanes[].labels[]` `{label,start,end}`  | session name over time (multilabel)                            |
+| `lanes[].name`                          | the single canonical current session name (latest `/name` slug)|
+| `lanes[].names[]` `{label,start,end}`   | slug-only `/name` span history → name segments drawn along the bar |
+| `lanes[].project_full`                  | optional pretty project name; leading-segment label fallback   |
+| `lanes[].labels[]` `{label,start,end}`  | full raw name history (incl. defaults/titles); lead fallback only |
 | `lanes[].subagents[]`                   | `{agent_type, tool_use_id, description, start, end}` sub-bars  |
 | `lanes[].focus[]` `{start,end}`         | spans where this session was the focused window                |
 | `lanes[].cost_usd`, `lanes[].tok_*`     | per-session cost + token breakdown                             |
@@ -199,11 +211,14 @@ The three "attention" figures answer different questions:
 ## Development
 
 ```sh
-go test ./...   # handler + arg-builder + /api/plan tests (uses a stub ctl & temp files)
+go test ./...   # Go: handler + arg-builder + /api/plan + name-span contract (stub ctl & temp files)
+node --test     # JS: render-model tests (web/model.test.js — node:test, no deps)
 go vet ./...
 go build -o switchboard-dashboard .
 ```
 
-Tests inject a stub `switchboard-ctl` (a shell script in a temp dir) via `--ctl`
-and temp plan files via `Server.PlanPath`, so they run without a real switchboard
-install or the live OAuth cache.
+The Go tests inject a stub `switchboard-ctl` (a shell script in a temp dir) via
+`--ctl` and temp plan files via `Server.PlanPath`, so they run without a real
+switchboard install or the live OAuth cache. The client-side render model
+(identity keying, name-span computation, parallel bars) lives in `web/model.js`
+as DOM-free pure functions and is covered by `web/model.test.js`.
