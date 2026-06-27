@@ -52,6 +52,18 @@ const FOCUS_STROKE = "#58a6ff";
 // delegating is superseded by dormant; if it ever appears it shows via the extra path.
 const STATUS_ORDER = ["working", "dormant", "idle", "permission", "suspended", ""];
 
+// STATUS_MEANING: one-line plain-language gloss per status, surfaced in the
+// status-key hover descriptors so the legend explains itself.
+const STATUS_MEANING = {
+  working: "An agent was actively producing work.",
+  dormant: "A parent agent was waiting on a subagent.",
+  idle: "A session was alive but doing nothing.",
+  permission: "Blocked waiting for your approval.",
+  suspended: "A session was paused/backgrounded.",
+  "": "Status not reported.",
+  delegating: "Legacy: parent delegating to a subagent.",
+};
+
 function statusLabel(s) { return s === "" ? "unknown" : s; }
 function statusColor(s) {
   return STATUS_COLORS[s] !== undefined ? STATUS_COLORS[s] : "#8957e5";
@@ -422,15 +434,33 @@ function renderTopline(summary) {
   const extra = Math.max(0, fanout - union);
   const DAY = 24 * 3600 * 1e9;                   // ns in a 24h day
   const mult = union > 0 ? fanout / union : null;
+  // headline figures read WITHOUT seconds (coarse) — second-level precision is noise here.
+  const extraStr = humanDurationCoarse(extra);
+  const dayStr = humanDurationCoarse(DAY + extra);
+  const multStr = mult == null ? "—" : mult.toFixed(1) + "×";
+  const gainedTip = formulaTipHTML({
+    title: "effective time gained",
+    formula: "agent-hours (fanout) − active wall-clock (union)",
+    result: "+" + extraStr,
+    why: `Extra output-time the agents bought you beyond the wall-clock you actually spent — as if your day ran ${dayStr} long.`,
+    color: "var(--c-working)",
+  });
+  const multTip = formulaTipHTML({
+    title: "force multiplier",
+    formula: "fanout ÷ union",
+    result: multStr,
+    why: "Average number of parallel sessions running during active time — how many 'you's were working at once.",
+  });
   el.topline.innerHTML = `
-    <div class="th-block">
-      <div class="th-val green">+${humanDuration(extra)}</div>
-      <div class="th-key">effective time gained ~ ${humanDuration(DAY + extra)} day</div>
+    <div class="th-block has-tip" data-tip="${escapeHTML(gainedTip)}">
+      <div class="th-val green">+${extraStr}</div>
+      <div class="th-key">effective time gained ~ ${dayStr} day</div>
     </div>
-    <div class="th-block">
-      <div class="th-val">${mult == null ? "—" : mult.toFixed(1) + "×"}</div>
-      <div class="th-key">force multiplier · over ${humanDuration(union)} active</div>
+    <div class="th-block has-tip" data-tip="${escapeHTML(multTip)}">
+      <div class="th-val">${multStr}</div>
+      <div class="th-key">force multiplier · over ${humanDurationCoarse(union)} active</div>
     </div>`;
+  attachFormulaTips(el.topline);
 }
 
 // renderStatusKey: the time-by-status list doubles as the swimlane legend; show
@@ -443,7 +473,14 @@ function renderStatusKey(summary) {
   el.statusKey.innerHTML = keys.map((k) => {
     const op = k === "delegating" ? DELEGATING_OPACITY : k === "dormant" ? DORMANT_OPACITY : 1;
     const swatchStyle = `background:${statusColor(k)}` + (op !== 1 ? `;opacity:${op}` : "");
-    return `<span class="sk" title="${escapeHTML(statusLabel(k))}">
+    const tip = formulaTipHTML({
+      title: statusLabel(k),
+      formula: `Σ time in '${statusLabel(k)}' across all sessions`,
+      result: humanDuration(byStatus[k] || 0),
+      why: STATUS_MEANING[k] || "",
+      color: statusColor(k),
+    });
+    return `<span class="sk has-tip" data-tip="${escapeHTML(tip)}">
         <span class="sk-left">
           <span class="swatch" style="${swatchStyle}"></span>
           <span class="sk-name">${statusLabel(k)}</span>
@@ -451,6 +488,7 @@ function renderStatusKey(summary) {
         <span class="sk-val">${humanDuration(byStatus[k] || 0)}</span>
       </span>`;
   }).join("");
+  attachFormulaTips(el.statusKey);
 }
 
 // ---------------------------------------------------------------------------
