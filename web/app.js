@@ -13,7 +13,8 @@
 //   - v2 lane fields: labels[], subagents[], focus[], cost_usd, tok_*.
 //   - v2 summary fields: prompt_active, attended_active, delegated_active,
 //     delegation_effectiveness. v2 top-level: plan_window, activity[] (optional).
-// Live by default: poll, repaint only on change, "updated Xs ago".
+// Live by default: poll, repaint only on change. Status reads "Live" while
+// fresh (<15s) and "last Xs ago" once polling stalls (kills per-second thrash).
 // ---------------------------------------------------------------------------
 
 const SVGNS = "http://www.w3.org/2000/svg";
@@ -24,18 +25,21 @@ const PLAN_POLL_MS = 15000; // /api/plan poll cadence (changes slowly)
 // permission red; suspended grey; "" (unknown) dim. Mirrors style.css vars.
 const STATUS_COLORS = {
   working: "#3fb950",
-  delegating: "#3fb950", // same hue, rendered faded (see DELEGATING_OPACITY)
+  delegating: "#3fb950", // legacy: same hue, rendered faded (see DELEGATING_OPACITY)
+  dormant: "#3fb950",    // parent waiting on a subagent — green hue, rendered low-alpha (dark) so the subagent's solid green dominates
   idle: "#d29922",
   permission: "#f85149",
   suspended: "#6e7681",
   "": "#3a414c",
 };
-const DELEGATING_OPACITY = 0.4; // faded green for delegating intervals
-const SUBAGENT_COLOR = "#a371f7"; // violet, distinct from the status greens
+const DELEGATING_OPACITY = 0.4;  // faded green for legacy delegating intervals
+const DORMANT_OPACITY = 0.3;     // darkish low-alpha green for parent-dormant intervals
+const SUBAGENT_COLOR = "#3fb950"; // green: the subagent is the one doing the work
 const FOCUS_STROKE = "#58a6ff";
 
 // Fixed render order for the status key. "" renders last, labelled "unknown".
-const STATUS_ORDER = ["working", "delegating", "idle", "permission", "suspended", ""];
+// delegating is superseded by dormant; if it ever appears it shows via the extra path.
+const STATUS_ORDER = ["working", "dormant", "idle", "permission", "suspended", ""];
 
 function statusLabel(s) { return s === "" ? "unknown" : s; }
 function statusColor(s) {
@@ -157,6 +161,7 @@ const el = {
   updated: document.getElementById("updated"),
   windowLabel: document.getElementById("window-label"),
   error: document.getElementById("error"),
+  topline: document.getElementById("topline"),
   statusKey: document.getElementById("status-key"),
   svg: document.getElementById("timeline"),
   wrap: document.getElementById("timeline-wrap"),
@@ -246,12 +251,15 @@ function tickLive() {
     setDot("err");
     return;
   }
+  // Fresh (<15s) → static "Live" (no per-second thrash). Stale → "last Xs ago".
   const ageMs = lastUpdatedAt == null ? null : Date.now() - lastUpdatedAt;
-  el.updated.textContent = fetchOK ? "updated " + agoString(lastUpdatedAt) : "stale · retrying";
-  if (!fetchOK) setDot("err");
-  else if (ageMs != null && ageMs < 10000) setDot("live");
-  else if (ageMs != null && ageMs < 60000) setDot("warn");
-  else setDot("err");
+  if (fetchOK && ageMs != null && ageMs < 15000) {
+    el.updated.textContent = "Live";
+    setDot("live");
+  } else {
+    el.updated.textContent = "last " + agoString(lastUpdatedAt);
+    setDot(ageMs != null && ageMs < 60000 ? "warn" : "err");
+  }
 }
 function setDot(kind) {
   el.liveDot.className = "dot " + kind;
@@ -263,10 +271,21 @@ function setDot(kind) {
 
 function render(data) {
   el.windowLabel.textContent = data.window || "—";
+  renderTopline(data.summary || {});
   renderStatusKey(data.summary || {});
   renderTimeline(data);
   renderAttentionCard(data.summary || {});
   renderCostCard(data, lastPlan);
+}
+
+// renderTopline: the dominant hours figure, pulled out of the attention card to
+// sit top-left. Uses fanout (C) — total agent compute, parallelism counted.
+function renderTopline(summary) {
+  el.topline.innerHTML = `
+    <div class="th-block">
+      <div class="th-val green">${humanDuration(summary.attention_fanout)}</div>
+      <div class="th-key">agent hours · fanout (C)</div>
+    </div>`;
 }
 
 // renderStatusKey: the time-by-status list doubles as the swimlane legend; show
@@ -277,10 +296,13 @@ function renderStatusKey(summary) {
   const extra = Object.keys(byStatus).filter((k) => !seen.has(k)).sort();
   const keys = STATUS_ORDER.concat(extra);
   el.statusKey.innerHTML = keys.map((k) => {
-    const faded = k === "delegating" ? ` style="opacity:.55"` : "";
+    const op = k === "delegating" ? DELEGATING_OPACITY : k === "dormant" ? DORMANT_OPACITY : 1;
+    const swatchStyle = `background:${statusColor(k)}` + (op !== 1 ? `;opacity:${op}` : "");
     return `<span class="sk" title="${escapeHTML(statusLabel(k))}">
-        <span class="swatch" style="background:${statusColor(k)}"${faded}></span>
-        <span class="sk-name">${statusLabel(k)}</span>
+        <span class="sk-left">
+          <span class="swatch" style="${swatchStyle}"></span>
+          <span class="sk-name">${statusLabel(k)}</span>
+        </span>
         <span class="sk-val">${humanDuration(byStatus[k] || 0)}</span>
       </span>`;
   }).join("");
@@ -301,6 +323,7 @@ const GEO = {
   GUTTER: 232, RIGHT: 20, AXIS_Y: 16, PLOT_TOP: 26,
   LANE_H: 58, PAD_TOP: 6, RIBBON_H: 5, BAR_H: 18, GAP: 4,
   SUB_ROW_H: 5, SUB_GAP: 2, SUB_ROWS: 3,
+  GROUP_HEAD_H: 26,
 };
 
 function renderTimeline(data) {
@@ -332,7 +355,22 @@ function renderTimeline(data) {
 
   const W = Math.max(620, el.wrap.clientWidth);
   const plotW = Math.max(160, W - GEO.GUTTER - GEO.RIGHT);
-  const plotBottom = GEO.PLOT_TOP + lanes.length * GEO.LANE_H;
+
+  // group lanes by project; lay out a header per group, then its lanes, top-down
+  const groups = groupByProject(lanes);
+  let yCursor = GEO.PLOT_TOP;
+  let laneIdx = 0;
+  for (const g of groups) {
+    g.headY = yCursor;
+    yCursor += GEO.GROUP_HEAD_H;
+    for (const lane of g.lanes) {
+      lane._top = yCursor;
+      lane._idx = laneIdx++;
+      lane._firstInGroup = lane === g.lanes[0];
+      yCursor += GEO.LANE_H;
+    }
+  }
+  const plotBottom = yCursor;
   const H = plotBottom + 14;
 
   el.svg.setAttribute("width", W);
@@ -374,21 +412,46 @@ function renderTimeline(data) {
   }
   el.svg.appendChild(svgEl("line", { class: "axis-line", x1: GEO.GUTTER, y1: GEO.PLOT_TOP, x2: GEO.GUTTER, y2: plotBottom }));
 
-  lanes.forEach((lane, i) => {
-    drawLane(lane, i, x, W, haveActivity, activeGlobal);
-  });
+  // project group headers (rule across full width + label in the gutter)
+  for (const g of groups) {
+    const ry = g.headY + GEO.GROUP_HEAD_H - 7;
+    el.svg.appendChild(svgEl("line", { class: "group-rule", x1: 0, y1: ry, x2: W, y2: ry }));
+    const gl = svgEl("text", { class: "group-label", x: 10, y: g.headY + 16 });
+    gl.textContent = (g.project + " · " + g.lanes.length).toUpperCase();
+    el.svg.appendChild(gl);
+  }
+
+  for (const g of groups) for (const lane of g.lanes) {
+    drawLane(lane, lane._top, lane._idx, lane._firstInGroup, x, W, haveActivity, activeGlobal);
+  }
 }
 
-function drawLane(lane, i, x, W, haveActivity, activeGlobal) {
-  const rowTop = GEO.PLOT_TOP + i * GEO.LANE_H;
+// groupByProject buckets lanes by lane.project, preserving lane order within a
+// group; groups sort alphabetically with "(no project)" pinned last.
+function groupByProject(lanes) {
+  const map = new Map();
+  for (const lane of lanes) {
+    const key = lane.project || "(no project)";
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(lane);
+  }
+  const keys = [...map.keys()].sort((a, b) => {
+    const an = a === "(no project)", bn = b === "(no project)";
+    if (an !== bn) return an ? 1 : -1;
+    return a.localeCompare(b);
+  });
+  return keys.map((k) => ({ project: k, lanes: map.get(k) }));
+}
+
+function drawLane(lane, rowTop, idx, firstInGroup, x, W, haveActivity, activeGlobal) {
   const barY = rowTop + GEO.PAD_TOP + GEO.RIBBON_H;
   const subTop = barY + GEO.BAR_H + GEO.GAP;
 
-  // lane row background (subtle alternation) + separator
+  // lane row background (subtle alternation) + separator (group header rules the top edge)
   el.svg.appendChild(svgEl("rect", {
-    class: i % 2 ? "lane-bg odd" : "lane-bg", x: 0, y: rowTop, width: W, height: GEO.LANE_H,
+    class: idx % 2 ? "lane-bg odd" : "lane-bg", x: 0, y: rowTop, width: W, height: GEO.LANE_H,
   }));
-  if (i > 0) el.svg.appendChild(svgEl("line", { class: "lane-sep", x1: 0, y1: rowTop, x2: W, y2: rowTop }));
+  if (!firstInGroup) el.svg.appendChild(svgEl("line", { class: "lane-sep", x1: 0, y1: rowTop, x2: W, y2: rowTop }));
 
   // ---- gutter identity + latest label ----
   const labels = lane.labels || [];
@@ -437,6 +500,7 @@ function drawLane(lane, i, x, W, haveActivity, activeGlobal) {
       fill: statusColor(iv.status),
     };
     if (iv.status === "delegating") attrs["fill-opacity"] = DELEGATING_OPACITY;
+    else if (iv.status === "dormant") attrs["fill-opacity"] = DORMANT_OPACITY;
     const rect = svgEl("rect", attrs);
     attachTip(rect, () => intervalTipHTML(lane, iv));
     el.svg.appendChild(rect);
@@ -503,8 +567,9 @@ function axisTicks(t0, t1) {
 function intervalTipHTML(lane, iv) {
   const durMs = Date.parse(iv.end) - Date.parse(iv.start);
   const sub = iv.subagents || 0;
-  const faded = iv.status === "delegating" ? " (delegating — faded)" : "";
-  return `<div class="t-status" style="color:${statusColor(iv.status)}">${statusLabel(iv.status)}${faded}</div>`
+  const note = iv.status === "delegating" ? " (delegating — faded)"
+    : iv.status === "dormant" ? " (waiting on subagent)" : "";
+  return `<div class="t-status" style="color:${statusColor(iv.status)}">${statusLabel(iv.status)}${note}</div>`
     + `<div class="t-row">${fmtClock(iv.start)} – ${fmtClock(iv.end)}</div>`
     + `<div class="t-row">${humanDurationMs(durMs)}</div>`
     + (sub > 0 ? `<div class="t-sub">${sub} subagent${sub === 1 ? "" : "s"} at start</div>` : "");
@@ -571,10 +636,6 @@ function renderAttentionCard(summary) {
     <div class="card-label">attention &amp; delegation</div>
     <div class="headline-row">
       <div class="headline">
-        <div class="hv green">${humanDuration(summary.attention_fanout)}</div>
-        <div class="hk">agent compute · fanout (C)</div>
-      </div>
-      <div class="headline">
         <div class="hv" style="color:${effColor}">${haveDeleg && effPct != null ? effPct + "%" : "—"}</div>
         <div class="hk">delegation effectiveness</div>
       </div>
@@ -595,9 +656,10 @@ function renderAttentionCard(summary) {
 // render: cost card (window total + per-session + 5h plan gauge)
 // ---------------------------------------------------------------------------
 
-function gaugeBar(pct, colorVar) {
+function gaugeBar(pct) {
   const p = pct == null ? 0 : Math.max(0, Math.min(100, pct));
-  return `<div class="gauge"><div class="gauge-fill" style="width:${p}%;background:${colorVar}"></div></div>`;
+  // fill color is owned by CSS (warm orange); pct still drives the % figure color.
+  return `<div class="gauge"><div class="gauge-fill" style="width:${p}%"></div></div>`;
 }
 function pctColor(pct) {
   if (pct == null) return "var(--fg-muted)";
@@ -647,7 +709,7 @@ function renderCostCard(data, plan) {
           ${fhPct != null ? `<b style="color:${pctColor(fhPct)}">${fmtPct(fhPct)}</b>` : `<span class="dim">—</span>`}
         </span>
       </div>
-      ${gaugeBar(fhPct, pctColor(fhPct))}
+      ${gaugeBar(fhPct)}
       <div class="gauge-foot">
         <span>${fh && fh.resets_at ? resetCountdown(fh.resets_at) : ""}</span>
         ${freshness}
@@ -657,7 +719,7 @@ function renderCostCard(data, plan) {
           <span>weekly</span>
           <span class="gauge-figs"><b style="color:${pctColor(wkPct)}">${fmtPct(wkPct)}</b></span>
         </div>
-        ${gaugeBar(wkPct, pctColor(wkPct))}
+        ${gaugeBar(wkPct)}
       ` : ""}
     </div>
 

@@ -11,6 +11,7 @@
 
   --c-working: #3fb950;
   --c-delegating: #3fb950;
+  --c-dormant: #3fb950; /* low-alpha green applied at render (see DORMANT_OPACITY) */
   --c-idle: #d29922;
   --c-permission: #f85149;
   --c-suspended: #6e7681;
@@ -115,15 +116,22 @@ button.ghost { background: transparent; color: var(--fg-muted); font-size: 12px;
 
 main { padding: 16px 18px 36px; }
 
+/* ---------- topline (dominant hours, top-left) ---------- */
+.topline { display: flex; align-items: flex-end; gap: 32px; margin: 2px 2px 18px; }
+.topline .th-val { font-family: var(--mono); font-size: 42px; font-weight: 700; letter-spacing: -1.2px; line-height: 1; }
+.topline .th-val.green { color: var(--c-working); }
+.topline .th-key { font-size: 11px; color: var(--fg-muted); margin-top: 7px; text-transform: uppercase; letter-spacing: 0.7px; }
+
 /* ---------- swimlanes (dominant) ---------- */
 .timeline-section { margin-bottom: 20px; }
 .section-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 10px; flex-wrap: wrap; }
 .section-head h2 { font-size: 13px; margin: 0; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.7px; }
 
-/* time-by-status = the swimlane key/legend */
-.status-key { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
-.status-key .sk { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--fg-muted); }
-.status-key .swatch { width: 11px; height: 11px; border-radius: 2px; }
+/* time-by-status = the swimlane key/legend (stacked rows in a box) */
+.status-key { display: flex; flex-direction: column; gap: 9px; }
+.status-key .sk { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; color: var(--fg-muted); }
+.status-key .sk-left { display: flex; align-items: center; gap: 7px; }
+.status-key .swatch { width: 11px; height: 11px; border-radius: 2px; flex: none; }
 .status-key .sk-name { color: var(--fg-muted); }
 .status-key .sk-val { font-family: var(--mono); color: var(--fg); }
 
@@ -158,6 +166,10 @@ main { padding: 16px 18px 36px; }
 .lane-badge { fill: var(--accent); font-size: 10px; font-weight: 600; }
 .lane-sub { fill: var(--fg-dim); font-family: var(--mono); font-size: 10.5px; }
 
+/* project group headers */
+.group-rule { stroke: var(--border); stroke-width: 1; }
+.group-label { fill: var(--fg-muted); font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: 0.6px; }
+
 .label-seg { fill: rgba(163, 113, 247, 0.35); cursor: pointer; }
 .label-seg:hover { fill: rgba(163, 113, 247, 0.7); }
 .label-div { stroke: rgba(163, 113, 247, 0.5); stroke-width: 1; stroke-dasharray: 2 2; }
@@ -171,11 +183,19 @@ main { padding: 16px 18px 36px; }
 .subagent-bar:hover { stroke: #fff; stroke-width: 1; }
 
 /* ---------- cards strip ---------- */
-.cards {
+.boxes {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: 12px;
+  align-items: start;
 }
+.box {
+  background: var(--bg-elev);
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+.box-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--fg-dim); margin-bottom: 12px; }
 .card {
   background: var(--bg-elev);
   border: 1px solid var(--border-soft);
@@ -209,14 +229,21 @@ main { padding: 16px 18px 36px; }
 .gauge-head.week { margin-top: 12px; }
 .gauge-figs { font-family: var(--mono); }
 .gauge-figs b { font-weight: 700; }
+/* pill track, slightly thicker than the original; warm orange fill that echoes
+   the terminal statusline usage bar (Image #3) without copying it. */
 .gauge {
-  height: 9px;
-  border-radius: 5px;
+  height: 11px;
+  border-radius: 6px;
   background: var(--bg-elev-2);
   border: 1px solid var(--border-soft);
   overflow: hidden;
 }
-.gauge-fill { height: 100%; border-radius: 5px 0 0 5px; transition: width 0.4s ease; }
+.gauge-fill {
+  height: 100%;
+  border-radius: 6px 0 0 6px;
+  transition: width 0.4s ease;
+  background: linear-gradient(180deg, #f0a24e, #e07c33);
+}
 .gauge-foot { display: flex; justify-content: space-between; gap: 12px; font-size: 11px; color: var(--fg-dim); margin-top: 5px; }
 .session-costs { margin-top: 6px; border-top: 1px solid var(--border-soft); padding-top: 10px; }
 

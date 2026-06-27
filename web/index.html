@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>switchboard · activity monitor</title>
+  <title>switchboard</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
       <span class="dot" id="live-dot"></span>
-      <h1>switchboard<span class="sep">·</span><span class="muted">activity monitor</span></h1>
+      <h1>switchboard</h1>
     </div>
 
     <div class="nav">
@@ -35,13 +35,11 @@
   <div id="error" class="error-banner" hidden></div>
 
   <main>
-    <!-- Swimlanes: the dominant, full-width hero at the top of the fold. -->
+    <!-- Topline: the dominant hours figure, top-left. -->
+    <section class="topline" id="topline"></section>
+
+    <!-- Swimlanes: grouped by project. -->
     <section class="timeline-section">
-      <div class="section-head">
-        <h2>activity</h2>
-        <!-- time-by-status doubles as the swimlane key/legend (all statuses, incl. zeros) -->
-        <div class="status-key" id="status-key" aria-label="time by status (key)"></div>
-      </div>
       <div class="timeline-wrap" id="timeline-wrap">
         <svg id="timeline" role="img" aria-label="session swimlanes">
           <defs>
@@ -55,8 +53,12 @@
       </div>
     </section>
 
-    <!-- Compact strip: consolidated attention + cost. -->
-    <section class="cards" id="cards" aria-label="summary">
+    <!-- Bottom boxes: legend · attention/delegation · cost. -->
+    <section class="boxes" id="boxes" aria-label="summary">
+      <div class="box legend-box">
+        <div class="box-label">legend · time by status</div>
+        <div class="status-key" id="status-key" aria-label="time by status (key)"></div>
+      </div>
       <div class="card attention" id="card-attention"></div>
       <div class="card cost" id="card-cost"></div>
     </section>
