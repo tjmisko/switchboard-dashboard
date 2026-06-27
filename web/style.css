@@ -216,6 +216,9 @@ main { padding: 16px 18px 36px; }
   border-radius: 10px;
   padding: 14px 16px;
 }
+/* the legend reads narrower than the data cards (its rows are short); cap its
+   width so it doesn't stretch to a full grid track. */
+.legend-box { max-width: 300px; }
 .box-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--fg-dim); margin-bottom: 12px; }
 .card {
   background: var(--bg-elev);
