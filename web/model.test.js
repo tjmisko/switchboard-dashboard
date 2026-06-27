@@ -7,7 +7,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { laneIdentity, leadLabel, nameSegments, buildBars, spanInefficiency } = require("./model.js");
+const { laneIdentity, leadLabel, nameSegments, buildBars, spanInefficiency, packLanes } = require("./model.js");
 
 // ms helper: a fixed base instant + offset minutes, as RFC3339 with offset.
 const BASE = "2026-06-26T17:00:00-07:00";
@@ -167,4 +167,52 @@ test("spanInefficiency returns null when the span has zero length", () => {
   const at0 = baseMs;
   const lane = { intervals: [interval("idle", at0 - 1000, at0 + 1000)] };
   assert.equal(spanInefficiency(lane, at0, at0), null);
+});
+
+// packLanes: greedy interval partitioning of a group's lanes into shared rows.
+function laneSpan(id, fromMin, toMin) {
+  return { session_id: id, start: at(fromMin), end: at(toMin) };
+}
+const idsOf = (rows) => rows.map((row) => row.map((l) => l.session_id));
+
+test("packLanes packs two time-serializable sessions onto one row", () => {
+  const rows = packLanes([laneSpan("A", 0, 10), laneSpan("B", 10, 20)]);
+  assert.equal(rows.length, 1, "non-overlapping sessions share a row");
+  assert.equal(rows[0].length, 2);
+  assert.deepEqual(idsOf(rows), [["A", "B"]]);
+});
+
+test("packLanes splits two overlapping sessions onto separate rows", () => {
+  const rows = packLanes([laneSpan("A", 0, 30), laneSpan("B", 10, 40)]);
+  assert.equal(rows.length, 2, "overlap forces a second row");
+});
+
+test("packLanes packs a later session back onto row 1 (the Switchboard case)", () => {
+  // A and B overlap (B opens row 2); C starts after A ends, so it packs onto row 1.
+  const rows = packLanes([laneSpan("A", 0, 20), laneSpan("B", 5, 60), laneSpan("C", 25, 45)]);
+  assert.equal(rows.length, 2, "max simultaneous overlap is 2 -> 2 rows");
+  assert.deepEqual(idsOf(rows), [["A", "C"], ["B"]]);
+});
+
+test("packLanes preserves start order within a row regardless of input order", () => {
+  const rows = packLanes([laneSpan("C", 20, 30), laneSpan("A", 0, 5), laneSpan("B", 10, 15)]);
+  assert.equal(rows.length, 1);
+  assert.deepEqual(idsOf(rows), [["A", "B", "C"]], "row lanes sorted by start");
+});
+
+test("packLanes treats adjacency (nextStart === prevEnd) as packable", () => {
+  const rows = packLanes([laneSpan("A", 0, 10), laneSpan("B", 10, 20), laneSpan("C", 20, 30)]);
+  assert.deepEqual(idsOf(rows), [["A", "B", "C"]]);
+});
+
+test("packLanes puts each unparseable-bounds lane on its own row without crashing", () => {
+  const rows = packLanes([{ session_id: "X", start: "nope", end: "nah" }, laneSpan("A", 0, 10)]);
+  assert.equal(rows.length, 2);
+  // the bounded lane packs first; the unbounded one is appended on its own row.
+  assert.deepEqual(idsOf(rows), [["A"], ["X"]]);
+});
+
+test("packLanes returns an empty list for no lanes", () => {
+  assert.deepEqual(packLanes([]), []);
+  assert.deepEqual(packLanes(null), []);
 });
