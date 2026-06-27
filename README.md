@@ -1,224 +1,111 @@
 # switchboard-dashboard
 
-A small, self-contained web **activity monitor** for the **switchboard**
-timeline.
+A self-contained web activity monitor for the
+[switchboard](https://github.com/tjmisko/switchboard) session timeline. It reads
+the timeline through the stable `switchboard-ctl timeline --json` contract, which
+keeps it decoupled from switchboard's on-disk history format, and renders a live
+swimlane view with attention, operator, and cost summaries.
 
-switchboard (the [producer](https://github.com/tjmisko/switchboard)) records what
-your Claude/Codex sessions are doing — working, delegating to subagents, idle,
-waiting on a permission prompt — into per-day history files. This dashboard is a
-**consumer**: it shells out to the stable `switchboard-ctl timeline --json`
-contract and renders the result as a dominant, always-live swimlane timeline plus
-a compact attention/cost strip. It never reads the history files directly, so it
-stays decoupled from switchboard's on-disk format.
-
-The whole UI (HTML/CSS/JS) is embedded into a single Go binary via `go:embed` —
-no frameworks, no CDN, no external fetches. It works offline and loads instantly.
+The entire UI (HTML, CSS, JS) is embedded into one Go binary via `go:embed`. It
+uses no frameworks and makes no external network calls beyond the local `ctl`
+invocation, so it loads instantly and runs offline.
 
 ## What it shows
 
-- **Live by default.** No refresh button, no auto-refresh toggle — it polls
-  `/api/timeline` every ~3s and repaints only when the data changes, with a small
-  "updated _Xs_ ago" indicator and a status dot (green = fresh, amber = aging,
-  red = error/stale).
-- **Dominant swimlanes** at the top of the fold: one **compact bar per session**,
-  keyed by **stable session identity** (`session_id`, falling back to `pid`) — so
-  renaming a session never splits its history into a second row, and parallel
-  sessions pack tightly as separate bars.
-  - `working` is solid green; **`delegating` is faded green** (the agent handed
-    work to subagents).
-  - Each lane draws its **subagent spans** as thin violet sub-bars (packed into
-    rows by overlap). Hover for a tooltip; **click to pin a popout** with the
-    subagent's `agent_type`, `description`, and duration.
-  - **Session-name spans, drawn along the bar.** A session's name is attached to
-    its bar as ordered segments from `names[]` (the slug-only `/name` history), so
-    each slug labels the stretch it was active and a **mid-life rename reads as one
-    bar with multiple labeled segments**. The leading pre-`/name` stretch falls
-    back to `project_full` (pretty name) if present, else the `project`
-    abbreviation, else `labels[]` — rendered dim/italic to read as a fallback. The
-    gutter shows the **identity** (`pid · agent`, short `session_id`, cost), never
-    the name, and the full span history is on hover.
-  - **Focus/attention overlay**: spans where you were focused on that session
-    **and** active (not idle) are outlined/hatched in blue, so attended-vs-
-    delegated work is visible at a glance. Global idle periods are dimmed.
-- **Time-by-status is the legend.** The per-status totals strip above the
-  swimlanes doubles as the color key (all statuses shown, including zeros).
-- **Consolidated attention card**: the headline **fanout (C)** "agent compute"
-  figure next to the **delegation-effectiveness %**, with union (A), per-session
-  (B), and the delegated / attended / prompt breakdown beneath.
-- **Cost card**: the window total (`totals.cost_usd`, recomputed from
-  tokens × model price), a per-session breakdown, and a rolling **5h plan-window
-  gauge** that pairs our own `$` (`plan_window.cost_usd`) with the official
-  utilization **%** read read-only from the OAuth cache (see `/api/plan`).
+- **Swimlane timeline**, grouped by project. Each session is a compact bar keyed
+  by stable identity (`session_id`, falling back to `pid`); sessions that never
+  overlap in time share a row. Identity (`agent · pid · cost`) is drawn inside
+  each bar.
+- **Status at a glance**: `working`, `dormant` (waiting on a subagent), `idle`,
+  `permission`, and `suspended`, with a cumulative-time legend that doubles as the
+  color key.
+- **Session-name spans** drawn along each bar from the `/name` history, so a
+  mid-window rename reads as one bar with labeled segments. The pre-`/name`
+  stretch falls back to the project name, rendered dim.
+- **Subagent sub-bars** for delegated work — hover for detail, click to pin a
+  popout.
+- **Focus/attention overlay** highlighting spans where the session was focused and
+  active; global idle periods are dimmed.
+- **Operator lane** partitioning the running window into free time and time spent
+  typing or recovering from a context switch.
+- **Topline** headline: the effective time gained and the force multiplier from
+  running agents in parallel.
+- **Attention and cost cards**: delegation effectiveness with the
+  union / per-session / delegated / attended / prompt breakdown, plus the window
+  cost, a per-session breakdown, and a rolling 5h plan-usage gauge.
+- **Hover any figure** for a descriptor showing its formula, result, and meaning.
+- **Live by default**: polls `/api/timeline` every ~3s and repaints on change,
+  with a freshness indicator.
 
 ## Quickstart
 
 ```sh
-# 1. Build
 go build -o switchboard-dashboard .
-
-# 2. Run against switchboard's real history (ctl's default dir once history is on)
-./switchboard-dashboard
-
-# 3. Open the URL it logs (default http://localhost:8080)
+./switchboard-dashboard            # serves http://localhost:8080
 ```
 
-`switchboard-dashboard` requires two things from switchboard:
+It requires a current `switchboard-ctl` on `PATH` (with the `timeline` subcommand
+and the v2 fields) and history recording enabled in switchboard
+(`~/.config/switchboard/history.json` set to `{"enabled":true,"detail":"full"}`).
+Use `--ctl` to point at a specific binary and `--dir` for a non-default history
+directory.
 
-1. **A current `switchboard-ctl` on your `PATH`** that has the `timeline`
-   subcommand and emits the v2 fields (labels, subagents, focus, cost,
-   `plan_window`). Point at a specific binary with `--ctl /path/to/switchboard-ctl`.
-2. **History recording enabled** in switchboard:
-   `~/.config/switchboard/history.json` containing `{"enabled":true}` (and
-   `"detail":"full"` for names/descriptions). Without it the history dir stays
-   empty and the dashboard shows "No activity".
+### Run against the bundled fixture
 
-With history enabled, ctl's default history dir is
-`$XDG_STATE_HOME/switchboard/history` (else `~/.local/state/switchboard/history`).
-Pass `--dir` to point somewhere else (e.g. a fixture dir).
-
-### Run against the committed fixture (no switchboard install needed)
-
-`testdata/` ships a synthetic full-detail v2 fixture and a stub `switchboard-ctl`
-that prints it, so you can drive the whole UI offline:
+`testdata/` ships a synthetic v2 timeline and a stub `ctl`, so the full UI runs
+with no switchboard install:
 
 ```sh
 go build -o switchboard-dashboard .
-./switchboard-dashboard \
-    --ctl  ./testdata/stub-ctl.sh \
-    --plan ./testdata/plan-usage.json
-# then open http://localhost:8080/?day=2026-06-26
+./switchboard-dashboard --ctl ./testdata/stub-ctl.sh --plan ./testdata/plan-usage.json
+# open http://localhost:8080/?day=2026-06-26
 ```
-
-- `testdata/timeline/2026-06-26-full.json` — a `timeline --json` document
-  exercising every v2 field: **session-name spans** (`names[]`, including a
-  session renamed mid-window → one bar with multiple segments, and a no-`/name`
-  lane that falls back to the project), `project_full`, multi-`labels[]` lanes,
-  subagent spans, focus spans, per-lane + total cost, `plan_window`, global
-  `activity`, and the delegation summary metrics.
-- `testdata/stub-ctl.sh` — a fake ctl that ignores its flags and prints that
-  fixture.
-- `testdata/plan-usage.json` — a sample of the read-only OAuth plan cache for the
-  5h/weekly gauge.
 
 ## Flags
 
-| Flag     | Default                        | Description                                                                 |
-| -------- | ------------------------------ | --------------------------------------------------------------------------- |
-| `--port` | `8080`                         | HTTP port to listen on.                                                      |
-| `--ctl`  | `switchboard-ctl`              | The `switchboard-ctl` binary; resolved via `PATH` if not a full path.       |
-| `--dir`  | `""`                           | History dir passed through to ctl as `--dir`. Empty = ctl's default.        |
-| `--plan` | `/tmp/claude-plan-usage.json`  | Cached OAuth plan-usage file, read **read-only** for the utilization gauge. |
+| Flag     | Default                       | Description                                        |
+| -------- | ----------------------------- | -------------------------------------------------- |
+| `--port` | `8080`                        | HTTP port.                                         |
+| `--ctl`  | `switchboard-ctl`             | The `switchboard-ctl` binary, resolved via `PATH`. |
+| `--dir`  | `""`                          | History dir passed to ctl; empty uses ctl's own.   |
+| `--plan` | `/tmp/claude-plan-usage.json` | Cached plan-usage file, read-only, for the gauge.  |
 
 ## HTTP API
 
-### `GET /api/timeline`
+- **`GET /api/timeline`** — proxies `switchboard-ctl timeline --json`, forwarding
+  `day`, `since`, `until`, and `dir` as ctl flags. Returns ctl's JSON on success,
+  or `502 {error, stderr}` when ctl exits non-zero.
+- **`GET /api/plan`** — returns a normalized, read-only view of the cached
+  plan-usage file for the cost gauge:
+  `{available, mtime, age_seconds, stale, five_hour, seven_day, seven_day_opus}`.
+  It never calls the OAuth endpoint. A missing file returns `200 {available:false}`
+  and the UI falls back to its own recomputed cost.
+- Static assets are served from `/`. The UI also reads `?day`, `?since`, and
+  `?until` from its own URL, so a window is shareable.
 
-Proxies `switchboard-ctl timeline --json`. Query params are forwarded to ctl:
+## Data contract
 
-| Param   | Maps to     | Notes                                            |
-| ------- | ----------- | ------------------------------------------------ |
-| `day`   | `--day`     | `YYYY-MM-DD` (default: today, per ctl).          |
-| `since` | `--since`   | `YYYY-MM-DD`; with `until`, a range.             |
-| `until` | `--until`   | `YYYY-MM-DD`. A range takes precedence over day. |
-| `dir`   | `--dir`     | Overrides the server's `--dir` for this request. |
+The JSON shape and units are owned by switchboard (`docs/history-schema.md`):
 
-- **200** `application/json` — ctl's stdout, passed through verbatim.
-- **502** `application/json` — `{"error": "...", "stderr": "..."}` when ctl exits
-  non-zero (e.g. a malformed date), with ctl's stderr included.
+- **Durations are nanoseconds**, **token fields are raw counts**, and **`cost_usd`
+  is a float in dollars** recomputed by the producer from tokens × per-model price.
+- The envelope is `{window, lanes, summary, totals}` with optional top-level
+  `activity` and `plan_window`. Every v2 field is additive and optional; older
+  day-files omit them and the UI degrades gracefully.
 
-### `GET /api/plan`
-
-Reads the cached OAuth plan-usage file (`--plan`, default
-`/tmp/claude-plan-usage.json`) **read-only** and returns a normalized view for
-the cost gauge. It **never** calls the OAuth endpoint or refreshes the token —
-Claude Code writes that file while a session runs; the dashboard only reads it.
-
-- Always **200** `application/json`.
-- Shape: `{ "available": bool, "mtime": RFC3339, "age_seconds": int,
-  "stale": bool, "five_hour": {utilization, resets_at},
-  "seven_day": {...}, "seven_day_opus": {...} }`.
-- An **absent** file is the expected "no recent session" state and returns
-  `{"available": false}` (not an error), so the UI degrades to showing only our
-  own recomputed `$`.
-- `stale`/`age_seconds` come from the file mtime: the file only refreshes while a
-  Claude Code session is live, so the UI grays/age-stamps a `%` that hasn't
-  updated recently. Only utilization **%** is exposed by Anthropic for a solo
-  subscription (the `*_dollars` fields are always null), which is why the `$` half
-  of the gauge is switchboard's own recompute.
-
-Static assets (`index.html`, `model.js`, `app.js`, `style.css`) are served from
-`/`. The UI also reads `?day=`, `?since=`, `?until=` from its own URL so a window
-is shareable/bookmarkable.
-
-## The data contract
-
-The JSON shape and its **units are owned by switchboard**, documented in its
-`docs/history-schema.md`. Units:
-
-- **Durations are nanoseconds** (`÷1e9` for seconds) — everything under
-  `summary.by_status`, the `summary.attention_*` figures, and the
-  `summary.{prompt,attended,delegated}_active` delegation durations. The dashboard
-  humanizes these (e.g. `2h 4m`, `300ms`).
-- **Token fields are raw counts** (`tok_in`, `tok_out`, `tok_cache_read`,
-  `tok_cache_create`); there is no grand total, so the dashboard sums them.
-- **`cost_usd` is a float in dollars**, recomputed by the producer from
-  `tokens × per-model price` (no native API exposes dollar cost for a solo
-  subscription).
-
-The v2 envelope is `{window, lanes, summary, totals}` plus optional top-level
-`activity` and `plan_window`. Every v2 field is **additive and optional** — older
-day-files (or recording at `detail:"minimal"`) simply omit them and the UI
-degrades gracefully. New/changed fields the dashboard consumes:
-
-| Field                                   | Meaning                                                        |
-| --------------------------------------- | -------------------------------------------------------------- |
-| `lanes[].session_id`, `lanes[].pid`     | stable bar identity (renaming never re-keys or splits a bar)    |
-| `lanes[].intervals[].status`            | adds `delegating` (faded green: agent handed work to subagents)|
-| `lanes[].name`                          | the single canonical current session name (latest `/name` slug)|
-| `lanes[].names[]` `{label,start,end}`   | slug-only `/name` span history → name segments drawn along the bar |
-| `lanes[].project_full`                  | optional pretty project name; leading-segment label fallback   |
-| `lanes[].labels[]` `{label,start,end}`  | full raw name history (incl. defaults/titles); lead fallback only |
-| `lanes[].subagents[]`                   | `{agent_type, tool_use_id, description, start, end}` sub-bars  |
-| `lanes[].focus[]` `{start,end}`         | spans where this session was the focused window                |
-| `lanes[].cost_usd`, `lanes[].tok_*`     | per-session cost + token breakdown                             |
-| `totals.cost_usd`                       | window-total cost                                              |
-| `summary.prompt_active`                 | time you were driving the prompt (ns)                          |
-| `summary.attended_active`               | agent active while you supervised (ns)                         |
-| `summary.delegated_active`              | agent active while you were away — true delegation (ns)        |
-| `summary.delegation_effectiveness`      | `delegated / (delegated + attended)`, float 0..1               |
-| `plan_window` `{hours,from,to,cost_usd,tok_*}` | rolling 5h window total (the `$` half of the gauge)     |
-| `activity[]` `{state,start,end}`        | global `idle`/`active` stream (for the focus∩active overlay)   |
-
-The three "attention" figures answer different questions:
-
-- **A — union** (`attention_union`): wall-clock time with at least one session
-  active (overlaps counted once).
-- **B — per-session** (`attention_per_session`): the sum over sessions of active
-  time (rewards parallelism).
-- **C — fanout** (`attention_fanout`): active time weighted by `1 + subagents` —
-  an approximation of total agent compute. This is the headline figure.
-
-> **Contract notes / interpretations.** `activity[]` (the global idle/active
-> stream) is consumed as an **optional top-level** array; when absent the
-> focus/attention overlay degrades to focus-only (no idle dimming, no
-> focus∩active intersection). The producer derives global active/idle intervals
-> for the delegation summary, so exposing them at top level keeps the per-lane
-> overlay honest — confirm the field name during integration. `delegating` is
-> rendered faded green and `working` solid; when both `delegated`/`attended`
-> durations are present the dashboard recomputes effectiveness client-side if
-> `delegation_effectiveness` was omitted.
+The summary exposes three attention figures: **union** (wall-clock with at least
+one session active), **per-session** (the sum of per-session active time), and
+**fanout** (active time weighted by subagents, approximating total agent compute).
 
 ## Development
 
 ```sh
-go test ./...   # Go: handler + arg-builder + /api/plan + name-span contract (stub ctl & temp files)
-node --test     # JS: render-model tests (web/model.test.js — node:test, no deps)
+go test ./...   # handler, arg builder, /api/plan, and the name-span contract
+node --test     # render-model unit tests (web/model.js)
 go vet ./...
-go build -o switchboard-dashboard .
 ```
 
-The Go tests inject a stub `switchboard-ctl` (a shell script in a temp dir) via
-`--ctl` and temp plan files via `Server.PlanPath`, so they run without a real
-switchboard install or the live OAuth cache. The client-side render model
-(identity keying, name-span computation, parallel bars) lives in `web/model.js`
-as DOM-free pure functions and is covered by `web/model.test.js`.
+The render model — identity keying, name spans, and row packing — lives in
+`web/model.js` as DOM-free pure functions covered by `web/model.test.js`. The Go
+tests inject a stub `ctl` and temporary plan files, so they need no real
+switchboard install.
