@@ -340,6 +340,10 @@ function setDot(kind) {
 // "free time" is the headline: time you actually had while the agents ran and
 // you were neither typing nor recovering from a switch. Degrades when focus or
 // activity are absent (no activity → any focus counts as typing).
+//
+// NOTE: the displayed context-switch COUNT (and the ctx-switch overlay) is
+// deliberately decoupled from the time math — it counts EVERY focus arrival,
+// unfiltered by OP_MIN_ENGAGE_MS, while typing/recovery/free stay on the ≥15s set.
 const RUNNING_STATUSES = new Set(["working", "delegating", "dormant"]);
 
 // MIN_SESSION_MS: sessions shorter than a minute aren't rendered anywhere.
@@ -359,7 +363,13 @@ function renderableLanes(lanes) {
 
 function computeOperatorTime(data) {
   const lanes = renderableLanes((data && data.lanes) || []);
-  const runPairs = [], focusPairs = [], focusStarts = [];
+  // Two focus-arrival sets, deliberately decoupled:
+  //   allFocusStarts — EVERY parseable focus span start, no duration gate. Drives
+  //     the displayed switch COUNT and the ctx-switch overlay (every real arrival
+  //     is a context switch, however brief).
+  //   focusStarts/focusPairs — only spans ≥ OP_MIN_ENGAGE_MS. Drives the TIME math
+  //     (typing / recovery / free); sub-15s glances aren't real editing.
+  const runPairs = [], focusPairs = [], focusStarts = [], allFocusStarts = [];
   for (const lane of lanes) {
     for (const iv of lane.intervals || []) {
       if (!RUNNING_STATUSES.has(iv.status)) continue;
@@ -368,21 +378,23 @@ function computeOperatorTime(data) {
     }
     for (const f of lane.focus || []) {
       const s = Date.parse(f.start), e = Date.parse(f.end);
-      // ignore "little" context switches: focus spans under OP_MIN_ENGAGE_MS aren't
-      // real editing time and don't count as a switch.
-      if (isFinite(s) && isFinite(e) && e - s >= OP_MIN_ENGAGE_MS) { focusPairs.push([s, e]); focusStarts.push(s); }
+      if (!(isFinite(s) && isFinite(e) && e > s)) continue;
+      allFocusStarts.push(s); // count/overlay: unfiltered
+      // time math only: ignore "little" focus spans under OP_MIN_ENGAGE_MS — brief
+      // glances aren't real editing, so they don't occupy free time.
+      if (e - s >= OP_MIN_ENGAGE_MS) { focusPairs.push([s, e]); focusStarts.push(s); }
     }
   }
   const running = unionMs(runPairs);
   const engaged = unionMs(focusPairs);
 
-  // Context-switch recovery: every focus arrival after the first (the same set
-  // that draws the ctx-switch verticals) occupies you 90s forward; clustered
-  // switches merge via union, so thrash lengthens the interval without ever
-  // double-counting the cost.
+  // Context-switch recovery (TIME): every ≥15s focus arrival after the first
+  // occupies you 90s forward; clustered switches merge via union, so thrash
+  // lengthens the interval without ever double-counting the cost. Recovery stays
+  // on the ≥15s set — a sub-second glance doesn't cost you 90 seconds of focus.
   focusStarts.sort((a, b) => a - b);
-  const switches = focusStarts.slice(1);
-  const ctxRecovery = unionMs(switches.map((t) => [t, t + OP_SWITCH_RECOVERY_MS]));
+  const recoveryStarts = focusStarts.slice(1);
+  const ctxRecovery = unionMs(recoveryStarts.map((t) => [t, t + OP_SWITCH_RECOVERY_MS]));
 
   // Active typing: focused on an agent while globally active (at the keyboard).
   // Without an activity stream, treat any focus as typing.
@@ -396,12 +408,20 @@ function computeOperatorTime(data) {
   const sum = (pairs) => pairs.reduce((a, [s, e]) => a + (e - s), 0);
   const runningMs = sum(running);
   const freeMs = sum(free);
+
+  // Displayed COUNT + overlay = ALL focus arrivals after the first, UNFILTERED by
+  // OP_MIN_ENGAGE_MS. (Decision per handoff T16: count/overlay show every real
+  // arrival; only the time-lost recovery above is gated to the ≥15s set.) Median
+  // focus span is ~1.2s, so the 15s gate would otherwise drop ~85% of switches.
+  allFocusStarts.sort((a, b) => a - b);
+  const switchTimes = allFocusStarts.slice(1);
+  const switches = Math.max(0, allFocusStarts.length - 1);
   return {
     running, occupied, free,
     runningMs, freeMs,
     occupiedMs: sum(occupied),
-    switches: switches.length,
-    switchTimes: switches,
+    switches,
+    switchTimes,
     lostMs: sum(intersectMs(ctxRecovery, running)),
     freeFrac: runningMs > 0 ? freeMs / runningMs : null,
   };
@@ -857,6 +877,8 @@ function formulaTipHTML({ title, formula, result, why, color } = {}) {
   return html;
 }
 
+// operatorTipHTML: a proper descriptor for the operator lane — the numeric rows,
+// then a formula box explaining how "free" is derived, then a why-it-matters line.
 function operatorTipHTML(op) {
   const pct = op.freeFrac == null ? "—" : Math.round(op.freeFrac * 100) + "%";
   return `<div class="t-status" style="color:${OP_FREE_COLOR}">operator free time</div>`
@@ -864,14 +886,18 @@ function operatorTipHTML(op) {
     + `<div class="t-row">occupied ${humanDurationMs(op.occupiedMs)}</div>`
     + `<div class="t-row">agents running ${humanDurationMs(op.runningMs)}</div>`
     + `<div class="t-row">${op.switches} context switch${op.switches === 1 ? "" : "es"}</div>`
-    + `<div class="t-hint">occupied = typing, or within 90s of a context switch</div>`;
+    + `<div class="t-formula">free = running − (typing ∪ 90s-per-switch recovery)</div>`
+    + `<div class="t-why">Time you had free while agents ran and you were neither typing nor recovering from a context switch.</div>`;
 }
 
 function opSegTipHTML(kind, s, e) {
   const free = kind === "free";
   return `<div class="t-status" style="color:${free ? OP_FREE_COLOR : "#e5534b"}">${free ? "free" : "occupied"}</div>`
     + `<div class="t-row">${fmtClock(new Date(s).toISOString())} – ${fmtClock(new Date(e).toISOString())}</div>`
-    + `<div class="t-row">${humanDurationMs(e - s)}</div>`;
+    + `<div class="t-row">${humanDurationMs(e - s)}</div>`
+    + `<div class="t-why">${free
+        ? "Agents were running but you weren't typing or recovering from a switch."
+        : "You were typing, or within 90s of a context switch, while agents ran."}</div>`;
 }
 
 function intervalTipHTML(lane, iv) {
