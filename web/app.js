@@ -424,6 +424,27 @@ function renderTimeline(data) {
   for (const g of groups) for (const lane of g.lanes) {
     drawLane(lane, lane._top, lane._idx, lane._firstInGroup, x, W, haveActivity, activeGlobal);
   }
+
+  // context switches: each time window focus arrives at a different agent session
+  // (the start of every focus span after the first). Drawn as dark-red verticals
+  // across the whole plot — dense bands read as thrash.
+  const focusStarts = [];
+  for (const lane of lanes) for (const f of (lane.focus || [])) {
+    const s = Date.parse(f.start);
+    if (isFinite(s)) focusStarts.push(s);
+  }
+  focusStarts.sort((a, b) => a - b);
+  const switches = focusStarts.slice(1); // the first arrival is not a switch
+  for (const t of switches) {
+    el.svg.appendChild(svgEl("line", {
+      class: "ctx-switch", x1: x(t), y1: GEO.PLOT_TOP, x2: x(t), y2: plotBottom,
+    }));
+  }
+  if (switches.length) {
+    const lbl = svgEl("text", { class: "ctx-switch-count", x: W - GEO.RIGHT, y: GEO.AXIS_Y, "text-anchor": "end" });
+    lbl.textContent = switches.length + " context switches";
+    el.svg.appendChild(lbl);
+  }
 }
 
 // groupByProject buckets lanes by lane.project, preserving lane order within a
