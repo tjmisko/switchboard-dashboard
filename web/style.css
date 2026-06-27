@@ -116,7 +116,7 @@ button.ghost { background: transparent; color: var(--fg-muted); font-size: 12px;
 
 main { padding: 16px 18px 36px; }
 
-/* ---------- topline (dominant hours, top-left) ---------- */
+/* ---------- topline (dominant figures, top-left) ---------- */
 .topline { display: flex; align-items: flex-end; gap: 32px; margin: 2px 2px 18px; }
 .topline .th-val { font-family: var(--mono); font-size: 42px; font-weight: 700; letter-spacing: -1.2px; line-height: 1; }
 .topline .th-val.green { color: var(--c-working); }
@@ -156,6 +156,13 @@ main { padding: 16px 18px 36px; }
 .idle-band { fill: rgba(110, 118, 129, 0.08); }
 .lane-bg { fill: transparent; }
 .lane-bg.odd { fill: rgba(255, 255, 255, 0.014); }
+
+/* operator free-time lane (top row): gold = free, dark red = occupied */
+.op-lane-bg { fill: rgba(212, 175, 55, 0.04); }
+.op-bar { stroke: rgba(0, 0, 0, 0.28); stroke-width: 0.5; cursor: default; }
+.op-bar.op-free { fill-opacity: 0.92; }
+.op-bar.op-occupied { fill-opacity: 0.85; }
+.op-bar:hover { stroke: #fff; stroke-width: 1; }
 .lane-sep { stroke: var(--border-soft); stroke-width: 1; }
 .axis-line { stroke: var(--border); stroke-width: 1; }
 .axis-tick { stroke: var(--border-soft); stroke-width: 1; }

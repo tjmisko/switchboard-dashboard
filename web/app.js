@@ -21,6 +21,15 @@ const SVGNS = "http://www.w3.org/2000/svg";
 const POLL_MS = 3000;       // /api/timeline poll cadence
 const PLAN_POLL_MS = 15000; // /api/plan poll cadence (changes slowly)
 
+// Operator lane colors: gold marks "free" time (≥1 agent running while you were
+// neither typing into an agent nor recovering from a context switch); dark red
+// marks "occupied" time. A context switch occupies you for OP_SWITCH_RECOVERY_MS
+// going forward — clustered switches merge, so thrash extends the cost without
+// double-counting. Mirrors the effective-added-time accounting.
+const OP_FREE_COLOR = "#d4af37";      // gold — free time
+const OP_OCCUPIED_COLOR = "#8c4a4c";  // muted dusty red — occupied (typing or switching)
+const OP_SWITCH_RECOVERY_MS = 90000;  // 90s of occupied time after each switch
+
 // Status -> color. working solid green; delegating faded green; idle yellow;
 // permission red; suspended grey; "" (unknown) dim. Mirrors style.css vars.
 const STATUS_COLORS = {
@@ -145,6 +154,25 @@ function intersectMs(A, B) {
   }
   return unionMs(out);
 }
+// subtractMs returns A minus B. Both are treated as unioned (sorted, disjoint)
+// via unionMs; the result is the parts of A not covered by any interval of B.
+function subtractMs(A, B) {
+  const a = unionMs(A), b = unionMs(B);
+  if (!b.length) return a;
+  const out = [];
+  for (let [s, e] of a) {
+    let cur = s;
+    for (const [bs, be] of b) {
+      if (be <= cur) continue;
+      if (bs >= e) break;
+      if (bs > cur) out.push([cur, Math.min(bs, e)]);
+      cur = Math.max(cur, be);
+      if (cur >= e) break;
+    }
+    if (cur < e) out.push([cur, e]);
+  }
+  return out;
+}
 
 // ---------------------------------------------------------------------------
 // DOM refs
@@ -266,6 +294,68 @@ function setDot(kind) {
 }
 
 // ---------------------------------------------------------------------------
+// operator free-time (derived from focus / context switches)
+// ---------------------------------------------------------------------------
+
+// computeOperatorTime partitions the running window into the operator's
+// "occupied" vs "free" intervals:
+//   running   = union over lanes of running-status intervals (≥1 agent working)
+//   typing    = focus ∩ activity-active (you were at the keyboard on an agent)
+//   ctxRecov  = ⋃ [switch, switch + 90s] over every context switch (focus
+//               arrivals after the first) — clustered switches merge
+//   occupied  = (typing ∪ ctxRecov) ∩ running
+//   free      = running MINUS (typing ∪ ctxRecov)
+// "free time" is the headline: time you actually had while the agents ran and
+// you were neither typing nor recovering from a switch. Degrades when focus or
+// activity are absent (no activity → any focus counts as typing).
+const RUNNING_STATUSES = new Set(["working", "delegating", "dormant"]);
+
+function computeOperatorTime(data) {
+  const lanes = (data && data.lanes) || [];
+  const runPairs = [], focusPairs = [], focusStarts = [];
+  for (const lane of lanes) {
+    for (const iv of lane.intervals || []) {
+      if (!RUNNING_STATUSES.has(iv.status)) continue;
+      const s = Date.parse(iv.start), e = Date.parse(iv.end);
+      if (isFinite(s) && isFinite(e) && e > s) runPairs.push([s, e]);
+    }
+    for (const f of lane.focus || []) {
+      const s = Date.parse(f.start), e = Date.parse(f.end);
+      if (isFinite(s) && isFinite(e) && e > s) { focusPairs.push([s, e]); focusStarts.push(s); }
+    }
+  }
+  const running = unionMs(runPairs);
+  const engaged = unionMs(focusPairs);
+
+  // Context-switch recovery: every focus arrival after the first (the same set
+  // that draws the ctx-switch verticals) occupies you 90s forward; clustered
+  // switches merge via union, so thrash lengthens the interval without ever
+  // double-counting the cost.
+  focusStarts.sort((a, b) => a - b);
+  const switches = focusStarts.slice(1);
+  const ctxRecovery = unionMs(switches.map((t) => [t, t + OP_SWITCH_RECOVERY_MS]));
+
+  // Active typing: focused on an agent while globally active (at the keyboard).
+  // Without an activity stream, treat any focus as typing.
+  const active = unionMs(spansToMs((data.activity || []).filter((a) => a.state === "active")));
+  const typing = active.length ? intersectMs(engaged, active) : engaged;
+
+  const occupiedAll = unionMs([...ctxRecovery, ...typing]);
+  const occupied = intersectMs(occupiedAll, running); // drawn only while agents run
+  const free = subtractMs(running, occupiedAll);
+
+  const sum = (pairs) => pairs.reduce((a, [s, e]) => a + (e - s), 0);
+  const runningMs = sum(running);
+  const freeMs = sum(free);
+  return {
+    running, occupied, free,
+    runningMs, freeMs,
+    occupiedMs: sum(occupied),
+    freeFrac: runningMs > 0 ? freeMs / runningMs : null,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // render: top-level
 // ---------------------------------------------------------------------------
 
@@ -278,8 +368,8 @@ function render(data) {
   renderCostCard(data, lastPlan);
 }
 
-// renderTopline: the dominant hours figure, pulled out of the attention card to
-// sit top-left. Uses fanout (C) — total agent compute, parallelism counted.
+// renderTopline: the dominant hours figure, top-left. Uses fanout (C) — total
+// agent compute, parallelism counted. (Free time lives in the operator lane.)
 function renderTopline(summary) {
   el.topline.innerHTML = `
     <div class="th-block">
@@ -324,6 +414,7 @@ const GEO = {
   LANE_H: 58, PAD_TOP: 6, RIBBON_H: 5, BAR_H: 18, GAP: 4,
   SUB_ROW_H: 5, SUB_GAP: 2, SUB_ROWS: 3,
   GROUP_HEAD_H: 26,
+  OP_LANE_H: 46, OP_BAR_H: 16, // operator free-time lane (sits above the groups)
 };
 
 function renderTimeline(data) {
@@ -356,9 +447,13 @@ function renderTimeline(data) {
   const W = Math.max(620, el.wrap.clientWidth);
   const plotW = Math.max(160, W - GEO.GUTTER - GEO.RIGHT);
 
+  // operator free-time lane occupies the top row, above all project groups.
+  const opTop = GEO.PLOT_TOP;
+  const op = computeOperatorTime(data);
+
   // group lanes by project; lay out a header per group, then its lanes, top-down
   const groups = groupByProject(lanes);
-  let yCursor = GEO.PLOT_TOP;
+  let yCursor = GEO.PLOT_TOP + GEO.OP_LANE_H;
   let laneIdx = 0;
   for (const g of groups) {
     g.headY = yCursor;
@@ -421,6 +516,8 @@ function renderTimeline(data) {
     el.svg.appendChild(gl);
   }
 
+  drawOperatorLane(op, opTop, x, W);
+
   for (const g of groups) for (const lane of g.lanes) {
     drawLane(lane, lane._top, lane._idx, lane._firstInGroup, x, W, haveActivity, activeGlobal);
   }
@@ -462,6 +559,42 @@ function groupByProject(lanes) {
     return a.localeCompare(b);
   });
   return keys.map((k) => ({ project: k, lanes: map.get(k) }));
+}
+
+// drawOperatorLane renders the top "operator" swimlane: gold = free time, dark
+// red = occupied (you were typing into an agent, or within 90s of a context
+// switch). The two partition the running window.
+function drawOperatorLane(op, rowTop, x, W) {
+  const barY = rowTop + Math.round((GEO.OP_LANE_H - GEO.OP_BAR_H) / 2);
+
+  el.svg.appendChild(svgEl("rect", { class: "lane-bg op-lane-bg", x: 0, y: rowTop, width: W, height: GEO.OP_LANE_H }));
+  // rule along the bottom edge, separating the operator lane from the groups
+  el.svg.appendChild(svgEl("line", { class: "group-rule", x1: 0, y1: rowTop + GEO.OP_LANE_H, x2: W, y2: rowTop + GEO.OP_LANE_H }));
+
+  // gutter identity + headline free figure
+  const gutter = svgEl("g", { class: "lane-gutter" });
+  const main = svgEl("text", { class: "lane-label", x: 10, y: rowTop + 19 });
+  main.textContent = "operator";
+  const pct = op.freeFrac == null ? "" : ` · ${Math.round(op.freeFrac * 100)}% of run`;
+  const sub = svgEl("text", { class: "lane-sub", x: 10, y: rowTop + 35 });
+  sub.textContent = `free ${humanDurationMs(op.freeMs)}${pct}`;
+  gutter.appendChild(main); gutter.appendChild(sub);
+  attachTip(gutter, () => operatorTipHTML(op));
+  el.svg.appendChild(gutter);
+
+  // free (gold) then occupied (dark red, drawn on top); disjoint within running
+  for (const [s, e] of op.free) {
+    const bx = x(s), bw = Math.max(1, x(e) - bx);
+    const r = svgEl("rect", { class: "op-bar op-free", x: bx, y: barY, width: bw, height: GEO.OP_BAR_H, rx: 2, fill: OP_FREE_COLOR });
+    attachTip(r, () => opSegTipHTML("free", s, e));
+    el.svg.appendChild(r);
+  }
+  for (const [s, e] of op.occupied) {
+    const bx = x(s), bw = Math.max(1, x(e) - bx);
+    const r = svgEl("rect", { class: "op-bar op-occupied", x: bx, y: barY, width: bw, height: GEO.OP_BAR_H, rx: 2, fill: OP_OCCUPIED_COLOR });
+    attachTip(r, () => opSegTipHTML("occupied", s, e));
+    el.svg.appendChild(r);
+  }
 }
 
 function drawLane(lane, rowTop, idx, firstInGroup, x, W, haveActivity, activeGlobal) {
@@ -584,6 +717,22 @@ function axisTicks(t0, t1) {
 // ---------------------------------------------------------------------------
 // tooltip HTML builders
 // ---------------------------------------------------------------------------
+
+function operatorTipHTML(op) {
+  const pct = op.freeFrac == null ? "—" : Math.round(op.freeFrac * 100) + "%";
+  return `<div class="t-status" style="color:${OP_FREE_COLOR}">operator free time</div>`
+    + `<div class="t-row">free <b>${humanDurationMs(op.freeMs)}</b> · ${pct} of run</div>`
+    + `<div class="t-row">occupied ${humanDurationMs(op.occupiedMs)}</div>`
+    + `<div class="t-row">agents running ${humanDurationMs(op.runningMs)}</div>`
+    + `<div class="t-hint">occupied = typing, or within 90s of a context switch</div>`;
+}
+
+function opSegTipHTML(kind, s, e) {
+  const free = kind === "free";
+  return `<div class="t-status" style="color:${free ? OP_FREE_COLOR : "#e5534b"}">${free ? "free" : "occupied"}</div>`
+    + `<div class="t-row">${fmtClock(new Date(s).toISOString())} – ${fmtClock(new Date(e).toISOString())}</div>`
+    + `<div class="t-row">${humanDurationMs(e - s)}</div>`;
+}
 
 function intervalTipHTML(lane, iv) {
   const durMs = Date.parse(iv.end) - Date.parse(iv.start);
