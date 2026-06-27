@@ -408,14 +408,26 @@ function svgEl(name, attrs) {
   return e;
 }
 
-// per-lane vertical layout (fixed so axis gridlines align across lanes)
+// per-lane vertical layout. Each session is a compact bar: a name-span band
+// stacked directly on the status bar, with the subagent strip reserved only
+// when the session actually delegated — so parallel sessions pack tightly.
 const GEO = {
   GUTTER: 232, RIGHT: 20, AXIS_Y: 16, PLOT_TOP: 26,
-  LANE_H: 58, PAD_TOP: 6, RIBBON_H: 5, BAR_H: 18, GAP: 4,
-  SUB_ROW_H: 5, SUB_GAP: 2, SUB_ROWS: 3,
-  GROUP_HEAD_H: 26,
+  PAD_TOP: 4, NAME_H: 13, BAR_H: 15, GAP: 3, PAD_BOTTOM: 6,
+  SUB_ROW_H: 4, SUB_GAP: 2, SUB_ROWS: 2,
+  GROUP_HEAD_H: 24,
+  NAME_MIN_W: 26, // hide a span's text below this px width (tooltip still shows it)
   OP_LANE_H: 46, OP_BAR_H: 16, // operator free-time lane (sits above the groups)
 };
+
+// laneHeight is the compact vertical footprint of one session bar: name band +
+// status bar + paddings, plus a small reserved subagent strip ONLY when the
+// session delegated. Sessions without subagents pack tighter.
+function laneHeight(lane) {
+  let h = GEO.PAD_TOP + GEO.NAME_H + GEO.BAR_H + GEO.PAD_BOTTOM;
+  if ((lane.subagents || []).length) h += GEO.GAP + GEO.SUB_ROWS * (GEO.SUB_ROW_H + GEO.SUB_GAP);
+  return h;
+}
 
 function renderTimeline(data) {
   const lanes = data.lanes || [];
@@ -462,7 +474,8 @@ function renderTimeline(data) {
       lane._top = yCursor;
       lane._idx = laneIdx++;
       lane._firstInGroup = lane === g.lanes[0];
-      yCursor += GEO.LANE_H;
+      lane._height = laneHeight(lane);
+      yCursor += lane._height;
     }
   }
   const plotBottom = yCursor;
@@ -519,7 +532,7 @@ function renderTimeline(data) {
   drawOperatorLane(op, opTop, x, W);
 
   for (const g of groups) for (const lane of g.lanes) {
-    drawLane(lane, lane._top, lane._idx, lane._firstInGroup, x, W, haveActivity, activeGlobal);
+    drawLane(lane, lane._top, lane._idx, x, W, haveActivity, activeGlobal);
   }
 
   // context switches: each time window focus arrives at a different agent session
@@ -597,51 +610,52 @@ function drawOperatorLane(op, rowTop, x, W) {
   }
 }
 
-function drawLane(lane, rowTop, idx, firstInGroup, x, W, haveActivity, activeGlobal) {
-  const barY = rowTop + GEO.PAD_TOP + GEO.RIBBON_H;
+function drawLane(lane, rowTop, idx, x, W, haveActivity, activeGlobal) {
+  const height = lane._height;
+  const nameY = rowTop + GEO.PAD_TOP;
+  const barY = nameY + GEO.NAME_H;
   const subTop = barY + GEO.BAR_H + GEO.GAP;
 
   // lane row background (subtle alternation) + separator (group header rules the top edge)
   el.svg.appendChild(svgEl("rect", {
-    class: idx % 2 ? "lane-bg odd" : "lane-bg", x: 0, y: rowTop, width: W, height: GEO.LANE_H,
+    class: idx % 2 ? "lane-bg odd" : "lane-bg", x: 0, y: rowTop, width: W, height,
   }));
-  if (!firstInGroup) el.svg.appendChild(svgEl("line", { class: "lane-sep", x1: 0, y1: rowTop, x2: W, y2: rowTop }));
+  if (!lane._firstInGroup) el.svg.appendChild(svgEl("line", { class: "lane-sep", x1: 0, y1: rowTop, x2: W, y2: rowTop }));
 
-  // ---- gutter identity + latest label ----
-  const labels = lane.labels || [];
-  const latest = labels.length ? labels[labels.length - 1].label : laneFallback(lane);
-  const idLine = `pid ${lane.pid}` + (lane.agent ? " · " + lane.agent : "")
-    + (lane.cost_usd != null ? " · " + fmtUSD(lane.cost_usd) : "");
-
+  // ---- gutter: STABLE session identity (never the name, so a /name rename
+  // can't re-label or split the row) ----
+  const idMain = `pid ${lane.pid}` + (lane.agent ? " · " + lane.agent : "");
+  const idBits = [];
+  if (lane.session_id) idBits.push(lane.session_id.slice(0, 8));
+  if (lane.cost_usd != null) idBits.push(fmtUSD(lane.cost_usd));
   const gutter = svgEl("g", { class: "lane-gutter" });
-  const main = svgEl("text", { class: "lane-label", x: 10, y: rowTop + 20 });
-  const multi = labels.length > 1;
-  main.textContent = truncate(latest, multi ? 26 : 30); // leave room for the badge
-  if (multi) {
-    const badge = svgEl("tspan", { class: "lane-badge", dx: 6 });
-    badge.textContent = "•" + labels.length;
-    main.appendChild(badge);
-  }
-  const sub = svgEl("text", { class: "lane-sub", x: 10, y: rowTop + 36 });
-  sub.textContent = truncate(idLine, 34);
+  gutter.setAttribute("data-session", laneIdentity(lane)); // bars are keyed by identity, not name
+  const main = svgEl("text", { class: "lane-label", x: 10, y: rowTop + 15 });
+  main.textContent = truncate(idMain, 32);
+  const sub = svgEl("text", { class: "lane-sub", x: 10, y: rowTop + 29 });
+  sub.textContent = truncate(idBits.join(" · "), 34);
   gutter.appendChild(main); gutter.appendChild(sub);
-  attachGutterTip(gutter, lane, latest);
+  attachGutterTip(gutter, lane, currentName(lane));
   el.svg.appendChild(gutter);
 
-  // ---- label-change ribbon (only when the name changed in-window) ----
-  if (labels.length > 1) {
-    const ribbonY = rowTop + GEO.PAD_TOP;
-    for (const ls of labels) {
-      const sx = x(Date.parse(ls.start));
-      const ex = x(Date.parse(ls.end));
-      const seg = svgEl("rect", {
-        class: "label-seg", x: sx, y: ribbonY, width: Math.max(2, ex - sx), height: GEO.RIBBON_H, rx: 1,
-      });
-      attachTip(seg, () => labelTipHTML(ls));
-      el.svg.appendChild(seg);
-      el.svg.appendChild(svgEl("line", { class: "label-div", x1: sx, y1: ribbonY, x2: sx, y2: barY + GEO.BAR_H }));
+  // ---- name-span band: each /name slug labels the stretch it was active; the
+  // leading pre-/name stretch falls back to project_full/project (see model.js). ----
+  nameSegments(lane).forEach((seg, i) => {
+    const sx = x(seg.start), ex = x(seg.end), sw = Math.max(1, ex - sx);
+    const isLead = seg.kind === "lead";
+    const bg = svgEl("rect", {
+      class: "name-seg" + (isLead ? " lead" : ""), x: sx, y: nameY, width: sw, height: GEO.NAME_H, rx: 1,
+    });
+    attachTip(bg, () => nameSegTipHTML(seg));
+    el.svg.appendChild(bg);
+    // a dashed divider marks each rename boundary (skip the redundant left edge)
+    if (i > 0) el.svg.appendChild(svgEl("line", { class: "name-div", x1: sx, y1: nameY, x2: sx, y2: barY + GEO.BAR_H }));
+    if (sw >= GEO.NAME_MIN_W && seg.label) {
+      const t = svgEl("text", { class: "name-seg-label" + (isLead ? " lead" : ""), x: sx + 4, y: nameY + 9.5 });
+      t.textContent = truncate(seg.label, Math.max(1, Math.floor((sw - 6) / 6.1)));
+      el.svg.appendChild(t);
     }
-  }
+  });
 
   // ---- main status bars ----
   for (const iv of lane.intervals || []) {
@@ -700,6 +714,16 @@ function laneFallback(lane) {
   if (lane.agent) parts.push(lane.agent);
   parts.push("pid " + lane.pid);
   return parts.join(" · ");
+}
+// currentName is the session's latest name: the canonical `name`, else the last
+// /name slug, else the last raw label, else the project/pid fallback.
+function currentName(lane) {
+  if (lane.name) return lane.name;
+  const names = lane.names || [];
+  if (names.length) return names[names.length - 1].label;
+  const labels = lane.labels || [];
+  if (labels.length) return labels[labels.length - 1].label;
+  return laneFallback(lane);
 }
 function truncate(s, n) { return s && s.length > n ? s.slice(0, n - 1) + "…" : s; }
 
@@ -762,22 +786,28 @@ function subagentPopoutHTML(sa) {
     + (sa.tool_use_id ? `<div class="po-id">${escapeHTML(sa.tool_use_id)}</div>` : "");
 }
 
-function labelTipHTML(ls) {
-  return `<div class="t-status">${escapeHTML(ls.label)}</div>`
-    + `<div class="t-row">${fmtClock(ls.start)} – ${fmtClock(ls.end)}</div>`;
+function nameSegTipHTML(seg) {
+  const durMs = seg.end - seg.start;
+  const note = seg.kind === "lead" ? " (before first /name)" : "";
+  return `<div class="t-status">${escapeHTML(seg.label || "(unnamed)")}${note}</div>`
+    + `<div class="t-row">${fmtClock(seg.start)} – ${fmtClock(seg.end)}</div>`
+    + `<div class="t-row">${humanDurationMs(durMs)}</div>`;
 }
 
-function gutterTipHTML(lane, latest) {
-  const labels = lane.labels || [];
-  let html = `<div class="t-status">${escapeHTML(latest)}</div>`;
+function gutterTipHTML(lane, name) {
+  let html = `<div class="t-status">${escapeHTML(name)}</div>`;
   html += `<div class="t-row">${escapeHTML(lane.agent || "?")}`
     + (lane.project ? ` · ${escapeHTML(lane.project)}` : "") + ` · pid ${lane.pid}</div>`;
   if (lane.session_id) html += `<div class="t-id">${escapeHTML(lane.session_id)}</div>`;
   if (lane.cost_usd != null) html += `<div class="t-row">cost ${fmtUSD(lane.cost_usd)}</div>`;
-  if (labels.length > 1) {
-    html += `<div class="t-hist">name history</div>`;
-    for (const ls of labels) {
-      html += `<div class="t-histrow"><span>${fmtClock(ls.start)}</span> ${escapeHTML(ls.label)}</div>`;
+  // name-span history (one row per stretch, incl. the pre-/name lead).
+  const segs = nameSegments(lane);
+  if (segs.length > 1) {
+    html += `<div class="t-hist">name spans</div>`;
+    for (const seg of segs) {
+      const text = escapeHTML(seg.label || "(unnamed)");
+      const labelHTML = seg.kind === "lead" ? `<span class="lead">${text}</span>` : text;
+      html += `<div class="t-histrow"><span>${fmtClock(seg.start)}</span> ${labelHTML}</div>`;
     }
   }
   return html;
@@ -844,7 +874,7 @@ function renderCostCard(data, plan) {
   // per-session rows (only those with a cost)
   const costed = lanes.filter((l) => l.cost_usd != null);
   const sessionRows = costed.length ? costed.map((l) => {
-    const name = (l.labels && l.labels.length) ? l.labels[l.labels.length - 1].label : laneFallback(l);
+    const name = currentName(l);
     const tok = (l.tok_in || 0) + (l.tok_out || 0) + (l.tok_cache_read || 0) + (l.tok_cache_create || 0);
     return `<div class="kv"><span class="k" title="${escapeHTML(name)}">${escapeHTML(truncate(name, 30))}</span>
       <span class="v">${fmtUSD(l.cost_usd)} <span class="dim">· ${humanCount(tok)} tok</span></span></div>`;

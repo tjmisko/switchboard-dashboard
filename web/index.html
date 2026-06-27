@@ -35,7 +35,7 @@
   <div id="error" class="error-banner" hidden></div>
 
   <main>
-    <!-- Topline: dominant figures (agent hours · operator free time), top-left. -->
+    <!-- Topline: the dominant agent-hours figure, top-left. -->
     <section class="topline" id="topline"></section>
 
     <!-- Swimlanes: grouped by project. -->
@@ -71,6 +71,7 @@
     <span>durations are nanoseconds (÷1e9) · tokens raw counts · cost is recomputed from tokens × model price · plan % is read-only from <code>/tmp/claude-plan-usage.json</code> — contract owned by switchboard <code>docs/history-schema.md</code></span>
   </footer>
 
+  <script src="model.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
