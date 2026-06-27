@@ -468,10 +468,12 @@ function svgEl(name, attrs) {
 // when the session actually delegated — so parallel sessions pack tightly.
 const GEO = {
   GUTTER: 232, RIGHT: 20, AXIS_Y: 17, PLOT_TOP: 28,
-  PAD_TOP: 4, NAME_H: 15, BAR_H: 24, GAP: 3, PAD_BOTTOM: 4,
+  PAD_TOP: 4, NAME_H: 17, BAR_H: 24, GAP: 3, PAD_BOTTOM: 4,
   SUB_ROW_H: 5, SUB_GAP: 2, SUB_ROWS: 2,
   GROUP_HEAD_H: 26,
-  NAME_MIN_W: 28, // hide a span's text below this px width (tooltip still shows it)
+  NAME_MIN_W: 28,   // hide a span's name text below this px width (tooltip still shows it)
+  IDENT_MIN_W: 64,  // show the in-span "agent · pid" identity only above this span width
+  IDENT_BOTH_W: 150,// also show the cost (right-aligned) only above this span width
   OP_LANE_H: 52, OP_BAR_H: 20, // operator free-time lane (sits above the groups)
   PX_PER_HOUR: 240, // min horizontal density → long windows scroll (see plotW)
 };
@@ -482,6 +484,15 @@ const GEO = {
 function laneHeight(lane) {
   let h = GEO.PAD_TOP + GEO.NAME_H + GEO.BAR_H + GEO.PAD_BOTTOM;
   if ((lane.subagents || []).length) h += GEO.GAP + GEO.SUB_ROWS * (GEO.SUB_ROW_H + GEO.SUB_GAP);
+  return h;
+}
+
+// rowHeight is the footprint of a PACKED row (one or more time-serializable
+// sessions): the tallest laneHeight over the row's sessions, so the subagent
+// strip is reserved exactly when some session on the row delegated.
+function rowHeight(laneList) {
+  let h = GEO.PAD_TOP + GEO.NAME_H + GEO.BAR_H + GEO.PAD_BOTTOM;
+  for (const lane of laneList) h = Math.max(h, laneHeight(lane));
   return h;
 }
 
@@ -525,20 +536,28 @@ function renderTimeline(data) {
   const opTop = GEO.PLOT_TOP;
   const op = computeOperatorTime(data);
 
-  // group lanes by project; lay out a header per group, then its lanes, top-down
+  // group lanes by project; within each group, PACK time-serializable sessions
+  // onto shared rows (greedy interval partitioning). Lay out a header per group,
+  // then one stacked row per packed row, top-down. Each row reserves the height of
+  // its tallest session (subagent strip included only when a session on the row
+  // delegated). The idx%2 background alternation runs per ROW across all groups.
   const groups = groupByProject(lanes);
   let yCursor = GEO.PLOT_TOP + GEO.OP_LANE_H;
-  let laneIdx = 0;
+  let rowIdx = 0;
   for (const g of groups) {
     g.headY = yCursor;
     yCursor += GEO.GROUP_HEAD_H;
-    for (const lane of g.lanes) {
-      lane._top = yCursor;
-      lane._idx = laneIdx++;
-      lane._firstInGroup = lane === g.lanes[0];
-      lane._height = laneHeight(lane);
-      yCursor += lane._height;
-    }
+    g.rows = packLanes(g.lanes).map((laneList, i) => {
+      const row = {
+        lanes: laneList,
+        top: yCursor,
+        height: rowHeight(laneList),
+        idx: rowIdx++,
+        firstInGroup: i === 0,
+      };
+      yCursor += row.height;
+      return row;
+    });
   }
   const plotBottom = yCursor;
   const H = plotBottom + 14;
@@ -593,8 +612,8 @@ function renderTimeline(data) {
 
   drawOperatorLane(op, opTop, x, W);
 
-  for (const g of groups) for (const lane of g.lanes) {
-    drawLane(lane, lane._top, lane._idx, x, W, haveActivity, activeGlobal);
+  for (const g of groups) for (const row of g.rows) {
+    drawRow(row, x, W, haveActivity, activeGlobal);
   }
   // context switches (optional, off by default): red verticals at each real
   // (≥15s-engaged) switch — toggled via the "show context switches" chart option.
@@ -666,35 +685,30 @@ function drawOperatorLane(op, rowTop, x, W) {
   }
 }
 
-function drawLane(lane, rowTop, idx, x, W, haveActivity, activeGlobal) {
-  const height = lane._height;
+// drawRow draws one PACKED row: a single full-width background + separator, then
+// every time-serializable session on the row at its own x-range. The gutter no
+// longer carries per-session identity (a packed row can hold several sessions) —
+// identity moved into each span (see drawSession / drawSpanIdentity).
+function drawRow(row, x, W, haveActivity, activeGlobal) {
+  const rowTop = row.top;
+
+  // row background (subtle alternation per ROW) + separator (group header rules the top edge)
+  el.svg.appendChild(svgEl("rect", {
+    class: row.idx % 2 ? "lane-bg odd" : "lane-bg", x: 0, y: rowTop, width: W, height: row.height,
+  }));
+  if (!row.firstInGroup) el.svg.appendChild(svgEl("line", { class: "lane-sep", x1: 0, y1: rowTop, x2: W, y2: rowTop }));
+
+  for (const lane of row.lanes) drawSession(lane, rowTop, x, haveActivity, activeGlobal);
+}
+
+// drawSession draws ONE session at its own x-range (its lifespan) on a packed
+// row: the name-span band, the in-span identity overlay, the status bars, the
+// focus overlay, and the subagent sub-bars. Multiple non-overlapping sessions can
+// share a row, so this never paints a full-width background (drawRow owns that).
+function drawSession(lane, rowTop, x, haveActivity, activeGlobal) {
   const nameY = rowTop + GEO.PAD_TOP;
   const barY = nameY + GEO.NAME_H;
   const subTop = barY + GEO.BAR_H + GEO.GAP;
-
-  // lane row background (subtle alternation) + separator (group header rules the top edge)
-  el.svg.appendChild(svgEl("rect", {
-    class: idx % 2 ? "lane-bg odd" : "lane-bg", x: 0, y: rowTop, width: W, height,
-  }));
-  if (!lane._firstInGroup) el.svg.appendChild(svgEl("line", { class: "lane-sep", x1: 0, y1: rowTop, x2: W, y2: rowTop }));
-
-  // ---- gutter: STABLE session identity (never the name, so a /name rename
-  // can't re-label or split the row). The pid is intentionally NOT shown here —
-  // it stays in the hover tooltip — so the row reads as agent + short session id
-  // with cost beneath. ----
-  const shortId = lane.session_id ? lane.session_id.slice(0, 8) : null;
-  const idMain = [lane.agent, shortId].filter(Boolean).join(" · ") || `pid ${lane.pid}`;
-  const idBits = [];
-  if (lane.cost_usd != null) idBits.push(fmtUSD(lane.cost_usd));
-  const gutter = svgEl("g", { class: "lane-gutter" });
-  gutter.setAttribute("data-session", laneIdentity(lane)); // bars are keyed by identity, not name
-  const main = svgEl("text", { class: "lane-label", x: 10, y: rowTop + 16 });
-  main.textContent = truncate(idMain, 32);
-  const sub = svgEl("text", { class: "lane-sub", x: 10, y: rowTop + 35 });
-  sub.textContent = truncate(idBits.join(" · "), 34);
-  gutter.appendChild(main); gutter.appendChild(sub);
-  attachGutterTip(gutter, lane, currentName(lane));
-  el.svg.appendChild(gutter);
 
   // ---- name-span band: each /name slug labels the stretch it was active; the
   // leading pre-/name stretch falls back to project_full/project (see model.js). ----
@@ -704,13 +718,14 @@ function drawLane(lane, rowTop, idx, x, W, haveActivity, activeGlobal) {
     const bg = svgEl("rect", {
       class: "name-seg" + (isLead ? " lead" : ""), x: sx, y: nameY, width: sw, height: GEO.NAME_H, rx: 1,
     });
+    bg.setAttribute("data-session", laneIdentity(lane)); // bars are keyed by identity, not name
     attachTip(bg, () => nameSegTipHTML(lane, seg));
     el.svg.appendChild(bg);
     // a dashed divider marks each rename boundary (skip the redundant left edge)
     if (i > 0) el.svg.appendChild(svgEl("line", { class: "name-div", x1: sx, y1: nameY, x2: sx, y2: barY + GEO.BAR_H }));
     if (sw >= GEO.NAME_MIN_W && seg.label) {
-      const t = svgEl("text", { class: "name-seg-label" + (isLead ? " lead" : ""), x: sx + 4, y: nameY + 11 });
-      t.textContent = truncate(seg.label, Math.max(1, Math.floor((sw - 6) / 6.6)));
+      const t = svgEl("text", { class: "name-seg-label" + (isLead ? " lead" : ""), x: sx + 4, y: nameY + 12.5 });
+      t.textContent = truncate(seg.label, Math.max(1, Math.floor((sw - 6) / 7.5)));
       el.svg.appendChild(t);
     }
   });
@@ -745,6 +760,9 @@ function drawLane(lane, rowTop, idx, x, W, haveActivity, activeGlobal) {
     }
   }
 
+  // ---- in-span identity (agent · pid left, cost right), drawn on top of the bar ----
+  drawSpanIdentity(lane, x, barY);
+
   // ---- subagent sub-bars (packed into rows by overlap) ----
   const subs = (lane.subagents || [])
     .map((sa) => ({ ...sa, s: Date.parse(sa.start), e: Date.parse(sa.end) }))
@@ -763,6 +781,40 @@ function drawLane(lane, rowTop, idx, x, W, haveActivity, activeGlobal) {
     attachTip(bar, () => subagentTipHTML(sa));
     bar.addEventListener("click", (ev) => { ev.stopPropagation(); pinPopout(subagentPopoutHTML(sa), ev); });
     el.svg.appendChild(bar);
+  }
+}
+
+// drawSpanIdentity renders the session's stable identity INSIDE its span (the
+// gutter no longer carries it now that a row can hold several sessions): the
+// "agent · pid" tag pinned to the left edge of the status bar and the cost pinned
+// to the right. pid is shown here on purpose. The labels are dark-halo'd overlays
+// drawn on top of the bar (legible over any status color); each carries the full
+// identity + name history on hover. They hide on spans too narrow to read — but
+// the full identity always stays reachable via the name-span hover tooltip, which
+// spans the whole session (see nameSegTipHTML).
+function drawSpanIdentity(lane, x, barY) {
+  const sStart = x(Date.parse(lane.start));
+  const spanW = Math.max(1, x(Date.parse(lane.end)) - sStart);
+  if (spanW < GEO.IDENT_MIN_W) return;
+  const y = barY + GEO.BAR_H / 2 + 3.5; // vertically centered on the status bar
+
+  const costText = lane.cost_usd != null ? fmtUSD(lane.cost_usd) : "";
+  const showCost = costText && spanW >= GEO.IDENT_BOTH_W;
+  const costW = showCost ? costText.length * 6.6 + 10 : 0;
+
+  const idText = [lane.agent, lane.pid != null ? "pid " + lane.pid : null].filter(Boolean).join(" · ");
+  const avail = spanW - 10 - costW;
+  if (idText && avail > 16) {
+    const t = svgEl("text", { class: "span-ident", x: sStart + 5, y });
+    t.textContent = truncate(idText, Math.max(1, Math.floor(avail / 6.6)));
+    attachTip(t, () => gutterTipHTML(lane, currentName(lane)));
+    el.svg.appendChild(t);
+  }
+  if (showCost) {
+    const t = svgEl("text", { class: "span-ident span-cost", x: sStart + spanW - 5, y, "text-anchor": "end" });
+    t.textContent = costText;
+    attachTip(t, () => gutterTipHTML(lane, currentName(lane)));
+    el.svg.appendChild(t);
   }
 }
 
@@ -868,10 +920,18 @@ function nameSegTipHTML(lane, seg) {
   const durMs = seg.end - seg.start;
   const note = seg.kind === "lead" ? " (before first /name)" : "";
   const ineff = spanInefficiency(lane, seg.start, seg.end);
+  // identity footer: the name band spans the whole session, so this keeps the
+  // FULL identity reachable on hover even when the in-span identity text is hidden
+  // on a narrow span (the gutter no longer carries it).
+  const idBits = [lane.agent || "?"];
+  if (lane.pid != null) idBits.push("pid " + lane.pid);
+  if (lane.cost_usd != null) idBits.push(fmtUSD(lane.cost_usd));
   return `<div class="t-status">${escapeHTML(seg.label || "(unnamed)")}${note}</div>`
     + `<div class="t-row">${fmtClock(seg.start)} – ${fmtClock(seg.end)}</div>`
     + `<div class="t-row">${humanDurationMs(durMs)}</div>`
-    + (ineff != null ? `<div class="t-row">operator inefficiency ${Math.round(ineff * 100)}% <span class="dim">idle/waiting</span></div>` : "");
+    + (ineff != null ? `<div class="t-row">operator inefficiency ${Math.round(ineff * 100)}% <span class="dim">idle/waiting</span></div>` : "")
+    + `<div class="t-id">${escapeHTML(idBits.join(" · "))}</div>`
+    + (lane.session_id ? `<div class="t-id">${escapeHTML(lane.session_id)}</div>` : "");
 }
 
 function gutterTipHTML(lane, name) {
@@ -1018,11 +1078,6 @@ function renderCostCard(data, plan) {
 
 function attachTip(node, htmlFn) {
   node.addEventListener("mouseenter", (ev) => showTip(htmlFn(), ev));
-  node.addEventListener("mousemove", moveTip);
-  node.addEventListener("mouseleave", hideTip);
-}
-function attachGutterTip(node, lane, latest) {
-  node.addEventListener("mouseenter", (ev) => showTip(gutterTipHTML(lane, latest), ev));
   node.addEventListener("mousemove", moveTip);
   node.addEventListener("mouseleave", hideTip);
 }

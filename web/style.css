@@ -188,8 +188,25 @@ main { padding: 16px 18px 36px; }
 .name-seg.lead { fill: rgba(110, 118, 129, 0.10); }
 .name-seg.lead:hover { fill: rgba(110, 118, 129, 0.18); }
 .name-div { stroke: rgba(88, 166, 255, 0.5); stroke-width: 1; stroke-dasharray: 2 2; }
-.name-seg-label { fill: var(--fg); font-family: var(--mono); font-size: 11px; font-weight: 600; pointer-events: none; }
+.name-seg-label { fill: var(--fg); font-family: var(--mono); font-size: 12.5px; font-weight: 600; pointer-events: none; }
 .name-seg-label.lead { fill: var(--fg-dim); font-weight: 400; font-style: italic; }
+
+/* in-span session identity (agent · pid at the left of the status bar, cost at
+   the right): the gutter no longer carries it. A dark stroke halo (paint-order)
+   keeps the light text legible over any bar color; the full identity is in the
+   hover tooltip. */
+.span-ident {
+  fill: var(--fg);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  paint-order: stroke;
+  stroke: rgba(0, 0, 0, 0.6);
+  stroke-width: 2.5px;
+  stroke-linejoin: round;
+  cursor: default;
+}
+.span-ident.span-cost { fill: var(--fg); font-weight: 700; }
 
 .bar { stroke: rgba(0, 0, 0, 0.25); stroke-width: 0.5; cursor: pointer; }
 .bar:hover { stroke: #fff; stroke-width: 1; }
