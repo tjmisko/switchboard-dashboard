@@ -230,7 +230,15 @@ const el = {
   cardAttention: document.getElementById("card-attention"),
   cardCost: document.getElementById("card-cost"),
   optCtxSwitches: document.getElementById("opt-ctx-switches"),
+  optFocus: document.getElementById("opt-focus"),
+  themeToggle: document.getElementById("theme-toggle"),
 };
+
+// focusEnabled: whether the blue focus/attention overlay is shown (toggle in the
+// chart footer, default on). Treated as on if the control is somehow absent.
+function focusEnabled() {
+  return !el.optFocus || el.optFocus.checked;
+}
 
 // ---------------------------------------------------------------------------
 // state
@@ -526,22 +534,23 @@ function svgEl(name, attrs) {
 // when the session actually delegated — so parallel sessions pack tightly.
 const GEO = {
   GUTTER: 232, RIGHT: 20, AXIS_Y: 17, PLOT_TOP: 28,
-  PAD_TOP: 4, NAME_H: 17, BAR_H: 24, GAP: 3, PAD_BOTTOM: 4,
-  SUB_ROW_H: 5, SUB_GAP: 2, SUB_ROWS: 2,
-  GROUP_HEAD_H: 26,
+  PAD_TOP: 2, NAME_H: 17, BAR_H: 24, GAP: 3, PAD_BOTTOM: 2,
+  SUB_ROW_H: 5, SUB_GAP: 2,
+  GROUP_HEAD_H: 20,
   NAME_MIN_W: 28,   // hide a span's name text below this px width (tooltip still shows it)
-  IDENT_MIN_W: 64,  // show the in-span "agent · pid" identity only above this span width
-  IDENT_BOTH_W: 150,// also show the cost (right-aligned) only above this span width
+  COST_MIN_W: 56,   // show the cost on the identifier line only above this span width
   OP_LANE_H: 52, OP_BAR_H: 20, // operator free-time lane (sits above the groups)
   PX_PER_HOUR: 240, // min horizontal density → long windows scroll (see plotW)
 };
 
 // laneHeight is the compact vertical footprint of one session bar: name band +
-// status bar + paddings, plus a small reserved subagent strip ONLY when the
-// session delegated. Sessions without subagents pack tighter.
+// status bar + paddings, plus a subagent strip sized to the session's ACTUAL max
+// concurrency (one row per simultaneous subagent). Sessions without subagents
+// pack tighter; a heavily-parallel session grows to fit all its sub-lines.
 function laneHeight(lane) {
   let h = GEO.PAD_TOP + GEO.NAME_H + GEO.BAR_H + GEO.PAD_BOTTOM;
-  if ((lane.subagents || []).length) h += GEO.GAP + GEO.SUB_ROWS * (GEO.SUB_ROW_H + GEO.SUB_GAP);
+  const rows = packSubagents(lane).rows;
+  if (rows) h += GEO.GAP + rows * (GEO.SUB_ROW_H + GEO.SUB_GAP);
   return h;
 }
 
@@ -661,9 +670,9 @@ function renderTimeline(data) {
 
   // project group headers (rule across full width + label in the gutter)
   for (const g of groups) {
-    const ry = g.headY + GEO.GROUP_HEAD_H - 7;
+    const ry = g.headY + GEO.GROUP_HEAD_H - 3;
     el.svg.appendChild(svgEl("line", { class: "group-rule", x1: 0, y1: ry, x2: W, y2: ry }));
-    const gl = svgEl("text", { class: "group-label", x: 10, y: g.headY + 16 });
+    const gl = svgEl("text", { class: "group-label", x: 10, y: g.headY + 13 });
     gl.textContent = ((g.projectFull || g.project) + " · " + g.lanes.length).toUpperCase();
     el.svg.appendChild(gl);
   }
@@ -746,7 +755,8 @@ function drawOperatorLane(op, rowTop, x, W) {
 // drawRow draws one PACKED row: a single full-width background + separator, then
 // every time-serializable session on the row at its own x-range. The gutter no
 // longer carries per-session identity (a packed row can hold several sessions) —
-// identity moved into each span (see drawSession / drawSpanIdentity).
+// identity is reachable on hover via each session's name-span tooltip, and only
+// the cost is drawn, on the identifier line (see drawSession / nameSegTipHTML).
 function drawRow(row, x, W, haveActivity, activeGlobal) {
   const rowTop = row.top;
 
@@ -760,7 +770,7 @@ function drawRow(row, x, W, haveActivity, activeGlobal) {
 }
 
 // drawSession draws ONE session at its own x-range (its lifespan) on a packed
-// row: the name-span band, the in-span identity overlay, the status bars, the
+// row: the name-span band (with the cost on its right edge), the status bars, the
 // focus overlay, and the subagent sub-bars. Multiple non-overlapping sessions can
 // share a row, so this never paints a full-width background (drawRow owns that).
 function drawSession(lane, rowTop, x, haveActivity, activeGlobal) {
@@ -770,7 +780,15 @@ function drawSession(lane, rowTop, x, haveActivity, activeGlobal) {
 
   // ---- name-span band: each /name slug labels the stretch it was active; the
   // leading pre-/name stretch falls back to project_full/project (see model.js). ----
-  nameSegments(lane).forEach((seg, i) => {
+  // cost rides the right end of the identifier (name-span) line above the bar;
+  // the last name segment reserves room for it so label and cost never collide.
+  const segs = nameSegments(lane);
+  const costText = lane.cost_usd != null ? fmtUSD(lane.cost_usd) : "";
+  const sessEnd = x(Date.parse(lane.end));
+  const sessW = Math.max(1, sessEnd - x(Date.parse(lane.start)));
+  const showCost = costText && sessW >= GEO.COST_MIN_W;
+  const costW = showCost ? costText.length * 6.6 + 8 : 0;
+  segs.forEach((seg, i) => {
     const sx = x(seg.start), ex = x(seg.end), sw = Math.max(1, ex - sx);
     const isLead = seg.kind === "lead";
     const bg = svgEl("rect", {
@@ -782,11 +800,18 @@ function drawSession(lane, rowTop, x, haveActivity, activeGlobal) {
     // a dashed divider marks each rename boundary (skip the redundant left edge)
     if (i > 0) el.svg.appendChild(svgEl("line", { class: "name-div", x1: sx, y1: nameY, x2: sx, y2: barY + GEO.BAR_H }));
     if (sw >= GEO.NAME_MIN_W && seg.label) {
+      const reserve = i === segs.length - 1 ? costW : 0; // keep the label clear of the cost
       const t = svgEl("text", { class: "name-seg-label" + (isLead ? " lead" : ""), x: sx + 4, y: nameY + 12.5 });
-      t.textContent = truncate(seg.label, Math.max(1, Math.floor((sw - 6) / 7.5)));
+      t.textContent = truncate(seg.label, Math.max(1, Math.floor((sw - 6 - reserve) / 7.5)));
       el.svg.appendChild(t);
     }
   });
+  if (showCost) {
+    const t = svgEl("text", { class: "name-cost", x: sessEnd - 4, y: nameY + 12.5, "text-anchor": "end" });
+    t.textContent = costText;
+    attachTip(t, () => gutterTipHTML(lane, currentName(lane)));
+    el.svg.appendChild(t);
+  }
 
   // ---- main status bars ----
   for (const iv of lane.intervals || []) {
@@ -805,33 +830,26 @@ function drawSession(lane, rowTop, x, haveActivity, activeGlobal) {
     el.svg.appendChild(rect);
   }
 
-  // ---- focus / attention overlay (hatch + outline) ----
-  const focusMs = spansToMs(lane.focus);
-  if (focusMs.length) {
-    const attended = haveActivity ? intersectMs(focusMs, activeGlobal) : unionMs(focusMs);
-    for (const [s, e] of attended) {
-      const ox = x(s), ow = Math.max(1, x(e) - ox);
-      el.svg.appendChild(svgEl("rect", {
-        class: "focus-overlay", x: ox, y: barY - 1.5, width: ow, height: GEO.BAR_H + 3, rx: 2,
-        fill: "url(#hatch)", stroke: FOCUS_STROKE,
-      }));
+  // ---- focus / attention overlay (hatch + outline) — gated by the "show focus" toggle ----
+  if (focusEnabled()) {
+    const focusMs = spansToMs(lane.focus);
+    if (focusMs.length) {
+      const attended = haveActivity ? intersectMs(focusMs, activeGlobal) : unionMs(focusMs);
+      for (const [s, e] of attended) {
+        const ox = x(s), ow = Math.max(1, x(e) - ox);
+        el.svg.appendChild(svgEl("rect", {
+          class: "focus-overlay", x: ox, y: barY - 1.5, width: ow, height: GEO.BAR_H + 3, rx: 2,
+          fill: "url(#hatch)", stroke: FOCUS_STROKE,
+        }));
+      }
     }
   }
 
-  // ---- in-span identity (agent · pid left, cost right), drawn on top of the bar ----
-  drawSpanIdentity(lane, x, barY);
-
-  // ---- subagent sub-bars (packed into rows by overlap) ----
-  const subs = (lane.subagents || [])
-    .map((sa) => ({ ...sa, s: Date.parse(sa.start), e: Date.parse(sa.end) }))
-    .filter((sa) => isFinite(sa.s) && isFinite(sa.e) && sa.e > sa.s)
-    .sort((a, b) => a.s - b.s);
-  const rowEnds = [];
+  // ---- subagent sub-bars: one stacked sub-line per concurrent subagent, so N
+  // simultaneous subagents render as N parallel lines below the main bar ----
+  const { subs } = packSubagents(lane);
   for (const sa of subs) {
-    let r = rowEnds.findIndex((end) => sa.s >= end);
-    if (r === -1) { rowEnds.push(sa.e); r = rowEnds.length - 1; }
-    else rowEnds[r] = sa.e;
-    const ry = subTop + Math.min(r, GEO.SUB_ROWS - 1) * (GEO.SUB_ROW_H + GEO.SUB_GAP);
+    const ry = subTop + sa.row * (GEO.SUB_ROW_H + GEO.SUB_GAP);
     const sx = x(sa.s), sw = Math.max(2, x(sa.e) - sx);
     const bar = svgEl("rect", {
       class: "subagent-bar", x: sx, y: ry, width: sw, height: GEO.SUB_ROW_H, rx: 1.5, fill: SUBAGENT_COLOR,
@@ -842,38 +860,23 @@ function drawSession(lane, rowTop, x, haveActivity, activeGlobal) {
   }
 }
 
-// drawSpanIdentity renders the session's stable identity INSIDE its span (the
-// gutter no longer carries it now that a row can hold several sessions): the
-// "agent · pid" tag pinned to the left edge of the status bar and the cost pinned
-// to the right. pid is shown here on purpose. The labels are dark-halo'd overlays
-// drawn on top of the bar (legible over any status color); each carries the full
-// identity + name history on hover. They hide on spans too narrow to read — but
-// the full identity always stays reachable via the name-span hover tooltip, which
-// spans the whole session (see nameSegTipHTML).
-function drawSpanIdentity(lane, x, barY) {
-  const sStart = x(Date.parse(lane.start));
-  const spanW = Math.max(1, x(Date.parse(lane.end)) - sStart);
-  if (spanW < GEO.IDENT_MIN_W) return;
-  const y = barY + GEO.BAR_H / 2 + 3.5; // vertically centered on the status bar
-
-  const costText = lane.cost_usd != null ? fmtUSD(lane.cost_usd) : "";
-  const showCost = costText && spanW >= GEO.IDENT_BOTH_W;
-  const costW = showCost ? costText.length * 6.6 + 10 : 0;
-
-  const idText = [lane.agent, lane.pid != null ? "pid " + lane.pid : null].filter(Boolean).join(" · ");
-  const avail = spanW - 10 - costW;
-  if (idText && avail > 16) {
-    const t = svgEl("text", { class: "span-ident", x: sStart + 5, y });
-    t.textContent = truncate(idText, Math.max(1, Math.floor(avail / 6.6)));
-    attachTip(t, () => gutterTipHTML(lane, currentName(lane)));
-    el.svg.appendChild(t);
+// packSubagents greedily first-fits a lane's subagents (sorted by start) into
+// non-overlapping rows; row count equals the max simultaneous subagents, so true
+// parallelism is preserved (no fixed cap). Each returned sub carries its `row`.
+// Shared by laneHeight (height reservation) and drawSession so they stay in sync.
+function packSubagents(lane) {
+  const subs = (lane.subagents || [])
+    .map((sa) => ({ ...sa, s: Date.parse(sa.start), e: Date.parse(sa.end) }))
+    .filter((sa) => isFinite(sa.s) && isFinite(sa.e) && sa.e > sa.s)
+    .sort((a, b) => a.s - b.s);
+  const rowEnds = [];
+  for (const sa of subs) {
+    let r = rowEnds.findIndex((end) => sa.s >= end);
+    if (r === -1) { rowEnds.push(sa.e); r = rowEnds.length - 1; }
+    else rowEnds[r] = sa.e;
+    sa.row = r;
   }
-  if (showCost) {
-    const t = svgEl("text", { class: "span-ident span-cost", x: sStart + spanW - 5, y, "text-anchor": "end" });
-    t.textContent = costText;
-    attachTip(t, () => gutterTipHTML(lane, currentName(lane)));
-    el.svg.appendChild(t);
-  }
+  return { subs, rows: rowEnds.length };
 }
 
 function laneFallback(lane) {
@@ -1023,10 +1026,18 @@ function gutterTipHTML(lane, name) {
 
 function renderAttentionCard(summary, op) {
   const da = summary.delegated_active, aa = summary.attended_active, pa = summary.prompt_active;
-  let eff = summary.delegation_effectiveness;
-  if (eff == null && (da != null || aa != null)) {
-    const d = da || 0, a = aa || 0;
-    eff = d + a > 0 ? d / (d + a) : null;
+  // Delegation effectiveness = share of your total agent engagement that ran
+  // hands-off (delegated) vs. hands-on (attended supervising + prompt driving).
+  // We recompute it here to INCLUDE prompt time — the upstream
+  // summary.delegation_effectiveness is delegated/(delegated+attended), which
+  // ignores prompting so heavy hands-on driving never lowers the score. Fall
+  // back to the upstream scalar only when the components aren't recorded.
+  let eff;
+  if (da != null || aa != null || pa != null) {
+    const d = da || 0, a = aa || 0, p = pa || 0;
+    eff = d + a + p > 0 ? d / (d + a + p) : null;
+  } else {
+    eff = summary.delegation_effectiveness != null ? summary.delegation_effectiveness : null;
   }
   const haveDeleg = da != null || aa != null || pa != null || summary.delegation_effectiveness != null;
   const effPct = eff == null ? null : Math.round(eff * 100);
@@ -1041,9 +1052,9 @@ function renderAttentionCard(summary, op) {
 
   const effTip = tip({
     title: "delegation effectiveness",
-    formula: "delegated ÷ (delegated + attended)",
+    formula: "delegated ÷ (delegated + attended + prompt)",
     result: effPct == null ? "—" : effPct + "%",
-    why: "Share of active agent-time where the agent worked while you were away vs. supervising — higher = more leverage.",
+    why: "Share of your agent engagement that ran hands-off (delegated) vs. hands-on (supervising + prompting) — higher = more leverage.",
     color: effColor,
   });
   const ctxTip = tip({
@@ -1051,7 +1062,7 @@ function renderAttentionCard(summary, op) {
     formula: "focus arrivals − 1",
     result: op ? String(op.switches) : "—",
     why: "How many times you moved your attention between sessions.",
-    color: "var(--accent)",
+    color: "var(--c-permission)",
   });
   const lostTip = tip({
     title: "operator time lost to AI",
@@ -1061,59 +1072,25 @@ function renderAttentionCard(summary, op) {
     color: "var(--c-permission)",
   });
 
-  el.cardAttention.innerHTML = `
-    <div class="card-label">attention &amp; delegation</div>
-    <div class="headline-row">
-      <div class="headline has-tip" data-tip="${effTip}">
-        <div class="hv" style="color:${effColor}">${haveDeleg && effPct != null ? effPct + "%" : "—"}</div>
-        <div class="hk">delegation effectiveness</div>
-      </div>
-    </div>
+  // engagement split: delegated (you away) / attended (you watching) / prompt (you driving)
+  const del = da || 0, att = aa || 0, prm = pa || 0;
+  const engage = del + att + prm;
+  const pctOf = (v) => (engage > 0 ? Math.round((v / engage) * 100) : 0);
+  const seg = (w, color) => (w > 0 ? `<span class="sb-seg" style="width:${((w / engage) * 100).toFixed(3)}%;background:${color}"></span>` : "");
+  const splitBar = engage > 0
+    ? `<div class="split-bar" role="img" aria-label="engagement split">${seg(del, "var(--c-working)")}${seg(att, "var(--c-idle)")}${seg(prm, "var(--accent)")}</div>`
+    : "";
+  const dotK = (color, text) => `<span class="dot-k" style="background:${color}"></span>${text}`;
+  const timePct = (t, pct) => `${humanDuration(t)} <span class="dim">${pct}%</span>`;
 
-    <div class="kv-head">attention</div>
-    <div class="kv-list">
-      ${row("union (A) · ≥1 active", humanDuration(summary.attention_union), {
-        title: "union (A) · ≥1 active",
-        formula: "wall-clock with ≥1 session active",
-        result: humanDuration(summary.attention_union),
-        why: "Real time elapsed while at least one agent was running.",
-      })}
-      ${row("per-session (B) · parallelism", humanDuration(summary.attention_per_session), {
-        title: "per-session (B)",
-        formula: "Σ per-session active time",
-        result: humanDuration(summary.attention_per_session),
-        why: "Total active time counting parallel sessions separately (parallelism counted).",
-      }, "deemph")}
-    </div>
+  // parallelism factor: agent-hours ÷ wall-clock-active ≈ average simultaneous agents
+  const union = summary.attention_union, perSession = summary.attention_per_session;
+  const parallel = union && perSession && union > 0 ? perSession / union : null;
 
-    ${haveDeleg ? `
-      <div class="kv-sep"></div>
-      <div class="kv-head">delegation</div>
-      <div class="kv-list">
-        ${row("delegated · agent works, you away", humanDuration(da), {
-          title: "delegated",
-          formula: "agent active while you were away",
-          result: humanDuration(da),
-          why: "Agent kept working without supervision — pure leverage.",
-          color: "var(--c-working)",
-        })}
-        ${row("attended · you supervising", humanDuration(aa), {
-          title: "attended",
-          formula: "agent active while you supervised",
-          result: humanDuration(aa),
-          why: "Agent worked while you watched — useful, but not leverage.",
-          color: "var(--c-idle)",
-        })}
-        ${row("prompt · you driving", humanDuration(pa), {
-          title: "prompt",
-          formula: "you actively driving (typing)",
-          result: humanDuration(pa),
-          why: "Hands-on time where you were actively prompting.",
-        })}
-      </div>
-    ` : `<div class="kv-sep"></div><div class="kv muted-note">delegation metrics not recorded for this window</div>`}
-
-    <div class="op-overhead">
+  // operator-overhead callout — the cost of context switching. Prioritized near the
+  // top and styled dark red (this is waste, not leverage).
+  const opBox = `
+    <div class="op-overhead danger">
       <div class="op-overhead-head">operator overhead</div>
       <div class="op-overhead-row has-tip" data-tip="${ctxTip}">
         <span class="oo-k">context switches</span><span class="oo-v">${op ? op.switches : "—"}</span>
@@ -1121,6 +1098,61 @@ function renderAttentionCard(summary, op) {
       <div class="op-overhead-row has-tip" data-tip="${lostTip}">
         <span class="oo-k">operator time lost to AI</span><span class="oo-v">${op ? humanDurationMs(op.lostMs) : "—"}</span>
       </div>
+    </div>`;
+
+  el.cardAttention.innerHTML = `
+    <div class="card-label">attention &amp; delegation</div>
+    <div class="headline-row">
+      <div class="headline has-tip" data-tip="${effTip}">
+        <div class="hv" style="color:${effColor}">${haveDeleg && effPct != null ? effPct + "%" : "—"}</div>
+        <div class="hk">delegation effectiveness · hands-off share of your engagement</div>
+      </div>
+    </div>
+
+    ${opBox}
+
+    ${haveDeleg ? `
+      <div class="kv-head">where your time went</div>
+      ${splitBar}
+      <div class="kv-list">
+        ${row(dotK("var(--c-working)", "delegated · you away"), timePct(del, pctOf(del)), {
+          title: "delegated",
+          formula: "agent active while you were away",
+          result: humanDuration(da),
+          why: "Agent kept working without supervision — pure leverage.",
+          color: "var(--c-working)",
+        })}
+        ${row(dotK("var(--c-idle)", "attended · you watching"), timePct(att, pctOf(att)), {
+          title: "attended",
+          formula: "agent active while you supervised",
+          result: humanDuration(aa),
+          why: "Agent worked while you watched — useful, but not leverage.",
+          color: "var(--c-idle)",
+        })}
+        ${row(dotK("var(--accent)", "prompt · you driving"), timePct(prm, pctOf(prm)), {
+          title: "prompt",
+          formula: "you actively driving (typing)",
+          result: humanDuration(pa),
+          why: "Hands-on time where you were actively prompting.",
+          color: "var(--accent)",
+        })}
+      </div>
+    ` : `<div class="kv muted-note">delegation metrics not recorded for this window</div>`}
+
+    <div class="kv-sep"></div>
+    <div class="kv-list">
+      ${row("active · ≥1 agent running", humanDuration(union), {
+        title: "active",
+        formula: "wall-clock with ≥1 session active",
+        result: humanDuration(union),
+        why: "Real time elapsed while at least one agent was running.",
+      })}
+      ${row("agent-hours · parallel work", `${humanDuration(perSession)}${parallel ? ` <span class="dim">${parallel.toFixed(1)}×</span>` : ""}`, {
+        title: "agent-hours",
+        formula: "Σ per-session active time",
+        result: humanDuration(perSession),
+        why: "Total active agent-time counting parallel sessions separately; ×N is average parallelism (agent-hours ÷ active).",
+      }, "deemph")}
     </div>`;
 
   attachFormulaTips(el.cardAttention);
@@ -1142,26 +1174,10 @@ function pctColor(pct) {
 
 function renderCostCard(data, plan) {
   const totals = data.totals || {};
-  const lanes = renderableLanes(data.lanes).slice().sort((a, b) => (b.cost_usd || 0) - (a.cost_usd || 0));
   const pw = data.plan_window || null;
 
   // tip() → escaped formula-descriptor HTML for a data-tip attribute.
   const tip = (obj) => escapeHTML(formulaTipHTML(obj));
-
-  // per-session rows (only those with a cost)
-  const costed = lanes.filter((l) => l.cost_usd != null);
-  const sessionRows = costed.length ? costed.map((l) => {
-    const name = currentName(l);
-    const tok = (l.tok_in || 0) + (l.tok_out || 0) + (l.tok_cache_read || 0) + (l.tok_cache_create || 0);
-    const rowTip = tip({
-      title: name,
-      formula: "session cost = Σ tokens × model price",
-      result: fmtUSD(l.cost_usd) + " · " + humanCount(tok) + " tok",
-      why: "Recomputed spend for this session from its token usage and model prices.",
-    });
-    return `<div class="kv has-tip" data-tip="${rowTip}"><span class="k" title="${escapeHTML(name)}">${escapeHTML(truncate(name, 30))}</span>
-      <span class="v">${fmtUSD(l.cost_usd)} <span class="dim">· ${humanCount(tok)} tok</span></span></div>`;
-  }).join("") : `<div class="kv muted-note">no per-session cost in this window</div>`;
 
   // 5h plan gauge: our $ (plan_window) + official % (plan cache)
   const fh = plan && plan.available ? plan.five_hour : null;
@@ -1224,11 +1240,6 @@ function renderCostCard(data, plan) {
         </div>
         ${gaugeBar(wkPct)}
       ` : ""}
-    </div>
-
-    <div class="kv-list session-costs">
-      <div class="kv-head">per session</div>
-      ${sessionRows}
     </div>`;
 
   attachFormulaTips(el.cardCost);
@@ -1305,8 +1316,56 @@ function applyUrlParams() {
   el.day.value = q.get("day") || todayLocal();
 }
 
+// ---------------------------------------------------------------------------
+// theme (light / dark)
+// Follows the system by default; the topbar toggle sets an explicit choice that
+// is persisted and wins over the system preference. When the resolved theme is
+// dark we add <meta name="darkreader-lock"> so the DarkReader extension leaves
+// our first-class dark theme alone rather than double-inverting it; in light
+// mode we remove the lock so DarkReader may darken the page if the user runs it.
+// The <head> inline script applies the same before first paint (no flash); this
+// keeps everything in sync when the toggle is used or the system flips.
+// ---------------------------------------------------------------------------
+const THEME_KEY = "sb-theme";
+const themeMql = window.matchMedia("(prefers-color-scheme: dark)");
+
+function storedTheme() {
+  const v = localStorage.getItem(THEME_KEY);
+  return v === "light" || v === "dark" ? v : null; // null → follow the system
+}
+function resolvedTheme() {
+  return storedTheme() || (themeMql.matches ? "dark" : "light");
+}
+function setDarkReaderLock(locked) {
+  let m = document.querySelector('meta[name="darkreader-lock"]');
+  if (locked && !m) {
+    m = document.createElement("meta");
+    m.name = "darkreader-lock";
+    document.head.appendChild(m);
+  } else if (!locked && m) {
+    m.remove();
+  }
+}
+function applyTheme() {
+  const theme = resolvedTheme();
+  document.documentElement.setAttribute("data-theme", theme);
+  setDarkReaderLock(theme === "dark");
+  if (el.themeToggle) {
+    const next = theme === "dark" ? "light" : "dark";
+    el.themeToggle.title = "switch to " + next + " theme";
+    el.themeToggle.setAttribute("aria-label", "switch to " + next + " theme");
+  }
+}
+function toggleTheme() {
+  localStorage.setItem(THEME_KEY, resolvedTheme() === "dark" ? "light" : "dark");
+  applyTheme();
+}
+
 function init() {
   applyUrlParams();
+  applyTheme();
+  el.themeToggle.addEventListener("click", toggleTheme);
+  themeMql.addEventListener("change", () => { if (!storedTheme()) applyTheme(); });
 
   el.day.addEventListener("change", reloadNow);
   el.since.addEventListener("change", reloadNow);
@@ -1316,6 +1375,7 @@ function init() {
   el.live.addEventListener("click", () => { el.day.value = todayLocal(); el.since.value = el.until.value = ""; reloadNow(); });
   el.clearRange.addEventListener("click", () => { el.since.value = el.until.value = ""; reloadNow(); });
   el.optCtxSwitches.addEventListener("change", () => { if (lastData) renderTimeline(lastData); });
+  el.optFocus.addEventListener("change", () => { if (lastData) renderTimeline(lastData); });
 
   // dismiss popout on outside click / Escape
   document.addEventListener("click", (ev) => {

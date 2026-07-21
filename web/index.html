@@ -3,8 +3,29 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark light" />
   <title>switchboard</title>
   <link rel="stylesheet" href="style.css" />
+  <!-- Resolve the theme before first paint (no flash) and, when dark, drop the
+       darkreader-lock meta so the DarkReader extension leaves our first-class
+       dark theme alone instead of double-inverting it. app.js keeps both in
+       sync when the toggle is used. -->
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("sb-theme");
+        if (t !== "light" && t !== "dark") {
+          t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        }
+        document.documentElement.setAttribute("data-theme", t);
+        if (t === "dark") {
+          var m = document.createElement("meta");
+          m.name = "darkreader-lock";
+          document.head.appendChild(m);
+        }
+      } catch (e) {}
+    })();
+  </script>
 </head>
 <body>
   <header class="topbar">
@@ -30,6 +51,11 @@
       <span id="updated">—</span>
       <span class="win" id="window-label">—</span>
     </div>
+
+    <button id="theme-toggle" class="icon theme-toggle" title="toggle theme" aria-label="toggle color theme">
+      <svg class="ico-sun" viewBox="0 0 16 16" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="M8 11a3 3 0 1 1 0-6 3 3 0 0 1 0 6m0 1a4 4 0 1 0 0-8 4 4 0 0 0 0 8M8 0a.5.5 0 0 1 .5.5v2a.5.5 0 0 1-1 0v-2A.5.5 0 0 1 8 0m0 13a.5.5 0 0 1 .5.5v2a.5.5 0 0 1-1 0v-2A.5.5 0 0 1 8 13m8-5a.5.5 0 0 1-.5.5h-2a.5.5 0 0 1 0-1h2a.5.5 0 0 1 .5.5M3 8a.5.5 0 0 1-.5.5h-2a.5.5 0 0 1 0-1h2A.5.5 0 0 1 3 8m10.657-5.657a.5.5 0 0 1 0 .707l-1.414 1.415a.5.5 0 1 1-.707-.708l1.414-1.414a.5.5 0 0 1 .707 0m-9.193 9.193a.5.5 0 0 1 0 .707L3.05 13.657a.5.5 0 0 1-.707-.707l1.414-1.414a.5.5 0 0 1 .707 0m9.193 2.121a.5.5 0 0 1-.707 0l-1.414-1.414a.5.5 0 0 1 .707-.707l1.414 1.414a.5.5 0 0 1 0 .707M4.464 4.465a.5.5 0 0 1-.707 0L2.343 3.05a.5.5 0 1 1 .707-.708l1.414 1.415a.5.5 0 0 1 0 .707"/></svg>
+      <svg class="ico-moon" viewBox="0 0 16 16" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="M6 .278a.77.77 0 0 1 .08.858 7.2 7.2 0 0 0-.878 3.46c0 4.021 3.278 7.277 7.318 7.277q.792-.001 1.533-.16a.79.79 0 0 1 .81.316.73.73 0 0 1-.031.893A8.35 8.35 0 0 1 8.344 16C3.734 16 0 12.286 0 7.71 0 4.266 2.114 1.312 5.124.06A.75.75 0 0 1 6 .278"/></svg>
+    </button>
   </header>
 
   <div id="error" class="error-banner" hidden></div>
@@ -40,19 +66,28 @@
 
     <!-- Swimlanes: grouped by project. -->
     <section class="timeline-section">
-      <div class="chart-options">
-        <label class="chart-opt"><input type="checkbox" id="opt-ctx-switches" /> show context switches</label>
-      </div>
       <div class="timeline-wrap" id="timeline-wrap">
         <svg id="timeline" role="img" aria-label="session swimlanes">
           <defs>
             <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
               <rect width="6" height="6" fill="none"></rect>
-              <line x1="0" y1="0" x2="0" y2="6" stroke="#e6edf3" stroke-width="1.1" stroke-opacity="0.55"></line>
+              <line class="hatch-line" x1="0" y1="0" x2="0" y2="6" stroke-width="1.1" stroke-opacity="0.55"></line>
             </pattern>
           </defs>
         </svg>
         <div id="empty" class="empty" hidden>No activity for this window.</div>
+      </div>
+      <div class="chart-footer">
+        <label class="toggle" for="opt-focus">
+          <input type="checkbox" id="opt-focus" class="toggle-input" />
+          <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
+          <span class="toggle-label">show focus</span>
+        </label>
+        <label class="toggle" for="opt-ctx-switches">
+          <input type="checkbox" id="opt-ctx-switches" class="toggle-input" />
+          <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
+          <span class="toggle-label">show context switches</span>
+        </label>
       </div>
     </section>
 
@@ -71,7 +106,11 @@
   <div id="popout" class="popout" hidden></div>
 
   <footer class="footer">
-    <span>durations are nanoseconds (÷1e9) · tokens raw counts · cost is recomputed from tokens × model price · plan % is read-only from <code>/tmp/claude-plan-usage.json</code> — contract owned by switchboard <code>docs/history-schema.md</code></span>
+    <div class="footer-item"><span class="fk">durations</span><span class="fv">nanoseconds (÷1e9)</span></div>
+    <div class="footer-item"><span class="fk">tokens</span><span class="fv">raw counts</span></div>
+    <div class="footer-item"><span class="fk">cost</span><span class="fv">recomputed from tokens × model price</span></div>
+    <div class="footer-item"><span class="fk">plan %</span><span class="fv">read-only from <code>/tmp/claude-plan-usage.json</code></span></div>
+    <div class="footer-item"><span class="fk">contract</span><span class="fv">switchboard <code>docs/history-schema.md</code></span></div>
   </footer>
 
   <script src="model.js"></script>

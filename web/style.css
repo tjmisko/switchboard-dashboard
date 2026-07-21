@@ -1,14 +1,7 @@
 :root {
-  --bg: #0d1117;
-  --bg-elev: #161b22;
-  --bg-elev-2: #1c2230;
-  --border: #2b3240;
-  --border-soft: #21262d;
-  --fg: #e6edf3;
-  --fg-muted: #9da7b3;
-  --fg-dim: #6e7681;
-  --accent: #58a6ff;
-
+  /* Theme-independent tokens. Status hues are saturated enough to read on both
+     the dark and light surfaces, so they stay fixed across themes; only the
+     chrome (bg / fg / border, plus the SVG-only tokens below) is themed. */
   --c-working: #3fb950;
   --c-delegating: #3fb950;
   --c-dormant: #3fb950; /* low-alpha green applied at render (see DORMANT_OPACITY) */
@@ -20,6 +13,77 @@
 
   --mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+/* ---------- theme palettes ----------
+   Dark is the base (also the fallback when a UA reports no preference). The
+   @media block flips to light when the system asks for it, and the
+   [data-theme] selectors are an explicit user override that wins over both
+   (higher specificity than a bare :root, and media queries add none). app.js
+   stamps data-theme; the head script does it before first paint. */
+:root, :root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0d1117;
+  --bg-elev: #161b22;
+  --bg-elev-2: #1c2230;
+  --border: #2b3240;
+  --border-soft: #21262d;
+  --fg: #e6edf3;
+  --fg-muted: #9da7b3;
+  --fg-dim: #6e7681;
+  --accent: #58a6ff;
+
+  --hatch-line: #e6edf3;      /* diagonal focus-overlay hatch */
+  --hover-stroke: #ffffff;    /* bar/op/subagent hover halo */
+  --lane-odd: rgba(255, 255, 255, 0.014);
+  --attention-tint: #15281a22;
+  --error-fg: #ffb4ae;
+  --shadow-1: rgba(0, 0, 0, 0.5);
+  --shadow-2: rgba(0, 0, 0, 0.6);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --bg: #ffffff;
+    --bg-elev: #f6f8fa;
+    --bg-elev-2: #eaeef2;
+    --border: #d0d7de;
+    --border-soft: #d8dee4;
+    --fg: #1f2328;
+    --fg-muted: #57606a;
+    --fg-dim: #818b98;
+    --accent: #0969da;
+
+    --hatch-line: #1f2328;
+    --hover-stroke: #1f2328;
+    --lane-odd: rgba(31, 35, 40, 0.03);
+    --attention-tint: #1a7f3722;
+    --error-fg: #cf222e;
+    --shadow-1: rgba(31, 35, 40, 0.16);
+    --shadow-2: rgba(31, 35, 40, 0.24);
+  }
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #ffffff;
+  --bg-elev: #f6f8fa;
+  --bg-elev-2: #eaeef2;
+  --border: #d0d7de;
+  --border-soft: #d8dee4;
+  --fg: #1f2328;
+  --fg-muted: #57606a;
+  --fg-dim: #818b98;
+  --accent: #0969da;
+
+  --hatch-line: #1f2328;
+  --hover-stroke: #1f2328;
+  --lane-odd: rgba(31, 35, 40, 0.03);
+  --attention-tint: #1a7f3722;
+  --error-fg: #cf222e;
+  --shadow-1: rgba(31, 35, 40, 0.16);
+  --shadow-2: rgba(31, 35, 40, 0.24);
 }
 
 * { box-sizing: border-box; }
@@ -68,7 +132,6 @@ input[type="date"] {
   padding: 5px 7px;
   font-family: var(--mono);
   font-size: 12px;
-  color-scheme: dark;
 }
 input[type="date"]:focus { outline: none; border-color: var(--accent); }
 
@@ -85,6 +148,14 @@ button {
 button:hover { border-color: var(--fg-dim); }
 button.icon { padding: 5px 9px; font-size: 14px; line-height: 1; color: var(--fg-muted); }
 button.ghost { background: transparent; color: var(--fg-muted); font-size: 12px; }
+
+/* theme toggle: shows the icon of the ACTIVE theme (moon = dark, sun = light);
+   data-theme drives which one is visible, so it's correct before JS runs. */
+.theme-toggle { margin-left: 10px; display: inline-flex; align-items: center; justify-content: center; }
+.theme-toggle svg { display: block; }
+.theme-toggle:hover { color: var(--fg); }
+:root[data-theme="dark"] .theme-toggle .ico-sun { display: none; }
+:root[data-theme="light"] .theme-toggle .ico-moon { display: none; }
 
 .live-pill {
   margin-left: auto;
@@ -107,7 +178,7 @@ button.ghost { background: transparent; color: var(--fg-muted); font-size: 12px;
   padding: 10px 14px;
   border: 1px solid var(--c-permission);
   background: rgba(248, 81, 73, 0.1);
-  color: #ffb4ae;
+  color: var(--error-fg);
   border-radius: 8px;
   font-family: var(--mono);
   font-size: 12px;
@@ -135,9 +206,38 @@ main { padding: 16px 18px 36px; }
 .status-key .sk-name { color: var(--fg-muted); }
 .status-key .sk-val { font-family: var(--mono); color: var(--fg); }
 
-.chart-options { display: flex; gap: 16px; align-items: center; margin: 0 2px 8px; }
-.chart-opt { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--fg-muted); cursor: pointer; user-select: none; }
-.chart-opt input { accent-color: var(--accent); cursor: pointer; margin: 0; }
+/* chart footer: chart-scoped options sit below the timeline, right-aligned, as a
+   proper pill-wrapped toggle switch rather than a bare checkbox. */
+.chart-footer { display: flex; justify-content: flex-end; gap: 10px; margin: 10px 2px 0; }
+.toggle {
+  display: inline-flex; align-items: center; gap: 9px;
+  padding: 6px 12px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  font-size: 12px; color: var(--fg-muted);
+  cursor: pointer; user-select: none;
+}
+.toggle:hover { border-color: var(--fg-dim); }
+.toggle-input { position: absolute; width: 1px; height: 1px; opacity: 0; margin: 0; pointer-events: none; }
+.toggle-track {
+  position: relative; flex: none;
+  width: 30px; height: 17px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.toggle-thumb {
+  position: absolute; top: 1px; left: 1px;
+  width: 13px; height: 13px; border-radius: 50%;
+  background: var(--fg-dim);
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+.toggle-input:checked + .toggle-track { background: var(--accent); border-color: var(--accent); }
+.toggle-input:checked + .toggle-track .toggle-thumb { transform: translateX(13px); background: #fff; }
+.toggle-input:focus-visible + .toggle-track { outline: 2px solid var(--accent); outline-offset: 2px; }
+.toggle-label { white-space: nowrap; }
 
 .timeline-wrap {
   position: relative;
@@ -159,14 +259,18 @@ main { padding: 16px 18px 36px; }
 /* svg elements */
 .idle-band { fill: rgba(110, 118, 129, 0.08); }
 .lane-bg { fill: transparent; }
-.lane-bg.odd { fill: rgba(255, 255, 255, 0.014); }
+.lane-bg.odd { fill: var(--lane-odd); }
+
+/* focus-overlay hatch: themed via CSS so the diagonal lines read on both
+   surfaces (near-white on dark, near-black on light) */
+.hatch-line { stroke: var(--hatch-line); }
 
 /* operator free-time lane (top row): green = free, dark red = occupied */
 .op-lane-bg { fill: rgba(63, 185, 80, 0.05); }
 .op-bar { stroke: rgba(0, 0, 0, 0.28); stroke-width: 0.5; cursor: default; }
 .op-bar.op-free { fill-opacity: 0.92; }
 .op-bar.op-occupied { fill-opacity: 0.85; }
-.op-bar:hover { stroke: #fff; stroke-width: 1; }
+.op-bar:hover { stroke: var(--hover-stroke); stroke-width: 1; }
 .lane-sep { stroke: var(--border-soft); stroke-width: 1; }
 .axis-line { stroke: var(--border); stroke-width: 1; }
 .axis-tick { stroke: var(--border-soft); stroke-width: 1; }
@@ -191,25 +295,13 @@ main { padding: 16px 18px 36px; }
 .name-seg-label { fill: var(--fg); font-family: var(--mono); font-size: 12.5px; font-weight: 600; pointer-events: none; }
 .name-seg-label.lead { fill: var(--fg-dim); font-weight: 400; font-style: italic; }
 
-/* in-span session identity (agent · pid at the left of the status bar, cost at
-   the right): the gutter no longer carries it. A dark stroke halo (paint-order)
-   keeps the light text legible over any bar color; the full identity is in the
-   hover tooltip. */
-.span-ident {
-  fill: var(--fg);
-  font-family: var(--mono);
-  font-size: 10.5px;
-  font-weight: 600;
-  paint-order: stroke;
-  stroke: rgba(0, 0, 0, 0.6);
-  stroke-width: 2.5px;
-  stroke-linejoin: round;
-  cursor: default;
-}
-.span-ident.span-cost { fill: var(--fg); font-weight: 700; }
+/* session cost, right-aligned on the identifier (name-span) line above the bar.
+   Sits on the themed name band (not over a colored bar), so it just follows --fg
+   — no halo. The bars themselves stay text-free; identity is on hover. */
+.name-cost { fill: var(--fg); font-family: var(--mono); font-size: 11.5px; font-weight: 700; cursor: default; }
 
 .bar { stroke: rgba(0, 0, 0, 0.25); stroke-width: 0.5; cursor: pointer; }
-.bar:hover { stroke: #fff; stroke-width: 1; }
+.bar:hover { stroke: var(--hover-stroke); stroke-width: 1; }
 
 .focus-overlay { stroke-width: 1.1; stroke-opacity: 0.8; fill-opacity: 1; pointer-events: none; }
 
@@ -218,14 +310,19 @@ main { padding: 16px 18px 36px; }
 .ctx-switch { stroke: #8b1a1a; stroke-width: 0.8; stroke-opacity: 0.5; pointer-events: none; }
 
 .subagent-bar { stroke: rgba(0, 0, 0, 0.3); stroke-width: 0.4; cursor: pointer; }
-.subagent-bar:hover { stroke: #fff; stroke-width: 1; }
+.subagent-bar:hover { stroke: var(--hover-stroke); stroke-width: 1; }
 
 /* ---------- cards strip ---------- */
 .boxes {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  /* legend column is sized to the narrow legend (≤300px); the two data cards
+     share the remaining width equally so they expand instead of leaving a gap. */
+  grid-template-columns: minmax(240px, 300px) minmax(0, 1fr) minmax(0, 1fr);
   gap: 12px;
   align-items: start;
+}
+@media (max-width: 860px) {
+  .boxes { grid-template-columns: 1fr; }
 }
 .box {
   background: var(--bg-elev);
@@ -250,7 +347,7 @@ main { padding: 16px 18px 36px; }
 .headline .hv.green { color: var(--c-working); }
 .headline .hk { font-size: 11px; color: var(--fg-muted); margin-top: 4px; }
 
-.card.attention { background: linear-gradient(135deg, #15281a22, var(--bg-elev)); }
+.card.attention { background: linear-gradient(135deg, var(--attention-tint), var(--bg-elev)); }
 
 .kv-list { display: flex; flex-direction: column; gap: 7px; }
 .kv { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; }
@@ -260,6 +357,20 @@ main { padding: 16px 18px 36px; }
 .kv-sep { height: 1px; background: var(--border-soft); margin: 3px 0; }
 .kv-head { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--fg-dim); margin-bottom: 2px; }
 .muted-note { color: var(--fg-dim); font-style: italic; font-size: 12px; }
+
+/* small color key dot before a kv label, tying the row to the split bar */
+.kv .k .dot-k, .dot-k { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 8px; vertical-align: middle; }
+
+/* engagement split: a stacked proportion bar (delegated / attended / prompt) */
+.split-bar {
+  display: flex;
+  height: 9px;
+  border-radius: 5px;
+  overflow: hidden;
+  margin: 5px 0 12px;
+  background: var(--bg-elev-2);
+}
+.split-bar .sb-seg { flex: none; height: 100%; }
 .dim { color: var(--fg-dim); }
 .stale { color: var(--c-idle); }
 .v .dim { font-family: var(--mono); }
@@ -286,6 +397,16 @@ main { padding: 16px 18px 36px; }
 .op-overhead-row + .op-overhead-row { margin-top: 6px; }
 .op-overhead-row .oo-k { color: var(--fg-muted); }
 .op-overhead-row .oo-v { font-family: var(--mono); color: var(--fg); font-weight: 600; white-space: nowrap; }
+
+/* dark-red variant: operator overhead is waste, not leverage — call it out and
+   prioritize it near the top of the card. */
+.op-overhead.danger {
+  margin: 2px 0 14px;
+  border-left-width: 4px;
+  border-left-color: #b3202a;
+  background: rgba(179, 32, 42, 0.13);
+}
+.op-overhead.danger .op-overhead-head { color: #ef5a58; }
 
 /* ---------- cost gauge ---------- */
 .gauge-block { margin: 4px 0 14px; }
@@ -320,7 +441,7 @@ main { padding: 16px 18px 36px; }
   padding: 8px 10px;
   font-size: 12px;
   max-width: 320px;
-  box-shadow: 0 6px 24px rgba(0,0,0,0.5);
+  box-shadow: 0 6px 24px var(--shadow-1);
 }
 .tooltip .t-status { font-weight: 600; font-family: var(--mono); }
 .tooltip .t-row { color: var(--fg-muted); margin-top: 3px; font-family: var(--mono); }
@@ -353,7 +474,7 @@ main { padding: 16px 18px 36px; }
   padding: 12px 14px 12px;
   font-size: 13px;
   max-width: 340px;
-  box-shadow: 0 10px 34px rgba(0,0,0,0.6);
+  box-shadow: 0 10px 34px var(--shadow-2);
 }
 .popout .po-close {
   position: absolute; top: 8px; right: 8px;
@@ -369,8 +490,18 @@ main { padding: 16px 18px 36px; }
 
 /* ---------- footer ---------- */
 .footer {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 7px 28px;
   padding: 14px 18px 28px;
-  color: var(--fg-dim);
   font-size: 11px;
   border-top: 1px solid var(--border-soft);
 }
+.footer-item { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.footer .fk {
+  flex: none; min-width: 62px;
+  text-transform: uppercase; letter-spacing: 0.5px;
+  color: var(--fg-dim);
+}
+.footer .fv { color: var(--fg-muted); min-width: 0; }
+.footer code { font-family: var(--mono); color: var(--fg-muted); }
