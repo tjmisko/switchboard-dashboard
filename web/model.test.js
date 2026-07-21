@@ -169,6 +169,21 @@ test("spanInefficiency returns null when the span has zero length", () => {
   assert.equal(spanInefficiency(lane, at0, at0), null);
 });
 
+test("spanInefficiency does not count delegating/dormant (waiting on a subagent) as inefficient", () => {
+  const segStart = baseMs;
+  const segEnd = baseMs + 100000; // 100s span
+  const lane = {
+    intervals: [
+      interval("working", segStart, segStart + 20000),
+      interval("dormant", segStart + 20000, segStart + 60000),   // waiting on subagent — productive
+      interval("delegating", segStart + 60000, segStart + 90000), // legacy alias — also productive
+      interval("idle", segStart + 90000, segEnd),                 // 10s genuinely idle
+    ],
+  };
+  // only the trailing 10s of idle out of 100s counts as inefficient
+  assert.equal(spanInefficiency(lane, segStart, segEnd), 0.1);
+});
+
 // packLanes: greedy interval partitioning of a group's lanes into shared rows.
 function laneSpan(id, fromMin, toMin) {
   return { session_id: id, start: at(fromMin), end: at(toMin) };

@@ -114,15 +114,18 @@
     return (lanes || []).map(buildBar);
   }
 
-  // spanInefficiency: fraction of [segStartMs, segEndMs] (epoch ms) during which
-  // the session was idle or waiting (status in idle/dormant/suspended) rather than
-  // working. The denominator is the FULL span duration. Returns null when the span
-  // is non-positive. Pure: reads only lane.intervals (each {status, start, end}
-  // with RFC3339 start/end).
+  // spanInefficiency: fraction of [segStartMs, segEndMs] (epoch ms) that was
+  // genuinely non-productive — idle or suspended. Time spent DELEGATING is NOT
+  // inefficient: dormant/delegating means the parent is waiting on a subagent
+  // that is itself actively working, so that time is productive and excluded
+  // (this is the whole point of running agents in parallel). The denominator is
+  // the FULL span duration. Returns null when the span is non-positive. Pure:
+  // reads only lane.intervals (each {status, start, end} with RFC3339 start/end).
   function spanInefficiency(lane, segStartMs, segEndMs) {
     const dur = segEndMs - segStartMs;
     if (!(dur > 0)) return null;
-    const WAITING = new Set(["idle", "dormant", "suspended"]);
+    // dormant/delegating deliberately excluded — a subagent is working then.
+    const WAITING = new Set(["idle", "suspended"]);
     let waited = 0;
     for (const iv of (lane.intervals || [])) {
       if (!WAITING.has(iv.status)) continue;
