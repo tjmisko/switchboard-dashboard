@@ -530,7 +530,21 @@ const GEO = {
   COST_MIN_W: 56,   // show the cost on the identifier line only above this span width
   OP_LANE_H: 52, OP_BAR_H: 20, // operator free-time lane (sits above the groups)
   PX_PER_HOUR: 240, // min horizontal density → long windows scroll (see plotW)
+  AXIS_BOTTOM_H: 24,        // bottom axis-scale strip drawn below the plot
+  GROUP_COLLAPSED_H: 26,    // height of a folded (too-small) project group summary row
+  GROUP_COLLAPSE_MIN_PX: 24,// fold a group when even its widest session is under this px
+  SUB_MIN_PX: 4,            // a subagent sub-bar narrower than this reads as a sliver
+  SUB_MERGE_GAP_PX: 3,      // adjacent slivers within this px gap merge into one marker
 };
+
+// Project groups fold to a one-line summary when they get too small to read; the
+// user can click to override either way. Keyed by project name so the choice
+// survives the ~3s repaints. undefined = follow the auto (size-based) default.
+const groupCollapseOverride = new Map();
+function toggleGroupCollapse(project, currentlyCollapsed) {
+  groupCollapseOverride.set(project, !currentlyCollapsed);
+  if (lastData) renderTimeline(lastData);
+}
 
 // laneHeight is the compact vertical footprint of one session bar: name band +
 // status bar + paddings, plus a subagent strip sized to the session's ACTUAL max
@@ -587,20 +601,31 @@ function renderTimeline(data) {
   const minPlotW = (span / 3600e3) * GEO.PX_PER_HOUR;
   const plotW = Math.max(fitPlotW, minPlotW);
   const W = GEO.GUTTER + plotW + GEO.RIGHT;
+  // unclamped ms→px width, for the collapse decision (needs pixel widths before x()).
+  const msToPx = (ms) => (ms / span) * plotW;
 
   // operator free-time lane occupies the top row, above all project groups.
   const opTop = GEO.PLOT_TOP;
   const op = computeOperatorTime(data);
 
   // group lanes by project; within each group, PACK time-serializable sessions
-  // onto shared rows (greedy interval partitioning). Lay out a header per group,
-  // then one stacked row per packed row, top-down. Each row reserves the height of
-  // its tallest session (subagent strip included only when a session on the row
-  // delegated). The idx%2 background alternation runs per ROW across all groups.
+  // onto shared rows (greedy interval partitioning). A group that is too small to
+  // read (even its widest session is a sliver) folds to a single summary row unless
+  // the user overrode that. Otherwise lay out a header per group, then one stacked
+  // row per packed row, top-down. Each row reserves the height of its tallest
+  // session (subagent strip included only when a session on the row delegated). The
+  // idx%2 background alternation runs per ROW across all (expanded) groups.
   const groups = groupByProject(lanes);
   let yCursor = GEO.PLOT_TOP + GEO.OP_LANE_H;
   let rowIdx = 0;
   for (const g of groups) {
+    g.collapsed = groupCollapsed(g, msToPx);
+    if (g.collapsed) {
+      g.headY = yCursor;
+      g.rows = [];
+      yCursor += GEO.GROUP_COLLAPSED_H;
+      continue;
+    }
     g.headY = yCursor;
     yCursor += GEO.GROUP_HEAD_H;
     g.rows = packLanes(g.lanes).map((laneList, i) => {
@@ -616,7 +641,7 @@ function renderTimeline(data) {
     });
   }
   const plotBottom = yCursor;
-  const H = plotBottom + 14;
+  const H = plotBottom + GEO.AXIS_BOTTOM_H;
 
   el.svg.setAttribute("width", W);
   el.svg.setAttribute("height", H);
@@ -642,28 +667,37 @@ function renderTimeline(data) {
     }));
   }
 
-  // axis gridlines + labels (tick density scales with the scrollable plot width)
+  // axis gridlines + labels (tick density scales with the scrollable plot width).
+  // Labels ride BOTH ends: the conventional scale strip along the bottom plus the
+  // original top labels, so a tall, scrolled chart stays legible from either edge.
   const { ticks, step } = axisTicks(t0, t1, plotW);
   const showDate = step >= 24 * 3600e3;
+  const bottomLabelY = plotBottom + 16;
+  const fmtTick = (t) => {
+    const d = new Date(t);
+    return showDate
+      ? d.toLocaleDateString([], { month: "2-digit", day: "2-digit" })
+      : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+  };
   for (const t of ticks) {
     const px = x(t);
     el.svg.appendChild(svgEl("line", { class: "axis-tick", x1: px, y1: GEO.PLOT_TOP, x2: px, y2: plotBottom }));
-    const label = svgEl("text", { class: "axis-label", x: px + 3, y: GEO.AXIS_Y });
-    const d = new Date(t);
-    label.textContent = showDate
-      ? d.toLocaleDateString([], { month: "2-digit", day: "2-digit" })
-      : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
-    el.svg.appendChild(label);
+    const top = svgEl("text", { class: "axis-label", x: px + 3, y: GEO.AXIS_Y });
+    top.textContent = fmtTick(t);
+    el.svg.appendChild(top);
+    const bot = svgEl("text", { class: "axis-label", x: px + 3, y: bottomLabelY });
+    bot.textContent = fmtTick(t);
+    el.svg.appendChild(bot);
   }
+  // vertical axis (gutter edge) + horizontal baseline under the bottom scale
   el.svg.appendChild(svgEl("line", { class: "axis-line", x1: GEO.GUTTER, y1: GEO.PLOT_TOP, x2: GEO.GUTTER, y2: plotBottom }));
+  el.svg.appendChild(svgEl("line", { class: "axis-line", x1: GEO.GUTTER, y1: plotBottom, x2: GEO.GUTTER + plotW, y2: plotBottom }));
 
-  // project group headers (rule across full width + label in the gutter)
+  // project group headers: an expanded group gets a rule + caret/label (click to
+  // fold); a too-small group gets a single folded summary row instead.
   for (const g of groups) {
-    const ry = g.headY + GEO.GROUP_HEAD_H - 3;
-    el.svg.appendChild(svgEl("line", { class: "group-rule", x1: 0, y1: ry, x2: W, y2: ry }));
-    const gl = svgEl("text", { class: "group-label", x: 10, y: g.headY + 13 });
-    gl.textContent = ((g.projectFull || g.project) + " · " + g.lanes.length).toUpperCase();
-    el.svg.appendChild(gl);
+    if (g.collapsed) drawCollapsedGroup(g, x, W);
+    else drawGroupHeader(g, W);
   }
 
   drawOperatorLane(op, opTop, x, W);
@@ -703,6 +737,87 @@ function groupByProject(lanes) {
     const full = groupLanes.map((l) => l.project_full).find(Boolean);
     return { project: k, projectFull: full || k, lanes: groupLanes };
   });
+}
+
+// autoCollapseGroup: a group is "too small to read" when even its single widest
+// session would render narrower than GROUP_COLLAPSE_MIN_PX at the current scale.
+// Pixel-based (not duration-based) so the fold tracks the horizontal axis scale —
+// zoom the plot wider and marginal groups unfold on their own.
+function autoCollapseGroup(g, msToPx) {
+  let maxPx = 0;
+  for (const lane of g.lanes) {
+    const w = msToPx(Date.parse(lane.end) - Date.parse(lane.start));
+    if (isFinite(w) && w > maxPx) maxPx = w;
+  }
+  return maxPx < GEO.GROUP_COLLAPSE_MIN_PX;
+}
+
+// groupCollapsed resolves the effective folded state: an explicit user override
+// (from clicking the header) wins, else the size-based auto default.
+function groupCollapsed(g, msToPx) {
+  const ov = groupCollapseOverride.get(g.project);
+  return ov === undefined ? autoCollapseGroup(g, msToPx) : ov;
+}
+
+// drawGroupHeader draws an EXPANDED group's header: the full-width rule and a
+// caret+label in the gutter. The gutter is a click target that folds the group.
+function drawGroupHeader(g, W) {
+  const ry = g.headY + GEO.GROUP_HEAD_H - 3;
+  el.svg.appendChild(svgEl("line", { class: "group-rule", x1: 0, y1: ry, x2: W, y2: ry }));
+  const caret = svgEl("text", { class: "group-caret", x: 10, y: g.headY + 13 });
+  caret.textContent = "▾";
+  el.svg.appendChild(caret);
+  const gl = svgEl("text", { class: "group-label", x: 24, y: g.headY + 13 });
+  gl.textContent = ((g.projectFull || g.project) + " · " + g.lanes.length).toUpperCase();
+  el.svg.appendChild(gl);
+  // gutter-wide transparent hit target → click folds the group
+  const hit = svgEl("rect", { class: "group-hit", x: 0, y: g.headY, width: GEO.GUTTER, height: GEO.GROUP_HEAD_H });
+  attachTip(hit, () => `<div class="t-hint">click to collapse</div>`);
+  hit.addEventListener("click", () => toggleGroupCollapse(g.project, false));
+  el.svg.appendChild(hit);
+}
+
+// drawCollapsedGroup draws a too-small group folded to one line: caret + label, a
+// dim active/cost summary, and sparkbars marking WHEN its sessions ran so the fold
+// still conveys placement. The whole strip is a click target that expands it, and
+// each sparkbar hovers to the session's identity.
+function drawCollapsedGroup(g, x, W) {
+  const top = g.headY;
+  const midY = top + GEO.GROUP_COLLAPSED_H / 2;
+  el.svg.appendChild(svgEl("line", { class: "group-rule", x1: 0, y1: top, x2: W, y2: top }));
+
+  // background rect is the primary click target (labels/sparkbars sit on top)
+  const bg = svgEl("rect", { class: "group-collapsed-bg", x: 0, y: top, width: W, height: GEO.GROUP_COLLAPSED_H });
+  bg.addEventListener("click", () => toggleGroupCollapse(g.project, true));
+  attachTip(bg, () => `<div class="t-hint">click to expand · ${g.lanes.length} session${g.lanes.length === 1 ? "" : "s"}</div>`);
+  el.svg.appendChild(bg);
+
+  const caret = svgEl("text", { class: "group-caret", x: 10, y: midY + 4 });
+  caret.textContent = "▸";
+  el.svg.appendChild(caret);
+  const gl = svgEl("text", { class: "group-label", x: 24, y: midY + 4 });
+  gl.textContent = ((g.projectFull || g.project) + " · " + g.lanes.length).toUpperCase();
+  el.svg.appendChild(gl);
+
+  let activeMs = 0, cost = 0;
+  for (const lane of g.lanes) {
+    for (const iv of lane.intervals || []) activeMs += Math.max(0, Date.parse(iv.end) - Date.parse(iv.start));
+    if (lane.cost_usd != null) cost += lane.cost_usd;
+  }
+  const meta = svgEl("text", { class: "group-collapsed-meta", x: GEO.GUTTER - 10, y: midY + 4, "text-anchor": "end" });
+  meta.textContent = `${humanDurationCoarseMs(activeMs)}${cost > 0 ? " · " + fmtUSD(cost) : ""}`;
+  el.svg.appendChild(meta);
+
+  // sparkbars: each folded session's lifespan, so "when" survives the fold.
+  const sy = midY - 3;
+  for (const lane of g.lanes) {
+    const sx = x(Date.parse(lane.start));
+    const sw = Math.max(2, x(Date.parse(lane.end)) - sx);
+    const bar = svgEl("rect", { class: "group-spark", x: sx, y: sy, width: sw, height: 6, rx: 1.5 });
+    attachTip(bar, () => gutterTipHTML(lane, currentName(lane)));
+    bar.addEventListener("click", () => toggleGroupCollapse(g.project, true));
+    el.svg.appendChild(bar);
+  }
 }
 
 // drawOperatorLane renders the top "operator" swimlane: gold = free time, dark
@@ -835,18 +950,65 @@ function drawSession(lane, rowTop, x, haveActivity, activeGlobal) {
   }
 
   // ---- subagent sub-bars: one stacked sub-line per concurrent subagent, so N
-  // simultaneous subagents render as N parallel lines below the main bar ----
-  const { subs } = packSubagents(lane);
-  for (const sa of subs) {
-    const ry = subTop + sa.row * (GEO.SUB_ROW_H + GEO.SUB_GAP);
-    const sx = x(sa.s), sw = Math.max(2, x(sa.e) - sx);
-    const bar = svgEl("rect", {
-      class: "subagent-bar", x: sx, y: ry, width: sw, height: GEO.SUB_ROW_H, rx: 1.5, fill: SUBAGENT_COLOR,
-    });
-    attachTip(bar, () => subagentTipHTML(sa));
-    bar.addEventListener("click", (ev) => { ev.stopPropagation(); pinPopout(subagentPopoutHTML(sa), ev); });
-    el.svg.appendChild(bar);
+  // simultaneous subagents render as N parallel lines below the main bar. On each
+  // sub-line, a run of too-thin adjacent slivers collapses to a single "×N" marker
+  // rather than a smear of unreadable 1px bars (hover/click for the full list). ----
+  const { subs, rows } = packSubagents(lane);
+  for (let r = 0; r < rows; r++) {
+    const rowSubs = subs.filter((sa) => sa.row === r); // globally start-sorted → row order preserved
+    const ry = subTop + r * (GEO.SUB_ROW_H + GEO.SUB_GAP);
+    for (const cell of clusterSubagents(rowSubs, x)) {
+      if (cell.merged) {
+        const cx = x(cell.s), cw = Math.max(6, x(cell.e) - cx);
+        const bar = svgEl("rect", {
+          class: "subagent-cluster", x: cx, y: ry, width: cw, height: GEO.SUB_ROW_H, rx: 1.5, fill: SUBAGENT_COLOR,
+        });
+        attachTip(bar, () => subagentClusterTipHTML(cell));
+        bar.addEventListener("click", (ev) => { ev.stopPropagation(); pinPopout(subagentClusterPopoutHTML(cell), ev); });
+        el.svg.appendChild(bar);
+        if (cw >= 15) {
+          const t = svgEl("text", { class: "subagent-count", x: cx + cw / 2, y: ry + GEO.SUB_ROW_H - 0.6, "text-anchor": "middle" });
+          t.textContent = "×" + cell.members.length;
+          el.svg.appendChild(t);
+        }
+      } else {
+        const sa = cell.sa;
+        const sx = x(sa.s), sw = Math.max(2, x(sa.e) - sx);
+        const bar = svgEl("rect", {
+          class: "subagent-bar", x: sx, y: ry, width: sw, height: GEO.SUB_ROW_H, rx: 1.5, fill: SUBAGENT_COLOR,
+        });
+        attachTip(bar, () => subagentTipHTML(sa));
+        bar.addEventListener("click", (ev) => { ev.stopPropagation(); pinPopout(subagentPopoutHTML(sa), ev); });
+        el.svg.appendChild(bar);
+      }
+    }
   }
+}
+
+// clusterSubagents folds runs of adjacent slivers on a single sub-row into one
+// marker. Input is one row's subs, start-sorted and non-overlapping. A sub wide
+// enough (≥ SUB_MIN_PX) always stands alone; a lone sliver also stands alone —
+// only a run of ≥2 thin, near (≤ SUB_MERGE_GAP_PX gap) slivers merges. Returns a
+// list of { merged:false, sa } | { merged:true, s, e, members[] }.
+function clusterSubagents(rowSubs, x) {
+  const out = [];
+  let i = 0;
+  while (i < rowSubs.length) {
+    const first = rowSubs[i];
+    if (x(first.e) - x(first.s) >= GEO.SUB_MIN_PX) { out.push({ merged: false, sa: first }); i++; continue; }
+    const members = [first];
+    let lastE = first.e, j = i;
+    while (j + 1 < rowSubs.length) {
+      const next = rowSubs[j + 1];
+      const thin = x(next.e) - x(next.s) < GEO.SUB_MIN_PX;
+      const near = x(next.s) - x(lastE) <= GEO.SUB_MERGE_GAP_PX;
+      if (thin && near) { members.push(next); if (next.e > lastE) lastE = next.e; j++; }
+      else break;
+    }
+    out.push(members.length === 1 ? { merged: false, sa: first } : { merged: true, s: first.s, e: lastE, members });
+    i = j + 1;
+  }
+  return out;
 }
 
 // packSubagents greedily first-fits a lane's subagents (sorted by start) into
@@ -996,6 +1158,27 @@ function subagentPopoutHTML(sa) {
     + `<div class="po-row">duration <b>${humanDurationMs(durMs)}</b></div>`
     + `<div class="po-row">${fmtClock(sa.start)} – ${fmtClock(sa.end)}</div>`
     + (sa.tool_use_id ? `<div class="po-id">${escapeHTML(sa.tool_use_id)}</div>` : "");
+}
+
+// tooltip / popout for a merged sliver cluster ("N subagents" marker).
+function subagentClusterTipHTML(cell) {
+  const n = cell.members.length;
+  let total = 0;
+  for (const m of cell.members) total += m.e - m.s;
+  return `<div class="t-status" style="color:${SUBAGENT_COLOR}">${n} subagents</div>`
+    + `<div class="t-row">${fmtClock(cell.s)} – ${fmtClock(cell.e)} · ${humanDurationMs(total)} total</div>`
+    + `<div class="t-hint">too thin to separate — click to list</div>`;
+}
+
+function subagentClusterPopoutHTML(cell) {
+  const n = cell.members.length, cap = 12;
+  const rows = cell.members.slice(0, cap).map((m) =>
+    `<div class="po-row">${escapeHTML(m.agent_type || "subagent")} <b>${humanDurationMs(m.e - m.s)}</b> <span class="dim">${fmtClock(m.s)}</span></div>`
+  ).join("");
+  const more = n > cap ? `<div class="po-row dim">+${n - cap} more</div>` : "";
+  return `<div class="po-head" style="color:${SUBAGENT_COLOR}">${n} subagents</div>`
+    + `<div class="po-desc">merged — each too thin to draw separately at this scale</div>`
+    + rows + more;
 }
 
 function nameSegTipHTML(lane, seg) {

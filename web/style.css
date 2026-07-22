@@ -311,7 +311,17 @@ main { padding: 16px 18px 36px; }
 
 /* project group headers */
 .group-rule { stroke: var(--border); stroke-width: 1; }
-.group-label { fill: var(--fg-muted); font-family: var(--mono); font-size: 12px; font-weight: 700; letter-spacing: 0.6px; }
+.group-label { fill: var(--fg-muted); font-family: var(--mono); font-size: 12px; font-weight: 700; letter-spacing: 0.6px; pointer-events: none; }
+.group-caret { fill: var(--fg-dim); font-family: var(--mono); font-size: 11px; pointer-events: none; }
+
+/* group fold/expand affordances */
+.group-hit { fill: transparent; cursor: pointer; pointer-events: all; }
+.group-collapsed-bg { fill: var(--lane-odd); cursor: pointer; pointer-events: all; }
+.group-collapsed-bg:hover { fill: rgba(88, 166, 255, 0.09); }
+.group-collapsed-meta { fill: var(--fg-dim); font-family: var(--mono); font-size: 11px; pointer-events: none; }
+/* sparkbars marking WHEN a folded group's sessions ran */
+.group-spark { fill: var(--fg-dim); fill-opacity: 0.5; cursor: pointer; }
+.group-spark:hover { fill-opacity: 0.9; }
 
 /* name-span band: each /name slug labels the stretch it was active, drawn just
    above the session's status bar. The leading pre-/name stretch (".lead") is
@@ -340,6 +350,12 @@ main { padding: 16px 18px 36px; }
 
 .subagent-bar { stroke: rgba(0, 0, 0, 0.3); stroke-width: 0.4; cursor: pointer; }
 .subagent-bar:hover { stroke: var(--hover-stroke); stroke-width: 1; }
+
+/* merged sliver marker: a run of too-thin subagents collapsed to one "×N" bar.
+   A dashed outline distinguishes it from a single solid sub-bar. */
+.subagent-cluster { stroke: rgba(0, 0, 0, 0.55); stroke-width: 0.6; stroke-dasharray: 2 1.5; cursor: pointer; }
+.subagent-cluster:hover { stroke: var(--hover-stroke); stroke-width: 1; stroke-dasharray: none; }
+.subagent-count { fill: rgba(0, 0, 0, 0.78); font-family: var(--mono); font-size: 7px; font-weight: 700; pointer-events: none; }
 
 /* ---------- cards strip ---------- */
 .boxes {
