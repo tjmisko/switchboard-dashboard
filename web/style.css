@@ -235,6 +235,13 @@ main { padding: 16px 18px 36px; }
 .status-key .sk-name { color: var(--fg-muted); }
 .status-key .sk-val { font-family: var(--mono); color: var(--fg); }
 
+/* provider key: shown only in merged multi-provider mode, below the status key. */
+.provider-key { display: flex; flex-wrap: wrap; gap: 8px 12px; margin-top: 11px; padding-top: 10px; border-top: 1px solid var(--border); }
+.provider-key .pk { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--fg-muted); }
+.provider-key .pk-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.provider-key .pk-name { color: var(--fg); }
+.provider-key .pk-count { font-family: var(--mono); color: var(--fg-muted); }
+
 /* chart footer: chart-scoped options sit below the timeline, right-aligned, as a
    proper pill-wrapped toggle switch rather than a bare checkbox. */
 .chart-footer { display: flex; justify-content: flex-end; gap: 10px; margin: 10px 2px 0; }

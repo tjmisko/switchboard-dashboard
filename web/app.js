@@ -70,6 +70,24 @@ function statusColor(s) {
   return STATUS_COLORS[s] !== undefined ? STATUS_COLORS[s] : "#8957e5";
 }
 
+// Provider -> accent color. In the merged, multi-provider view every lane carries
+// a `provider` tag; the accent (a left-edge spine on each bar + a legend chip)
+// lets you tell providers apart at a glance. Known providers get fixed hues;
+// anything else derives a stable hue from its name so new providers still get a
+// distinct, consistent color without a code change.
+const PROVIDER_COLORS = {
+  claude: "#c96442",  // terracotta
+  arachne: "#a371f7", // purple
+  codex: "#3fb0ac",   // teal
+};
+function provColor(p) {
+  if (!p) return "#6e7681";
+  if (PROVIDER_COLORS[p]) return PROVIDER_COLORS[p];
+  let h = 0;
+  for (let i = 0; i < p.length; i++) h = (h * 31 + p.charCodeAt(i)) % 360;
+  return `hsl(${h}, 55%, 62%)`;
+}
+
 // ---------------------------------------------------------------------------
 // formatters
 // ---------------------------------------------------------------------------
@@ -220,6 +238,7 @@ const el = {
   error: document.getElementById("error"),
   topline: document.getElementById("topline"),
   statusKey: document.getElementById("status-key"),
+  providerKey: document.getElementById("provider-key"),
   svg: document.getElementById("timeline"),
   canvas: document.getElementById("concurrency"),
   wrap: document.getElementById("timeline-wrap"),
@@ -451,6 +470,7 @@ function computeOperatorTime(data) {
 function render(data) {
   renderTopline(data.summary || {});
   renderStatusKey(data.summary || {});
+  renderProviderKey(data.lanes || []);
   renderChartArea(data);
   renderAttentionCard(data.summary || {}, computeOperatorTime(data));
   renderCostCard(data, lastPlan);
@@ -549,6 +569,32 @@ function renderStatusKey(summary) {
       </span>`;
   }).join("");
   attachFormulaTips(el.statusKey);
+}
+
+// renderProviderKey: the provider legend, shown ONLY when lanes carry a provider
+// tag (i.e. the merged multi-provider view). Each chip shows the provider's
+// accent color and its lane count; it stays hidden in the default single-provider
+// view where lanes have no provider field.
+function renderProviderKey(lanes) {
+  if (!el.providerKey) return;
+  const counts = new Map();
+  for (const lane of lanes || []) {
+    if (!lane.provider) continue;
+    counts.set(lane.provider, (counts.get(lane.provider) || 0) + 1);
+  }
+  if (counts.size === 0) {
+    el.providerKey.hidden = true;
+    el.providerKey.innerHTML = "";
+    return;
+  }
+  const names = [...counts.keys()].sort();
+  el.providerKey.hidden = false;
+  el.providerKey.innerHTML = names.map((p) =>
+    `<span class="pk">
+        <span class="pk-dot" style="background:${provColor(p)}"></span>
+        <span class="pk-name">${escapeHTML(p)}</span>
+        <span class="pk-count">${counts.get(p)}</span>
+      </span>`).join("");
 }
 
 // ---------------------------------------------------------------------------
@@ -1022,6 +1068,18 @@ function drawSession(lane, rowTop, x, haveActivity, activeGlobal) {
     const rect = svgEl("rect", attrs);
     attachTip(rect, () => intervalTipHTML(lane, iv));
     el.svg.appendChild(rect);
+  }
+
+  // ---- provider accent spine: a colored left-edge marker keying the session to
+  // its data provider in the merged view (absent in single-provider mode). ----
+  if (lane.provider) {
+    const spineX = x(Date.parse(lane.start));
+    const spine = svgEl("rect", {
+      class: "provider-spine", x: spineX, y: nameY, width: 3,
+      height: barY + GEO.BAR_H - nameY, rx: 1, fill: provColor(lane.provider),
+    });
+    attachTip(spine, () => `<div class="t-status" style="color:${provColor(lane.provider)}">${escapeHTML(lane.provider)}</div><div class="t-hint">data provider</div>`);
+    el.svg.appendChild(spine);
   }
 
   // ---- focus / attention overlay (hatch + outline) — gated by the "show focus" toggle ----
@@ -1527,7 +1585,9 @@ function nameSegTipHTML(lane, seg) {
   // identity footer: the name band spans the whole session, so this keeps the
   // FULL identity reachable on hover even when the in-span identity text is hidden
   // on a narrow span (the gutter no longer carries it).
-  const idBits = [lane.agent || "?"];
+  const idBits = [];
+  if (lane.provider) idBits.push(lane.provider);
+  idBits.push(lane.agent || "?");
   if (lane.pid != null) idBits.push("pid " + lane.pid);
   if (lane.cost_usd != null) idBits.push(fmtUSD(lane.cost_usd));
   return tipHead(`${escapeHTML(seg.label || "(unnamed)")}${note}`, null,

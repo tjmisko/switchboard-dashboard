@@ -1,0 +1,21 @@
+[Unit]
+Description=Arachne switchboard recorder — polls docker for Arachne agent sessions
+# The recorder needs the docker daemon; Arachne agents run as docker containers.
+# It writes an append-only history the dashboard's arachne provider compiles.
+After=graphical-session.target docker.service
+Wants=docker.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+# Polls `docker ps` for arachne-agent-* containers and tails their logs. The
+# history/state default under ~/.arachne-switchboard; override with -history/-state.
+ExecStart=%h/go/bin/arachne-switchboard-recorder -interval 5s
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+# default.target so it recovers when the per-user systemd restarts on its own,
+# mirroring switchboard-dashboard.service.
+WantedBy=default.target

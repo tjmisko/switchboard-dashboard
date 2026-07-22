@@ -6,55 +6,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tjmisko/switchboard-dashboard/internal/provider"
 )
 
 const fixtureJSON = `{"window":"2026-06-20","lanes":null,"summary":{"from":"2026-06-20T09:00:00Z","to":"2026-06-20T09:48:00Z","sessions":0,"by_status":{},"attention_union":0,"attention_per_session":0,"attention_fanout":0},"totals":{"tok_in":1,"tok_out":2,"tok_cache_read":3,"tok_cache_create":4,"subagents":0}}`
-
-func TestArgvFor_mapsParamsToFlags(t *testing.T) {
-	tests := []struct {
-		name string
-		ctl  string
-		in   TimelineParams
-		want []string
-	}{
-		{
-			name: "should emit base argv with plan-window when no params set",
-			ctl:  "switchboard-ctl",
-			in:   TimelineParams{},
-			want: []string{"switchboard-ctl", "timeline", "--json", "--plan-window"},
-		},
-		{
-			name: "should forward day and dir when set",
-			ctl:  "/usr/bin/ctl",
-			in:   TimelineParams{Day: "2026-06-20", Dir: "/var/hist"},
-			want: []string{"/usr/bin/ctl", "timeline", "--json", "--plan-window", "--dir", "/var/hist", "--day", "2026-06-20"},
-		},
-		{
-			name: "should forward a since/until range",
-			ctl:  "ctl",
-			in:   TimelineParams{Since: "2026-06-20", Until: "2026-06-26"},
-			want: []string{"ctl", "timeline", "--json", "--plan-window", "--since", "2026-06-20", "--until", "2026-06-26"},
-		},
-		{
-			name: "should forward every flag together",
-			ctl:  "ctl",
-			in:   TimelineParams{Day: "2026-06-20", Since: "2026-06-01", Until: "2026-06-30", Dir: "/d"},
-			want: []string{"ctl", "timeline", "--json", "--plan-window", "--dir", "/d", "--day", "2026-06-20", "--since", "2026-06-01", "--until", "2026-06-30"},
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := argvFor(tc.ctl, tc.in)
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("argvFor() = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
 
 // writeStub creates an executable shell script and returns its path.
 func writeStub(t *testing.T, body string) string {
@@ -250,6 +209,103 @@ func TestServer_servesEmbeddedIndex(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "<title>") {
 		t.Fatalf("index.html not served; body did not contain <title>")
+	}
+}
+
+// --- multi-provider merge ---
+
+func TestHandleTimeline_mergesMultipleProvidersAndNamespacesLanes(t *testing.T) {
+	claudeEnv := `{"window":"2026-06-26","lanes":[{"session_id":"c1","agent":"claude","project":"sb","start":"2026-06-26T10:00:00Z","end":"2026-06-26T10:30:00Z","intervals":[{"status":"working","start":"2026-06-26T10:00:00Z","end":"2026-06-26T10:30:00Z"}]}],"summary":{"from":"2026-06-26T10:00:00Z","to":"2026-06-26T10:30:00Z","sessions":1,"by_status":{"working":1800000000000},"attention_union":1800000000000,"attention_per_session":1800000000000,"attention_fanout":1800000000000},"totals":{"cost_usd":1.0}}`
+	arachneEnv := `{"window":"2026-06-26","lanes":[{"session_id":"feat-f71","agent":"opus","project":"Arachne","start":"2026-06-26T10:10:00Z","end":"2026-06-26T10:50:00Z","intervals":[{"status":"working","start":"2026-06-26T10:10:00Z","end":"2026-06-26T10:50:00Z"}]}],"summary":{"from":"2026-06-26T10:10:00Z","to":"2026-06-26T10:50:00Z","sessions":1,"by_status":{"working":2400000000000},"attention_union":2400000000000,"attention_per_session":2400000000000,"attention_fanout":2400000000000},"totals":{"cost_usd":2.0}}`
+	claudeStub := writeStub(t, "#!/bin/sh\ncat <<'JSONEOF'\n"+claudeEnv+"\nJSONEOF\n")
+	arachneStub := writeStub(t, "#!/bin/sh\ncat <<'JSONEOF'\n"+arachneEnv+"\nJSONEOF\n")
+	srv := &Server{Providers: []provider.Provider{
+		provider.NewSubprocessProvider("claude", "Claude", []string{claudeStub}, "", provider.Capabilities{Plan: true}),
+		provider.NewSubprocessProvider("arachne", "Arachne", []string{arachneStub}, "", provider.Capabilities{}),
+	}}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/timeline?day=2026-06-26", nil)
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %q)", rec.Result().StatusCode, rec.Body.String())
+	}
+	var body struct {
+		Lanes []struct {
+			SessionID string `json:"session_id"`
+			Provider  string `json:"provider"`
+		} `json:"lanes"`
+		Totals struct {
+			CostUSD float64 `json:"cost_usd"`
+		} `json:"totals"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body not json: %v (%q)", err, rec.Body.String())
+	}
+	byID := map[string]string{}
+	for _, l := range body.Lanes {
+		byID[l.SessionID] = l.Provider
+	}
+	if byID["claude:c1"] != "claude" {
+		t.Fatalf("expected claude:c1 tagged claude, got %+v", byID)
+	}
+	if byID["arachne:feat-f71"] != "arachne" {
+		t.Fatalf("expected arachne:feat-f71 tagged arachne, got %+v", byID)
+	}
+	if body.Totals.CostUSD != 3.0 {
+		t.Fatalf("merged cost = %v, want 3.0", body.Totals.CostUSD)
+	}
+}
+
+func TestHandleTimeline_mergeDegradesWhenOneProviderFails(t *testing.T) {
+	goodEnv := `{"window":"x","lanes":[{"session_id":"c1","start":"2026-06-26T10:00:00Z","end":"2026-06-26T10:30:00Z","intervals":[]}],"summary":{"from":"2026-06-26T10:00:00Z","to":"2026-06-26T10:30:00Z","sessions":1,"by_status":{}},"totals":{}}`
+	goodStub := writeStub(t, "#!/bin/sh\ncat <<'JSONEOF'\n"+goodEnv+"\nJSONEOF\n")
+	badStub := writeStub(t, "#!/bin/sh\necho 'docker: not found' >&2\nexit 1\n")
+	srv := &Server{Providers: []provider.Provider{
+		provider.NewSubprocessProvider("claude", "Claude", []string{goodStub}, "", provider.Capabilities{Plan: true}),
+		provider.NewSubprocessProvider("arachne", "Arachne", []string{badStub}, "", provider.Capabilities{}),
+	}}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/timeline?day=2026-06-26", nil)
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Result().StatusCode != http.StatusOK {
+		t.Fatalf("one failed provider should still 200, got %d", rec.Result().StatusCode)
+	}
+	var body struct {
+		Lanes []struct {
+			SessionID string `json:"session_id"`
+		} `json:"lanes"`
+		ProviderErrors []struct {
+			Provider string `json:"provider"`
+			Error    string `json:"error"`
+		} `json:"provider_errors"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body not json: %v", err)
+	}
+	if len(body.Lanes) != 1 || body.Lanes[0].SessionID != "claude:c1" {
+		t.Fatalf("expected the surviving claude lane, got %+v", body.Lanes)
+	}
+	if len(body.ProviderErrors) != 1 || body.ProviderErrors[0].Provider != "arachne" {
+		t.Fatalf("expected arachne provider_error, got %+v", body.ProviderErrors)
+	}
+	if !strings.Contains(body.ProviderErrors[0].Error, "docker: not found") {
+		t.Fatalf("expected stderr in provider_error, got %q", body.ProviderErrors[0].Error)
+	}
+}
+
+func TestHandleTimeline_mergeAllProvidersFailingYields502(t *testing.T) {
+	bad := writeStub(t, "#!/bin/sh\necho boom >&2\nexit 1\n")
+	srv := &Server{Providers: []provider.Provider{
+		provider.NewSubprocessProvider("a", "A", []string{bad}, "", provider.Capabilities{}),
+		provider.NewSubprocessProvider("b", "B", []string{bad}, "", provider.Capabilities{}),
+	}}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/timeline?day=2026-06-26", nil)
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Result().StatusCode != http.StatusBadGateway {
+		t.Fatalf("all providers failing should 502, got %d", rec.Result().StatusCode)
 	}
 }
 
