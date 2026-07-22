@@ -220,7 +220,11 @@ const el = {
   topline: document.getElementById("topline"),
   statusKey: document.getElementById("status-key"),
   svg: document.getElementById("timeline"),
+  canvas: document.getElementById("concurrency"),
   wrap: document.getElementById("timeline-wrap"),
+  section: document.getElementById("timeline-section"),
+  chartCaption: document.getElementById("chart-caption"),
+  chartStats: document.getElementById("chart-stats"),
   empty: document.getElementById("empty"),
   tooltip: document.getElementById("tooltip"),
   popout: document.getElementById("popout"),
@@ -228,6 +232,9 @@ const el = {
   cardCost: document.getElementById("card-cost"),
   optCtxSwitches: document.getElementById("opt-ctx-switches"),
   optFocus: document.getElementById("opt-focus"),
+  optSmooth: document.getElementById("opt-smooth"),
+  viewBars: document.getElementById("view-bars"),
+  viewLine: document.getElementById("view-line"),
   themeToggle: document.getElementById("theme-toggle"),
   zoomIn: document.getElementById("zoom-in"),
   zoomOut: document.getElementById("zoom-out"),
@@ -252,6 +259,15 @@ let lastUpdatedAt = null;  // ms of last successful timeline fetch
 let fetchOK = false;
 let timelineTimer = null;
 let planTimer = null;
+
+// Which chart occupies the plot area: "bars" (the SVG swimlanes) or "line" (the
+// "agents aloft" concurrency canvas). Persisted so the choice survives reloads.
+const VIEW_KEY = "sb-view";
+let currentView = (function () {
+  try { const v = localStorage.getItem(VIEW_KEY); if (v === "bars" || v === "line") return v; } catch (e) {}
+  return "bars";
+})();
+function smoothEnabled() { return !el.optSmooth || el.optSmooth.checked; }
 
 // ---------------------------------------------------------------------------
 // data loading
@@ -436,9 +452,33 @@ function computeOperatorTime(data) {
 function render(data) {
   renderTopline(data.summary || {});
   renderStatusKey(data.summary || {});
-  renderTimeline(data);
+  renderChartArea(data);
   renderAttentionCard(data.summary || {}, computeOperatorTime(data));
   renderCostCard(data, lastPlan);
+}
+
+// renderChartArea draws whichever chart the view switcher selects into the plot
+// area. Both share the horizontal scale (zoom) and the scroll wrap, so toggling
+// keeps the time axis put. Called from render() and from every repaint trigger
+// (zoom, resize, theme, view/toggle change).
+function renderChartArea(data) {
+  if (currentView === "line") renderConcurrencyChart(data);
+  else renderTimeline(data);
+}
+
+// setView flips the plot between the bar swimlanes and the line chart. All
+// view-dependent visibility is CSS, keyed off .view-line on the section, so this
+// just toggles the class + the segmented control's pressed state, then repaints.
+function setView(view) {
+  if (view !== "bars" && view !== "line") view = "bars";
+  currentView = view;
+  try { localStorage.setItem(VIEW_KEY, view); } catch (e) {}
+  el.section.classList.toggle("view-line", view === "line");
+  el.viewBars.setAttribute("aria-pressed", String(view === "bars"));
+  el.viewLine.setAttribute("aria-pressed", String(view === "line"));
+  hideTip();
+  if (view === "line") el.empty.hidden = true; // the line chart draws its own empty state
+  if (lastData) renderChartArea(lastData);
 }
 
 // renderTopline: two dominant figures framing AI's payoff.
@@ -566,7 +606,7 @@ function setZoom(next) {
   try { localStorage.setItem(ZOOM_KEY, String(next)); } catch (e) {}
   updateZoomReadout();
   if (lastData) {
-    renderTimeline(lastData);
+    renderChartArea(lastData);
     const nsw = wrap.scrollWidth;
     if (nsw > wrap.clientWidth) wrap.scrollLeft = centerFrac * nsw - wrap.clientWidth / 2;
   }
@@ -608,6 +648,25 @@ function rowHeight(laneList) {
   return h;
 }
 
+// windowBounds resolves the [t0, t1] plot window: the summary from/to when
+// present and sane, else the min/max over all interval bounds (with a 1ms floor
+// so span is always positive). Shared by the bar and line charts so both frame
+// the same time window.
+function windowBounds(data, lanes) {
+  const summary = data.summary || {};
+  let t0 = Date.parse(summary.from);
+  let t1 = Date.parse(summary.to);
+  if (!isFinite(t0) || !isFinite(t1) || t1 <= t0) {
+    t0 = Infinity; t1 = -Infinity;
+    for (const lane of lanes) for (const iv of lane.intervals || []) {
+      t0 = Math.min(t0, Date.parse(iv.start));
+      t1 = Math.max(t1, Date.parse(iv.end));
+    }
+    if (!isFinite(t0) || !isFinite(t1) || t1 <= t0) t1 = t0 + 1;
+  }
+  return { t0, t1 };
+}
+
 function renderTimeline(data) {
   const lanes = renderableLanes(data.lanes);
   // keep <defs> (first child), drop the rest
@@ -622,17 +681,7 @@ function renderTimeline(data) {
   }
   el.empty.hidden = true;
 
-  const summary = data.summary || {};
-  let t0 = Date.parse(summary.from);
-  let t1 = Date.parse(summary.to);
-  if (!isFinite(t0) || !isFinite(t1) || t1 <= t0) {
-    t0 = Infinity; t1 = -Infinity;
-    for (const lane of lanes) for (const iv of lane.intervals || []) {
-      t0 = Math.min(t0, Date.parse(iv.start));
-      t1 = Math.max(t1, Date.parse(iv.end));
-    }
-    if (!isFinite(t0) || !isFinite(t1) || t1 <= t0) t1 = t0 + 1;
-  }
+  const { t0, t1 } = windowBounds(data, lanes);
   const span = t1 - t0;
 
   // Horizontal scroll: the plot keeps a minimum density (px per hour) so long
@@ -1105,6 +1154,255 @@ function axisTicks(t0, t1, plotW) {
 }
 
 // ---------------------------------------------------------------------------
+// render: "agents aloft" line chart (canvas)
+//
+// The instantaneous number of agents working at each moment (model.js
+// concurrencyProfile: sessions in 'working' status + running subagents) drawn as
+// a step line, with the day's average OVER ACTIVE TIME as a dashed horizontal
+// line (the force-multiplier figure) and an optional centered 30-min rolling
+// average. Shares the horizontal scale (zoom) + scroll wrap with the bar view; a
+// crosshair reads out the exact figures on hover.
+// ---------------------------------------------------------------------------
+
+const MONO = 'ui-monospace, "SFMono-Regular", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace';
+const SMOOTH_WINDOW_MS = 30 * 60 * 1000; // centered rolling-average window
+const CGEO = { LEFT: 54, RIGHT: 18, TOP: 18, BOTTOM: 30, HEIGHT: 340 };
+
+// chartHover carries the just-rendered chart's paint closure + scales so the
+// canvas mousemove handler (wired once) can redraw the crosshair and read out
+// values without recomputing the profile. Refreshed on every chart render.
+let chartHover = null;
+
+// niceIntStep picks a y-axis label step so an axis of 0..maxN stays readable
+// (every 1 up to 10, then 2 / 5 / a rounded tenth as it grows).
+function niceIntStep(maxN) {
+  if (maxN <= 10) return 1;
+  if (maxN <= 20) return 2;
+  if (maxN <= 50) return 5;
+  return Math.ceil(maxN / 10);
+}
+
+// cssVar reads a themed custom property off :root (canvas bakes colors in at draw
+// time, so these are re-read on every render and on theme change).
+function cssVar(name, fallback) {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback;
+}
+
+function renderConcurrencyChart(data) {
+  const canvas = el.canvas;
+  el.empty.hidden = true; // the canvas draws its own empty state
+  const lanes = renderableLanes(data.lanes);
+  const prof = concurrencyProfile(workIntervalsMs(lanes));
+  const pts = prof.points;
+
+  const C = {
+    inst: cssVar("--c-working", "#3fb950"),
+    smooth: cssVar("--accent", "#58a6ff"),
+    avg: cssVar("--fg-muted", "#9da7b3"),
+    grid: cssVar("--border-soft", "#21262d"),
+    axis: cssVar("--border", "#2b3240"),
+    text: cssVar("--fg-dim", "#6e7681"),
+  };
+
+  // window + horizontal scale (reuse the zoom density + scroll like the bars)
+  const { t0, t1 } = windowBounds(data, lanes);
+  const span = t1 - t0;
+  const containerW = Math.max(620, el.wrap.clientWidth);
+  const fitPlotW = Math.max(160, containerW - CGEO.LEFT - CGEO.RIGHT);
+  const minPlotW = (span / 3600e3) * pxPerHour;
+  const plotW = Math.max(fitPlotW, minPlotW);
+  const W = CGEO.LEFT + plotW + CGEO.RIGHT;
+  const H = CGEO.HEIGHT;
+  const plotTop = CGEO.TOP, plotBottom = H - CGEO.BOTTOM, plotH = plotBottom - plotTop;
+  const yTop = Math.max(1, prof.maxN);
+
+  const X = (t) => CGEO.LEFT + ((t - t0) / span) * plotW;
+  const Y = (n) => plotBottom - (n / yTop) * plotH;
+
+  // DPR-crisp sizing (set once per render, not per crosshair repaint — resizing
+  // the canvas clears it and resets the transform, so we do it here only).
+  const dpr = window.devicePixelRatio || 1;
+  canvas.style.width = W + "px";
+  canvas.style.height = H + "px";
+  canvas.width = Math.round(W * dpr);
+  canvas.height = Math.round(H * dpr);
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  updateChartStats(prof);
+
+  // cumulative integral over the step function -> O(log n) windowed averages and
+  // level lookups for the rolling mean and hover readout.
+  const cum = new Array(pts.length);
+  if (pts.length) {
+    cum[0] = 0;
+    for (let k = 1; k < pts.length; k++) cum[k] = cum[k - 1] + pts[k - 1].n * (pts[k].t - pts[k - 1].t);
+  }
+  const firstT = pts.length ? pts[0].t : t0;
+  const lastT = pts.length ? pts[pts.length - 1].t : t0;
+  // largest index k with pts[k].t <= t (or -1 before the first breakpoint)
+  function segAt(t) {
+    if (!pts.length || t < pts[0].t) return -1;
+    let lo = 0, hi = pts.length - 1;
+    while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (pts[mid].t <= t) lo = mid; else hi = mid - 1; }
+    return lo;
+  }
+  function levelAt(t) {
+    if (t >= lastT) return 0; // after the final drop back to 0
+    const k = segAt(t);
+    return k < 0 ? 0 : pts[k].n;
+  }
+  function integralAt(t) {
+    if (!pts.length || t <= firstT) return 0;
+    if (t >= lastT) return cum[pts.length - 1];
+    const k = segAt(t);
+    return cum[k] + pts[k].n * (t - pts[k].t);
+  }
+  // centered 30-min rolling average, clamped to the plot window at the edges so
+  // the smoothed line doesn't dip toward 0 against the empty out-of-window space.
+  function windowedAvg(t) {
+    let a = t - SMOOTH_WINDOW_MS / 2, b = t + SMOOTH_WINDOW_MS / 2;
+    if (a < t0) a = t0;
+    if (b > t1) b = t1;
+    const w = b - a;
+    return w > 0 ? (integralAt(b) - integralAt(a)) / w : 0;
+  }
+
+  const smoothOn = smoothEnabled();
+
+  // paint draws the whole chart; hoverT (or null) overlays the crosshair. Kept as
+  // a closure so the mousemove handler can repaint cheaply (no profile recompute).
+  function paint(hoverT) {
+    ctx.clearRect(0, 0, W, H);
+
+    if (!pts.length) {
+      ctx.fillStyle = C.text;
+      ctx.font = "12px " + MONO;
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText("No agent activity for this window.", CGEO.LEFT + plotW / 2, H / 2);
+      return;
+    }
+
+    // y gridlines + integer labels
+    const yStep = niceIntStep(yTop);
+    ctx.font = "11px " + MONO;
+    ctx.textAlign = "right"; ctx.textBaseline = "middle";
+    for (let n = 0; n <= yTop; n += yStep) {
+      const yy = Math.round(Y(n)) + 0.5;
+      ctx.strokeStyle = C.grid; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(CGEO.LEFT, yy); ctx.lineTo(CGEO.LEFT + plotW, yy); ctx.stroke();
+      ctx.fillStyle = C.text;
+      ctx.fillText(String(n), CGEO.LEFT - 8, Y(n));
+    }
+
+    // x gridlines + time labels (reuse the bar axis tick chooser)
+    const { ticks, step } = axisTicks(t0, t1, plotW);
+    const showDate = step >= 24 * 3600e3;
+    ctx.textAlign = "center"; ctx.textBaseline = "top";
+    for (const t of ticks) {
+      const xx = Math.round(X(t)) + 0.5;
+      ctx.strokeStyle = C.grid; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(xx, plotTop); ctx.lineTo(xx, plotBottom); ctx.stroke();
+      const d = new Date(t);
+      ctx.fillStyle = C.text;
+      ctx.fillText(showDate
+        ? d.toLocaleDateString([], { month: "2-digit", day: "2-digit" })
+        : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }), X(t), plotBottom + 6);
+    }
+
+    // left + bottom axis rules
+    ctx.strokeStyle = C.axis; ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(CGEO.LEFT + 0.5, plotTop); ctx.lineTo(CGEO.LEFT + 0.5, plotBottom);
+    ctx.moveTo(CGEO.LEFT, plotBottom + 0.5); ctx.lineTo(CGEO.LEFT + plotW, plotBottom + 0.5);
+    ctx.stroke();
+
+    // instantaneous step: faint filled area, then the step line on top
+    const stepPath = () => {
+      ctx.moveTo(X(pts[0].t), Y(pts[0].n));
+      for (let k = 1; k < pts.length; k++) {
+        const xx = X(pts[k].t);
+        ctx.lineTo(xx, Y(pts[k - 1].n)); // hold previous level across the segment
+        ctx.lineTo(xx, Y(pts[k].n));     // step to the new level
+      }
+    };
+    ctx.beginPath();
+    ctx.moveTo(X(pts[0].t), Y(0));
+    stepPath();
+    ctx.lineTo(X(pts[pts.length - 1].t), Y(0));
+    ctx.closePath();
+    ctx.globalAlpha = 0.12; ctx.fillStyle = C.inst; ctx.fill(); ctx.globalAlpha = 1;
+
+    ctx.beginPath();
+    stepPath();
+    ctx.strokeStyle = C.inst; ctx.lineWidth = 1.4; ctx.lineJoin = "round"; ctx.stroke();
+
+    // smoothed 30-min rolling average (sampled per pixel)
+    if (smoothOn) {
+      ctx.beginPath();
+      for (let px = 0; px <= plotW; px++) {
+        const t = t0 + (px / plotW) * span;
+        const yy = Y(windowedAvg(t)), xx = CGEO.LEFT + px;
+        if (px === 0) ctx.moveTo(xx, yy); else ctx.lineTo(xx, yy);
+      }
+      ctx.strokeStyle = C.smooth; ctx.lineWidth = 2; ctx.lineJoin = "round"; ctx.stroke();
+    }
+
+    // day average over active time — dashed horizontal + label
+    if (prof.avgActive != null) {
+      const yy = Y(prof.avgActive);
+      ctx.save();
+      ctx.setLineDash([6, 4]);
+      ctx.strokeStyle = C.avg; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(CGEO.LEFT, yy); ctx.lineTo(CGEO.LEFT + plotW, yy); ctx.stroke();
+      ctx.restore();
+      ctx.fillStyle = C.avg; ctx.font = "11px " + MONO;
+      ctx.textAlign = "left"; ctx.textBaseline = "bottom";
+      ctx.fillText("avg " + prof.avgActive.toFixed(1) + "×", CGEO.LEFT + 6, yy - 3);
+    }
+
+    // crosshair + value dots on hover
+    if (hoverT != null && hoverT >= t0 && hoverT <= t1) {
+      const hx = Math.round(X(hoverT)) + 0.5;
+      ctx.save();
+      ctx.strokeStyle = C.text; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.moveTo(hx, plotTop); ctx.lineTo(hx, plotBottom); ctx.stroke();
+      ctx.restore();
+      ctx.fillStyle = C.inst;
+      ctx.beginPath(); ctx.arc(X(hoverT), Y(levelAt(hoverT)), 3, 0, 2 * Math.PI); ctx.fill();
+      if (smoothOn) {
+        ctx.fillStyle = C.smooth;
+        ctx.beginPath(); ctx.arc(X(hoverT), Y(windowedAvg(hoverT)), 3, 0, 2 * Math.PI); ctx.fill();
+      }
+    }
+  }
+
+  paint(null);
+  chartHover = { paint, t0, t1, span, plotW, plotLeft: CGEO.LEFT, prof, levelAt, windowedAvg, smoothOn };
+}
+
+// updateChartStats fills the line-view caption readout (peak / average / active).
+function updateChartStats(prof) {
+  const avg = prof.avgActive == null ? "—" : prof.avgActive.toFixed(1) + "×";
+  el.chartStats.innerHTML =
+      `<span class="cs-item"><span class="cs-k">peak</span><span class="cs-v">${prof.maxN}</span></span>`
+    + `<span class="cs-item"><span class="cs-k">avg over active</span><span class="cs-v">${avg}</span></span>`
+    + `<span class="cs-item"><span class="cs-k">active</span><span class="cs-v">${humanDurationCoarseMs(prof.activeMs)}</span></span>`;
+}
+
+// concurrencyTipHTML: hover readout for the line chart at time t.
+function concurrencyTipHTML(h, t) {
+  const n = h.levelAt(t);
+  const avg = h.prof.avgActive;
+  let html = `<div class="t-status" style="color:var(--c-working)">${n} agent${n === 1 ? "" : "s"} aloft</div>`
+    + `<div class="t-row">${fmtClock(new Date(t).toISOString())}</div>`;
+  if (h.smoothOn) html += `<div class="t-row" style="color:var(--accent)">30-min avg ${h.windowedAvg(t).toFixed(1)}</div>`;
+  if (avg != null) html += `<div class="t-row">day avg ${avg.toFixed(1)}×</div>`;
+  return html;
+}
+
+// ---------------------------------------------------------------------------
 // tooltip HTML builders
 // ---------------------------------------------------------------------------
 
@@ -1551,6 +1849,10 @@ function reloadNow() { hidePopout(); loadTimeline(); }
 function applyUrlParams() {
   const q = new URLSearchParams(window.location.search);
   el.day.value = q.get("day") || todayLocal();
+  // ?view=bars|line deep-links the chart view (URL wins over the persisted
+  // choice for this load, mirroring how ?day overrides the default day).
+  const v = q.get("view");
+  if (v === "bars" || v === "line") currentView = v;
   syncDayDisplay();
 }
 
@@ -1600,6 +1902,9 @@ function applyTheme() {
     el.themeToggle.title = "switch to " + next + " theme";
     el.themeToggle.setAttribute("aria-label", "switch to " + next + " theme");
   }
+  // The SVG restyles itself via CSS vars; the canvas bakes colors in at draw
+  // time, so it must be repainted to pick up the new theme.
+  if (currentView === "line" && lastData) renderConcurrencyChart(lastData);
 }
 function toggleTheme() {
   localStorage.setItem(THEME_KEY, resolvedTheme() === "dark" ? "light" : "dark");
@@ -1619,12 +1924,34 @@ function init() {
   el.dateField.addEventListener("click", () => { try { el.day.showPicker(); } catch (_) {} });
   el.optCtxSwitches.addEventListener("change", () => { if (lastData) renderTimeline(lastData); });
   el.optFocus.addEventListener("change", () => { if (lastData) renderTimeline(lastData); });
+  el.optSmooth.addEventListener("change", () => { if (lastData && currentView === "line") renderConcurrencyChart(lastData); });
+
+  // view switcher: bars ↔ agents-aloft line chart
+  el.viewBars.addEventListener("click", () => setView("bars"));
+  el.viewLine.addEventListener("click", () => setView("line"));
+  el.section.classList.toggle("view-line", currentView === "line");
+  el.viewBars.setAttribute("aria-pressed", String(currentView === "bars"));
+  el.viewLine.setAttribute("aria-pressed", String(currentView === "line"));
 
   // horizontal-scale zoom: step the px/hour density, reset to the built-in default
   el.zoomIn.addEventListener("click", () => setZoom(pxPerHour * ZOOM_FACTOR));
   el.zoomOut.addEventListener("click", () => setZoom(pxPerHour / ZOOM_FACTOR));
   el.zoomReset.addEventListener("click", () => setZoom(GEO.PX_PER_HOUR));
   updateZoomReadout();
+
+  // line-chart crosshair: repaint the hovered vertical + value dots and show a
+  // readout. Cheap — reuses the last render's paint closure, no profile recompute.
+  el.canvas.addEventListener("mousemove", (ev) => {
+    const h = chartHover;
+    if (!h) return;
+    const rect = el.canvas.getBoundingClientRect();
+    const px = ev.clientX - rect.left;
+    if (px < h.plotLeft || px > h.plotLeft + h.plotW) { h.paint(null); hideTip(); return; }
+    const t = h.t0 + ((px - h.plotLeft) / h.plotW) * h.span;
+    h.paint(t);
+    showTip(concurrencyTipHTML(h, t), ev);
+  });
+  el.canvas.addEventListener("mouseleave", () => { if (chartHover) chartHover.paint(null); hideTip(); });
 
   // dismiss popout on outside click / Escape
   document.addEventListener("click", (ev) => {
@@ -1635,7 +1962,7 @@ function init() {
   let resizeTimer = null;
   window.addEventListener("resize", () => {
     if (resizeTimer) clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(() => { if (lastData) renderTimeline(lastData); }, 120);
+    resizeTimer = setTimeout(() => { if (lastData) renderChartArea(lastData); }, 120);
   });
 
   // live polling — no manual refresh controls

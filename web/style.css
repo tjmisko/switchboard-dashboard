@@ -295,6 +295,51 @@ main { padding: 16px 18px 36px; }
 }
 .zoom-read:hover { border-color: var(--border); }
 
+/* view switcher: a two-segment pill (bars | agents aloft) at the LEFT of the
+   footer, mirroring the zoom pill's chrome. The pressed segment fills accent. */
+.viewseg {
+  margin-right: 10px;
+  display: inline-flex;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--bg-elev);
+}
+.viewseg-btn {
+  border: 0; border-radius: 0;
+  background: transparent; color: var(--fg-muted);
+  font-size: 12px; padding: 6px 13px;
+}
+.viewseg-btn:hover { color: var(--fg); border-color: transparent; }
+.viewseg-btn[aria-pressed="true"] { background: var(--accent); color: #fff; }
+.viewseg-btn[aria-pressed="true"]:hover { color: #fff; }
+.viewseg-btn + .viewseg-btn { border-left: 1px solid var(--border-soft); }
+
+/* view-scoped visibility: everything keys off .view-line on the section, so the
+   toggle is one class flip. Bars view is the default (no class). */
+#concurrency { display: none; }
+.timeline-section.view-line #timeline { display: none; }
+.timeline-section.view-line #concurrency { display: block; }
+.timeline-section.view-line .bar-only { display: none; }
+.timeline-section:not(.view-line) .line-only { display: none; }
+.timeline-section:not(.view-line) .chart-caption { display: none; }
+
+/* line-view caption: legend on the left, peak/avg readout on the right. */
+.chart-caption {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap; margin: 0 2px 8px;
+}
+.chart-legend { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.cl-item { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--fg-muted); }
+.cl-swatch { width: 15px; height: 0; flex: none; }
+.cl-swatch.inst { border-top: 2px solid var(--c-working); }
+.cl-swatch.smooth { border-top: 2px solid var(--accent); }
+.cl-swatch.avgline { border-top: 2px dashed var(--fg-muted); }
+.chart-stats { display: flex; align-items: baseline; gap: 18px; }
+.chart-stats .cs-item { display: inline-flex; align-items: baseline; gap: 6px; }
+.chart-stats .cs-k { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--fg-dim); }
+.chart-stats .cs-v { font-family: var(--mono); font-size: 13px; font-weight: 700; color: var(--fg); }
+
 .timeline-wrap {
   position: relative;
   background: var(--bg-elev);

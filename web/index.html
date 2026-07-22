@@ -60,8 +60,19 @@
     <!-- Topline: the dominant agent-hours figure, top-left. -->
     <section class="topline" id="topline"></section>
 
-    <!-- Swimlanes: grouped by project. -->
-    <section class="timeline-section">
+    <!-- Swimlanes (bars) OR the "agents aloft" concurrency line chart, toggled
+         by the footer view switcher. The section carries .view-line while the
+         line chart is active; CSS keys every view-dependent bit off that class. -->
+    <section class="timeline-section" id="timeline-section">
+      <!-- line-view caption: legend + peak/avg readout (hidden in bar view). -->
+      <div class="chart-caption" id="chart-caption">
+        <div class="chart-legend">
+          <span class="cl-item"><span class="cl-swatch inst"></span>instantaneous</span>
+          <span class="cl-item"><span class="cl-swatch smooth"></span>30-min average</span>
+          <span class="cl-item"><span class="cl-swatch avgline"></span>day average</span>
+        </div>
+        <div class="chart-stats" id="chart-stats"></div>
+      </div>
       <div class="timeline-wrap" id="timeline-wrap">
         <svg id="timeline" role="img" aria-label="session swimlanes">
           <defs>
@@ -71,24 +82,34 @@
             </pattern>
           </defs>
         </svg>
+        <canvas id="concurrency" role="img" aria-label="number of agents working over time"></canvas>
         <div id="empty" class="empty" hidden>No activity for this window.</div>
       </div>
       <div class="chart-footer">
+        <div class="viewseg" role="group" aria-label="chart view">
+          <button id="view-bars" class="viewseg-btn" type="button" aria-pressed="true" title="session swimlanes">bars</button>
+          <button id="view-line" class="viewseg-btn" type="button" aria-pressed="false" title="agents working over time">agents aloft</button>
+        </div>
         <div class="zoom" role="group" aria-label="horizontal time scale">
           <span class="zoom-cap">scale</span>
           <button id="zoom-out" class="zoom-btn" type="button" title="zoom out — compress time" aria-label="zoom out">−</button>
           <button id="zoom-reset" class="zoom-read" type="button" title="reset to default scale"><span id="zoom-val">240</span> px/h</button>
           <button id="zoom-in" class="zoom-btn" type="button" title="zoom in — stretch time" aria-label="zoom in">+</button>
         </div>
-        <label class="toggle" for="opt-focus">
+        <label class="toggle bar-only" for="opt-focus">
           <input type="checkbox" id="opt-focus" class="toggle-input" />
           <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
           <span class="toggle-label">show focus</span>
         </label>
-        <label class="toggle" for="opt-ctx-switches">
+        <label class="toggle bar-only" for="opt-ctx-switches">
           <input type="checkbox" id="opt-ctx-switches" class="toggle-input" />
           <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
           <span class="toggle-label">show context switches</span>
+        </label>
+        <label class="toggle line-only" for="opt-smooth">
+          <input type="checkbox" id="opt-smooth" class="toggle-input" checked />
+          <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
+          <span class="toggle-label">30-min average</span>
         </label>
       </div>
     </section>

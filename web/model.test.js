@@ -7,7 +7,10 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { laneIdentity, leadLabel, nameSegments, buildBars, spanInefficiency, packLanes } = require("./model.js");
+const {
+  laneIdentity, leadLabel, nameSegments, buildBars, spanInefficiency, packLanes,
+  workIntervalsMs, concurrencyProfile,
+} = require("./model.js");
 
 // ms helper: a fixed base instant + offset minutes, as RFC3339 with offset.
 const BASE = "2026-06-26T17:00:00-07:00";
@@ -230,4 +233,84 @@ test("packLanes puts each unparseable-bounds lane on its own row without crashin
 test("packLanes returns an empty list for no lanes", () => {
   assert.deepEqual(packLanes([]), []);
   assert.deepEqual(packLanes(null), []);
+});
+
+// ---------------------------------------------------------------------------
+// concurrency ("agents aloft"): workIntervalsMs + concurrencyProfile
+// ---------------------------------------------------------------------------
+
+// min helper: an epoch-ms instant `min` minutes past BASE.
+function ms(min) { return baseMs + min * 60000; }
+
+test("workIntervalsMs counts only 'working' intervals, not idle/permission/dormant", () => {
+  const lanes = [{
+    intervals: [
+      interval("working", ms(0), ms(10)),
+      interval("dormant", ms(10), ms(20)),      // waiting on subagent — not itself aloft
+      interval("delegating", ms(20), ms(30)),   // legacy alias — not itself aloft
+      interval("idle", ms(30), ms(40)),
+      interval("permission", ms(40), ms(50)),
+      interval("working", ms(50), ms(60)),
+    ],
+  }];
+  const iv = workIntervalsMs(lanes);
+  assert.deepEqual(iv, [[ms(0), ms(10)], [ms(50), ms(60)]], "only the two working runs survive");
+});
+
+test("workIntervalsMs adds each subagent span alongside the parent's working spans", () => {
+  const lanes = [{
+    intervals: [interval("working", ms(0), ms(10)), interval("dormant", ms(10), ms(30))],
+    subagents: [
+      { start: new Date(ms(10)).toISOString(), end: new Date(ms(25)).toISOString() },
+      { start: new Date(ms(12)).toISOString(), end: new Date(ms(30)).toISOString() },
+    ],
+  }];
+  const iv = workIntervalsMs(lanes);
+  assert.equal(iv.length, 3, "one working span + two subagent spans");
+  assert.deepEqual(iv[0], [ms(0), ms(10)]);
+});
+
+test("concurrencyProfile reports peak overlap and a step point per change", () => {
+  // A: [0,30), B: [10,40), C: [50,60). Peak overlap is 2 (A∩B on [10,30)).
+  const prof = concurrencyProfile([[ms(0), ms(30)], [ms(10), ms(40)], [ms(50), ms(60)]]);
+  assert.equal(prof.maxN, 2, "A and B overlap -> peak 2");
+  // breakpoints at every event boundary, level = count active AT/AFTER that t
+  assert.deepEqual(
+    prof.points.map((p) => [p.t, p.n]),
+    [[ms(0), 1], [ms(10), 2], [ms(30), 1], [ms(40), 0], [ms(50), 1], [ms(60), 0]],
+  );
+});
+
+test("concurrencyProfile: avgActive = ∫n dt ÷ active time (the force multiplier)", () => {
+  // Two fully-overlapping 10-min spans: aloft = 2 for the whole 10 min.
+  // integral = 2 agents × 10 min = 20 agent-min; active = 10 min -> avg = 2.0.
+  const prof = concurrencyProfile([[ms(0), ms(10)], [ms(0), ms(10)]]);
+  assert.equal(prof.activeMs, 10 * 60000);
+  assert.equal(prof.integralMs, 20 * 60000);
+  assert.equal(prof.avgActive, 2);
+});
+
+test("concurrencyProfile: avgActive counts only active time, ignoring the idle gap", () => {
+  // A: [0,10) alone, then a gap, then B+C overlapping [30,40).
+  // integral = 1×10 + 2×10 = 30 agent-min; active = 10 + 10 = 20 min -> avg 1.5.
+  const prof = concurrencyProfile([[ms(0), ms(10)], [ms(30), ms(40)], [ms(30), ms(40)]]);
+  assert.equal(prof.maxN, 2);
+  assert.equal(prof.activeMs, 20 * 60000, "the 20-min gap is not active time");
+  assert.equal(prof.avgActive, 1.5, "diluted only by active moments, not the gap");
+});
+
+test("concurrencyProfile handles no intervals: empty points, null average", () => {
+  const prof = concurrencyProfile([]);
+  assert.deepEqual(prof.points, []);
+  assert.equal(prof.maxN, 0);
+  assert.equal(prof.activeMs, 0);
+  assert.equal(prof.avgActive, null);
+});
+
+test("concurrencyProfile merges simultaneous starts into one point at the shared instant", () => {
+  // three spans all opening at the same t -> a single breakpoint of level 3.
+  const prof = concurrencyProfile([[ms(0), ms(10)], [ms(0), ms(20)], [ms(0), ms(30)]]);
+  assert.equal(prof.maxN, 3);
+  assert.equal(prof.points[0].t, ms(0));
+  assert.equal(prof.points[0].n, 3, "coincident starts collapse to one +3 step");
 });

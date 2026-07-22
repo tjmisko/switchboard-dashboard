@@ -171,5 +171,76 @@
     return rows;
   }
 
-  return { laneIdentity, leadLabel, nameSegments, buildBar, buildBars, spanInefficiency, packLanes };
+  // -------------------------------------------------------------------------
+  // concurrency ("agents aloft") — the instantaneous fanout series.
+  //
+  // "aloft" at instant t = # sessions actively WORKING at t + # subagents
+  // running at t. A delegating/dormant parent is deliberately NOT counted: while
+  // it waits, its subagent is the one doing the work, so parent+subagent are
+  // never double-counted. A parent that keeps working WHILE a background subagent
+  // runs counts as BOTH — correctly, since they are two independent work streams.
+  // This is the force-multiplier numerator, measured instantaneously.
+  // -------------------------------------------------------------------------
+
+  // workIntervalsMs collects the aloft spans as epoch-ms [start, end] pairs:
+  // every 'working' status interval plus every subagent span across all lanes.
+  // Pure; reads only lane.intervals[].status/start/end and lane.subagents[].
+  function workIntervalsMs(lanes) {
+    const out = [];
+    for (const lane of lanes || []) {
+      for (const iv of lane.intervals || []) {
+        if (iv.status !== "working") continue;
+        const s = Date.parse(iv.start), e = Date.parse(iv.end);
+        if (isFinite(s) && isFinite(e) && e > s) out.push([s, e]);
+      }
+      for (const sa of lane.subagents || []) {
+        const s = Date.parse(sa.start), e = Date.parse(sa.end);
+        if (isFinite(s) && isFinite(e) && e > s) out.push([s, e]);
+      }
+    }
+    return out;
+  }
+
+  // concurrencyProfile sweeps aloft intervals into the instantaneous step
+  // function and its summary stats:
+  //   points     — breakpoints [{t, n}]: the level is n on [t, nextT); the final
+  //                point is the drop back to 0. Empty when there are no intervals.
+  //   maxN       — peak simultaneous agents aloft.
+  //   integralMs — ∫ n dt over all time (= Σ interval durations = agent-ms).
+  //   activeMs   — |{t : n ≥ 1}| (union length of the intervals).
+  //   avgActive  — integralMs / activeMs: the mean number aloft over ACTIVE time
+  //                (the force-multiplier figure), or null when activeMs = 0.
+  // Pure; input is the ms-pair array from workIntervalsMs.
+  function concurrencyProfile(intervals) {
+    const events = [];
+    for (const [s, e] of (intervals || [])) { events.push([s, 1]); events.push([e, -1]); }
+    events.sort((a, b) => a[0] - b[0]);
+
+    const points = [];
+    let level = 0, i = 0, maxN = 0;
+    while (i < events.length) {
+      const t = events[i][0];
+      let delta = 0;
+      while (i < events.length && events[i][0] === t) { delta += events[i][1]; i++; }
+      level += delta;
+      if (level > maxN) maxN = level;
+      points.push({ t, n: level });
+    }
+
+    let integralMs = 0, activeMs = 0;
+    for (let k = 0; k < points.length - 1; k++) {
+      const dt = points[k + 1].t - points[k].t;
+      integralMs += points[k].n * dt;
+      if (points[k].n >= 1) activeMs += dt;
+    }
+    return {
+      points, maxN, integralMs, activeMs,
+      avgActive: activeMs > 0 ? integralMs / activeMs : null,
+    };
+  }
+
+  return {
+    laneIdentity, leadLabel, nameSegments, buildBar, buildBars,
+    spanInefficiency, packLanes, workIntervalsMs, concurrencyProfile,
+  };
 });
