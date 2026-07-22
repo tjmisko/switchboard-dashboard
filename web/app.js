@@ -30,7 +30,8 @@ const PLAN_POLL_MS = 15000; // /api/plan poll cadence (changes slowly)
 const OP_FREE_COLOR = "#3fb950";      // green — free time ("free agent")
 const OP_OCCUPIED_COLOR = "#8c4a4c";  // muted dusty red — occupied (typing or switching)
 const OP_SWITCH_RECOVERY_MS = 90000;  // 90s of occupied time after each switch
-const OP_MIN_ENGAGE_MS = 15000;       // ignore focus spans under 15s — brief glances aren't real editing/switches
+const OP_SWITCH_FLICKER_MS = 500;     // a focus arrival is a real context switch only if you dwelt ≥0.5s — drops sub-second focus flicker (notifications, focus-follows-mouse), nothing more
+const OP_MIN_ENGAGE_MS = 15000;       // TYPING gate only: a focus span under 15s isn't real editing (switch detection uses OP_SWITCH_FLICKER_MS instead)
 
 // Status -> color. working solid green; delegating faded green; idle yellow;
 // permission red; suspended grey; "" (unknown) dim. Mirrors style.css vars.
@@ -335,7 +336,7 @@ function setDot(kind) {
 // "occupied" vs "free" intervals:
 //   running   = union over lanes of running-status intervals (≥1 agent working)
 //   typing    = focus ∩ activity-active (you were at the keyboard on an agent)
-//   ctxRecov  = ⋃ [switch, switch + 90s] over every context switch (focus
+//   ctxRecov  = ⋃ [switch, switch + 90s] over every context switch (switch
 //               arrivals after the first) — clustered switches merge
 //   occupied  = (typing ∪ ctxRecov) ∩ running
 //   free      = running MINUS (typing ∪ ctxRecov)
@@ -343,9 +344,12 @@ function setDot(kind) {
 // you were neither typing nor recovering from a switch. Degrades when focus or
 // activity are absent (no activity → any focus counts as typing).
 //
-// NOTE: the displayed context-switch COUNT (and the ctx-switch overlay) is
-// deliberately decoupled from the time math — it counts EVERY focus arrival,
-// unfiltered by OP_MIN_ENGAGE_MS, while typing/recovery/free stay on the ≥15s set.
+// A context switch = a focus arrival with dwell ≥ OP_SWITCH_FLICKER_MS (see
+// model.switchArrivals). The COUNT, the overlay, and the recovery-time
+// subtraction all draw from this ONE set, so every switch shown is charged
+// against free time. (Previously the count/overlay used EVERY arrival while
+// recovery only charged ≥15s dwells — since ~85% of real switches are sub-15s,
+// most shown switches cost nothing and free time was badly overstated.)
 const RUNNING_STATUSES = new Set(["working", "delegating", "dormant"]);
 
 // MIN_SESSION_MS: sessions shorter than a minute aren't rendered anywhere.
@@ -365,13 +369,11 @@ function renderableLanes(lanes) {
 
 function computeOperatorTime(data) {
   const lanes = renderableLanes((data && data.lanes) || []);
-  // Two focus-arrival sets, deliberately decoupled:
-  //   allFocusStarts — EVERY parseable focus span start, no duration gate. Drives
-  //     the displayed switch COUNT and the ctx-switch overlay (every real arrival
-  //     is a context switch, however brief).
-  //   focusStarts/focusPairs — only spans ≥ OP_MIN_ENGAGE_MS. Drives the TIME math
-  //     (typing / recovery / free); sub-15s glances aren't real editing.
-  const runPairs = [], focusPairs = [], focusStarts = [], allFocusStarts = [];
+  // Collect, across all lanes: running intervals, raw focus spans (switch
+  // detection applies the flicker floor via model.switchArrivals), and the ≥15s
+  // focus pairs used for TYPING only (a ≥15s focus while active is real editing —
+  // a separate concept from a switch, hence its own gate).
+  const runPairs = [], focusPairs = [], focusSpans = [];
   for (const lane of lanes) {
     for (const iv of lane.intervals || []) {
       if (!RUNNING_STATUSES.has(iv.status)) continue;
@@ -381,25 +383,25 @@ function computeOperatorTime(data) {
     for (const f of lane.focus || []) {
       const s = Date.parse(f.start), e = Date.parse(f.end);
       if (!(isFinite(s) && isFinite(e) && e > s)) continue;
-      allFocusStarts.push(s); // count/overlay: unfiltered
-      // time math only: ignore "little" focus spans under OP_MIN_ENGAGE_MS — brief
-      // glances aren't real editing, so they don't occupy free time.
-      if (e - s >= OP_MIN_ENGAGE_MS) { focusPairs.push([s, e]); focusStarts.push(s); }
+      focusSpans.push(f); // raw; switchArrivals() applies OP_SWITCH_FLICKER_MS
+      // typing gate is stricter: only ≥15s focus is real editing (≠ a switch).
+      if (e - s >= OP_MIN_ENGAGE_MS) focusPairs.push([s, e]);
     }
   }
   const running = unionMs(runPairs);
   const engaged = unionMs(focusPairs);
 
-  // Context-switch recovery (TIME): every ≥15s focus arrival after the first
-  // occupies you 90s forward; clustered switches merge via union, so thrash
-  // lengthens the interval without ever double-counting the cost. Recovery stays
-  // on the ≥15s set — a sub-second glance doesn't cost you 90 seconds of focus.
-  focusStarts.sort((a, b) => a - b);
-  const recoveryStarts = focusStarts.slice(1);
+  // Context switches: focus arrivals you actually landed on (dwell ≥ 0.5s), the
+  // SAME set the count and overlay show. Every switch after the first occupies you
+  // OP_SWITCH_RECOVERY_MS forward; clustered switches merge via union, so thrash
+  // lengthens the interval without ever double-counting — and, crucially, every
+  // switch you see is subtracted from free time (no sub-15s escape hatch).
+  const switchStarts = switchArrivals(focusSpans, OP_SWITCH_FLICKER_MS);
+  const recoveryStarts = switchStarts.slice(1);
   const ctxRecovery = unionMs(recoveryStarts.map((t) => [t, t + OP_SWITCH_RECOVERY_MS]));
 
   // Active typing: focused on an agent while globally active (at the keyboard).
-  // Without an activity stream, treat any focus as typing.
+  // Without an activity stream, treat any (≥15s) focus as typing.
   const active = unionMs(spansToMs((data.activity || []).filter((a) => a.state === "active")));
   const typing = active.length ? intersectMs(engaged, active) : engaged;
 
@@ -411,13 +413,10 @@ function computeOperatorTime(data) {
   const runningMs = sum(running);
   const freeMs = sum(free);
 
-  // Displayed COUNT + overlay = ALL focus arrivals after the first, UNFILTERED by
-  // OP_MIN_ENGAGE_MS. (Decision per handoff T16: count/overlay show every real
-  // arrival; only the time-lost recovery above is gated to the ≥15s set.) Median
-  // focus span is ~1.2s, so the 15s gate would otherwise drop ~85% of switches.
-  allFocusStarts.sort((a, b) => a - b);
-  const switchTimes = allFocusStarts.slice(1);
-  const switches = Math.max(0, allFocusStarts.length - 1);
+  // COUNT + overlay reuse the recovery set exactly, so the red lines you see are
+  // the switches charged against free time — no more, no fewer.
+  const switchTimes = recoveryStarts;
+  const switches = Math.max(0, switchStarts.length - 1);
   return {
     running, occupied, free,
     runningMs, freeMs,
@@ -748,7 +747,7 @@ function renderTimeline(data) {
     drawRow(row, x, W, haveActivity, activeGlobal);
   }
   // context switches (optional, off by default): red verticals at each real
-  // (≥15s-engaged) switch — toggled via the "show context switches" chart option.
+  // (≥0.5s-dwell) switch — toggled via the "show context switches" chart option.
   // The operator lane already carries the switch cost; this is an opt-in overlay.
   if (el.optCtxSwitches && el.optCtxSwitches.checked) {
     for (const t of op.switchTimes) {

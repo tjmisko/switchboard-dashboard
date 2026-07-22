@@ -7,7 +7,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { laneIdentity, leadLabel, nameSegments, buildBars, spanInefficiency, packLanes } = require("./model.js");
+const { laneIdentity, leadLabel, nameSegments, buildBars, spanInefficiency, switchArrivals, packLanes } = require("./model.js");
 
 // ms helper: a fixed base instant + offset minutes, as RFC3339 with offset.
 const BASE = "2026-06-26T17:00:00-07:00";
@@ -182,6 +182,45 @@ test("spanInefficiency does not count delegating/dormant (waiting on a subagent)
   };
   // only the trailing 10s of idle out of 100s counts as inefficient
   assert.equal(spanInefficiency(lane, segStart, segEnd), 0.1);
+});
+
+// switchArrivals: which focus arrivals are real context switches. focusSpan makes
+// a {start,end} focus span dwelt `dwellMs` starting `fromMs`.
+function focusSpan(fromMs, dwellMs) {
+  return { start: new Date(fromMs).toISOString(), end: new Date(fromMs + dwellMs).toISOString() };
+}
+
+test("switchArrivals keeps a focus arrival whose dwell meets the flicker floor", () => {
+  assert.deepEqual(switchArrivals([focusSpan(baseMs, 500)], 500), [baseMs]);
+});
+
+test("switchArrivals drops sub-flicker focus events (notification / focus-follows-mouse)", () => {
+  assert.deepEqual(switchArrivals([focusSpan(baseMs, 300)], 500), []);
+});
+
+test("switchArrivals keeps brief-but-real switches above the floor — thrash still counts", () => {
+  // Regression guard: a ~1s glance is a real context switch and must be charged,
+  // even though it is far below the 15s editing threshold. The prior code showed
+  // these in the count/overlay but never subtracted their recovery, overstating
+  // free time by ~10x on a heavy-thrash session.
+  const spans = [
+    focusSpan(baseMs + 0, 1200),
+    focusSpan(baseMs + 5000, 800),
+    focusSpan(baseMs + 9000, 200),    // sub-flicker: dropped
+    focusSpan(baseMs + 12000, 60000), // a real ≥15s engagement
+  ];
+  assert.deepEqual(switchArrivals(spans, 500), [baseMs + 0, baseMs + 5000, baseMs + 12000]);
+});
+
+test("switchArrivals returns arrival starts sorted ascending", () => {
+  const spans = [focusSpan(baseMs + 10000, 1000), focusSpan(baseMs, 1000)];
+  assert.deepEqual(switchArrivals(spans, 500), [baseMs, baseMs + 10000]);
+});
+
+test("switchArrivals ignores unparseable spans and empty/absent input", () => {
+  assert.deepEqual(switchArrivals([], 500), []);
+  assert.deepEqual(switchArrivals(null, 500), []);
+  assert.deepEqual(switchArrivals([{ start: "nope", end: "nope" }], 500), []);
 });
 
 // packLanes: greedy interval partitioning of a group's lanes into shared rows.
