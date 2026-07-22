@@ -49,10 +49,10 @@ func TestLoadConfig_shouldBuildOrderedProvidersFromValidFile(t *testing.T) {
 
 func TestLoadConfig_shouldRejectInvalidConfigs(t *testing.T) {
 	cases := map[string]string{
-		"empty providers":  `{"providers":[]}`,
-		"missing id":       `{"providers":[{"exec":["x"]}]}`,
-		"empty exec":       `{"providers":[{"id":"a","exec":[]}]}`,
-		"duplicate id":     `{"providers":[{"id":"a","exec":["x"]},{"id":"a","exec":["y"]}]}`,
+		"empty providers": `{"providers":[]}`,
+		"missing id":      `{"providers":[{"exec":["x"]}]}`,
+		"empty exec":      `{"providers":[{"id":"a","exec":[]}]}`,
+		"duplicate id":    `{"providers":[{"id":"a","exec":["x"]},{"id":"a","exec":["y"]}]}`,
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {

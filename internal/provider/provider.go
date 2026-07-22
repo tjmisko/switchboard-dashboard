@@ -61,7 +61,7 @@ type SubprocessProvider struct {
 	id    string
 	label string
 	base  []string // full base argv incl. binary and subcommand
-	dir   string    // default --dir; overridden by a non-empty Params.Dir
+	dir   string   // default --dir; overridden by a non-empty Params.Dir
 	caps  Capabilities
 }
 
@@ -71,8 +71,8 @@ func NewSubprocessProvider(id, label string, base []string, dir string, caps Cap
 	return &SubprocessProvider{id: id, label: label, base: base, dir: dir, caps: caps}
 }
 
-func (s *SubprocessProvider) ID() string             { return s.id }
-func (s *SubprocessProvider) Label() string          { return s.label }
+func (s *SubprocessProvider) ID() string                 { return s.id }
+func (s *SubprocessProvider) Label() string              { return s.label }
 func (s *SubprocessProvider) Capabilities() Capabilities { return s.caps }
 
 // argv builds the full command line, appending the window flags. A non-empty
