@@ -125,7 +125,7 @@ function fmtUSD(v) {
 
 function fmtClock(dateStr) {
   const d = new Date(dateStr);
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
 }
 
 function fmtPct(v) { return v == null ? "—" : Math.round(v) + "%"; }
@@ -210,15 +210,12 @@ function subtractMs(A, B) {
 // ---------------------------------------------------------------------------
 const el = {
   day: document.getElementById("day"),
-  since: document.getElementById("since"),
-  until: document.getElementById("until"),
-  clearRange: document.getElementById("clear-range"),
+  dayDisplay: document.getElementById("day-display"),
+  dateField: document.getElementById("date-field"),
   prevDay: document.getElementById("prev-day"),
   nextDay: document.getElementById("next-day"),
-  live: document.getElementById("live"),
   liveDot: document.getElementById("live-dot"),
   updated: document.getElementById("updated"),
-  windowLabel: document.getElementById("window-label"),
   error: document.getElementById("error"),
   topline: document.getElementById("topline"),
   statusKey: document.getElementById("status-key"),
@@ -258,14 +255,7 @@ let planTimer = null;
 
 function buildQuery() {
   const params = new URLSearchParams();
-  const since = el.since.value;
-  const until = el.until.value;
-  if (since || until) {
-    if (since) params.set("since", since);
-    if (until) params.set("until", until);
-  } else if (el.day.value) {
-    params.set("day", el.day.value);
-  }
+  if (el.day.value) params.set("day", el.day.value);
   return params.toString();
 }
 
@@ -440,7 +430,6 @@ function computeOperatorTime(data) {
 // ---------------------------------------------------------------------------
 
 function render(data) {
-  el.windowLabel.textContent = data.window || "—";
   renderTopline(data.summary || {});
   renderStatusKey(data.summary || {});
   renderTimeline(data);
@@ -663,7 +652,7 @@ function renderTimeline(data) {
     const d = new Date(t);
     label.textContent = showDate
       ? d.toLocaleDateString([], { month: "2-digit", day: "2-digit" })
-      : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
     el.svg.appendChild(label);
   }
   el.svg.appendChild(svgEl("line", { class: "axis-line", x1: GEO.GUTTER, y1: GEO.PLOT_TOP, x2: GEO.GUTTER, y2: plotBottom }));
@@ -945,24 +934,50 @@ function operatorTipHTML(op) {
     + `<div class="t-why">Time you had free while agents ran and you were neither typing nor recovering from a context switch.</div>`;
 }
 
+// tipHead renders a segment tooltip's headline: the status label on the left with
+// the DURATION promoted (bold, right-aligned) as the primary figure, over a
+// dimmed wall-clock line. The elapsed span matters more than the clock times, so
+// it leads; the clock is kept dull and secondary.
+function tipHead(statusHTML, color, clockHTML, durMs, body) {
+  return `<div class="t-head">`
+    + `<span class="t-status"${color ? ` style="color:${color}"` : ""}>${statusHTML}</span>`
+    + `<span class="t-dur">${humanDurationMs(durMs)}</span>`
+    + `</div>`
+    + (body || "")
+    + `<div class="t-clock">${clockHTML}</div>`;
+}
+
+// intervalTaskHTML surfaces the /name (or pre-/name project lead) active during a
+// working span — the closest analog we have to the subagent task description,
+// derived from data already in the payload (names[]/labels[]). A normal-agent
+// interval carries no task text of its own, so we borrow the session's active
+// name span as its context.
+function intervalTaskHTML(lane, startMs, endMs) {
+  const segs = nameSegments(lane);
+  const mid = (startMs + endMs) / 2;
+  const seg = segs.find((s) => mid >= s.start && mid < s.end) || segs[segs.length - 1];
+  const label = seg && seg.label ? seg.label.trim() : "";
+  return label ? `<div class="t-task">${escapeHTML(label)}</div>` : "";
+}
+
 function opSegTipHTML(kind, s, e) {
   const free = kind === "free";
-  return `<div class="t-status" style="color:${free ? OP_FREE_COLOR : "#e5534b"}">${free ? "free" : "occupied"}</div>`
-    + `<div class="t-row">${fmtClock(new Date(s).toISOString())} – ${fmtClock(new Date(e).toISOString())}</div>`
-    + `<div class="t-row">${humanDurationMs(e - s)}</div>`
+  return tipHead(free ? "free" : "occupied", free ? OP_FREE_COLOR : "#e5534b",
+      `${fmtClock(new Date(s).toISOString())} – ${fmtClock(new Date(e).toISOString())}`, e - s)
     + `<div class="t-why">${free
         ? "Agents were running but you weren't typing or recovering from a switch."
         : "You were typing, or within 90s of a context switch, while agents ran."}</div>`;
 }
 
 function intervalTipHTML(lane, iv) {
-  const durMs = Date.parse(iv.end) - Date.parse(iv.start);
+  const startMs = Date.parse(iv.start), endMs = Date.parse(iv.end);
+  const durMs = endMs - startMs;
   const sub = iv.subagents || 0;
   const note = iv.status === "delegating" ? " (delegating — faded)"
     : iv.status === "dormant" ? " (waiting on subagent)" : "";
-  return `<div class="t-status" style="color:${statusColor(iv.status)}">${statusLabel(iv.status)}${note}</div>`
-    + `<div class="t-row">${fmtClock(iv.start)} – ${fmtClock(iv.end)}</div>`
-    + `<div class="t-row">${humanDurationMs(durMs)}</div>`
+  return tipHead(`${statusLabel(iv.status)}${note}`, statusColor(iv.status),
+      `${fmtClock(iv.start)} – ${fmtClock(iv.end)}`, durMs,
+      intervalTaskHTML(lane, startMs, endMs))
     + (sub > 0 ? `<div class="t-sub">${sub} subagent${sub === 1 ? "" : "s"} at start</div>` : "");
 }
 
@@ -993,9 +1008,8 @@ function nameSegTipHTML(lane, seg) {
   const idBits = [lane.agent || "?"];
   if (lane.pid != null) idBits.push("pid " + lane.pid);
   if (lane.cost_usd != null) idBits.push(fmtUSD(lane.cost_usd));
-  return `<div class="t-status">${escapeHTML(seg.label || "(unnamed)")}${note}</div>`
-    + `<div class="t-row">${fmtClock(seg.start)} – ${fmtClock(seg.end)}</div>`
-    + `<div class="t-row">${humanDurationMs(durMs)}</div>`
+  return tipHead(`${escapeHTML(seg.label || "(unnamed)")}${note}`, null,
+      `${fmtClock(seg.start)} – ${fmtClock(seg.end)}`, durMs)
     + (ineff != null ? `<div class="t-row">operator inefficiency ${Math.round(ineff * 100)}% <span class="dim">idle/waiting</span></div>` : "")
     + `<div class="t-id">${escapeHTML(idBits.join(" · "))}</div>`
     + (lane.session_id ? `<div class="t-id">${escapeHTML(lane.session_id)}</div>` : "");
@@ -1311,9 +1325,15 @@ function reloadNow() { hidePopout(); loadTimeline(); }
 
 function applyUrlParams() {
   const q = new URLSearchParams(window.location.search);
-  el.since.value = q.get("since") || "";
-  el.until.value = q.get("until") || "";
   el.day.value = q.get("day") || todayLocal();
+  syncDayDisplay();
+}
+
+// syncDayDisplay mirrors the picker's ISO value (YYYY-MM-DD) into the visible
+// label. The native <input type="date"> renders in the browser locale, so we
+// hide it behind this label to keep the date reading as ISO everywhere.
+function syncDayDisplay() {
+  el.dayDisplay.textContent = el.day.value || "—";
 }
 
 // ---------------------------------------------------------------------------
@@ -1367,13 +1387,11 @@ function init() {
   el.themeToggle.addEventListener("click", toggleTheme);
   themeMql.addEventListener("change", () => { if (!storedTheme()) applyTheme(); });
 
-  el.day.addEventListener("change", reloadNow);
-  el.since.addEventListener("change", reloadNow);
-  el.until.addEventListener("change", reloadNow);
-  el.prevDay.addEventListener("click", () => { el.day.value = shiftDay(el.day.value, -1); el.since.value = el.until.value = ""; reloadNow(); });
-  el.nextDay.addEventListener("click", () => { el.day.value = shiftDay(el.day.value, +1); el.since.value = el.until.value = ""; reloadNow(); });
-  el.live.addEventListener("click", () => { el.day.value = todayLocal(); el.since.value = el.until.value = ""; reloadNow(); });
-  el.clearRange.addEventListener("click", () => { el.since.value = el.until.value = ""; reloadNow(); });
+  el.day.addEventListener("change", () => { syncDayDisplay(); reloadNow(); });
+  el.prevDay.addEventListener("click", () => { el.day.value = shiftDay(el.day.value, -1); syncDayDisplay(); reloadNow(); });
+  el.nextDay.addEventListener("click", () => { el.day.value = shiftDay(el.day.value, +1); syncDayDisplay(); reloadNow(); });
+  // open the native calendar on click (the transparent picker overlays the field)
+  el.dateField.addEventListener("click", () => { try { el.day.showPicker(); } catch (_) {} });
   el.optCtxSwitches.addEventListener("change", () => { if (lastData) renderTimeline(lastData); });
   el.optFocus.addEventListener("change", () => { if (lastData) renderTimeline(lastData); });
 

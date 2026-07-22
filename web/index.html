@@ -34,22 +34,18 @@
       <h1>switchboard</h1>
     </div>
 
-    <div class="nav">
-      <button id="prev-day" class="icon" title="previous day">‹</button>
-      <input type="date" id="day" />
-      <button id="next-day" class="icon" title="next day">›</button>
-      <button id="live" class="ghost" title="jump to today / live">live</button>
-      <span class="nav-range">
-        <input type="date" id="since" title="range start" />
-        <span class="dash">–</span>
-        <input type="date" id="until" title="range end" />
-        <button id="clear-range" class="icon" title="clear range">✕</button>
-      </span>
-    </div>
-
     <div class="live-pill" id="live-pill" title="data is live — polled automatically">
       <span id="updated">—</span>
-      <span class="win" id="window-label">—</span>
+    </div>
+
+    <div class="nav">
+      <button id="prev-day" class="icon" title="previous day">‹</button>
+      <span class="date-field" id="date-field">
+        <span class="date-text" id="day-display">—</span>
+        <svg class="date-ico" viewBox="0 0 16 16" width="13" height="13" fill="currentColor" aria-hidden="true"><path d="M3.5 0a.5.5 0 0 1 .5.5V1h8V.5a.5.5 0 0 1 1 0V1h1a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V3a2 2 0 0 1 2-2h1V.5a.5.5 0 0 1 .5-.5M1 4v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V4z"/></svg>
+        <input type="date" id="day" aria-label="date" />
+      </span>
+      <button id="next-day" class="icon" title="next day">›</button>
     </div>
 
     <button id="theme-toggle" class="icon theme-toggle" title="toggle theme" aria-label="toggle color theme">

@@ -121,8 +121,38 @@ code { font-family: var(--mono); color: var(--fg-muted); }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }
 
 .nav { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.nav-range { display: flex; align-items: center; gap: 6px; margin-left: 8px; padding-left: 10px; border-left: 1px solid var(--border-soft); }
-.nav-range .dash { color: var(--fg-dim); }
+
+/* date-field: a native <input type="date"> sits transparent on top so the
+   calendar/value stay native, while the visible text shows our ISO (YYYY-MM-DD)
+   format that the native input can't render on its own. */
+.date-field {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-elev-2);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  cursor: pointer;
+}
+.date-field:hover { border-color: var(--fg-dim); }
+.date-field:focus-within { border-color: var(--accent); }
+.date-field .date-ico { color: var(--fg-muted); display: block; }
+.date-field input[type="date"] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  cursor: pointer;
+}
 
 input[type="date"] {
   background: var(--bg-elev-2);
@@ -170,7 +200,6 @@ button.ghost { background: transparent; color: var(--fg-muted); font-size: 12px;
   padding: 5px 11px;
   border-radius: 999px;
 }
-.live-pill .win { color: var(--fg-dim); padding-left: 12px; border-left: 1px solid var(--border-soft); }
 
 /* ---------- error ---------- */
 .error-banner {
@@ -438,12 +467,19 @@ main { padding: 16px 18px 36px; }
   background: var(--bg-elev-2);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 8px 10px;
+  padding: 10px 13px;
   font-size: 12px;
   max-width: 320px;
   box-shadow: 0 6px 24px var(--shadow-1);
 }
 .tooltip .t-status { font-weight: 600; font-family: var(--mono); }
+/* segment head: status on the left, the DURATION promoted (bold, larger) and
+   right-aligned as the headline figure, sitting above a dimmed wall-clock line.
+   Duration reads as the point; the clock stays secondary. */
+.tooltip .t-head { display: flex; align-items: baseline; justify-content: space-between; gap: 18px; }
+.tooltip .t-dur { font-family: var(--mono); font-weight: 700; font-size: 14px; color: var(--fg); }
+.tooltip .t-task { color: var(--fg); font-family: var(--mono); margin-top: 5px; word-break: break-word; }
+.tooltip .t-clock { color: var(--fg-dim); font-family: var(--mono); font-size: 11px; margin-top: 5px; }
 .tooltip .t-row { color: var(--fg-muted); margin-top: 3px; font-family: var(--mono); }
 /* formula descriptor box (hover any computed figure): formula → result → why */
 .tooltip .t-formula {
