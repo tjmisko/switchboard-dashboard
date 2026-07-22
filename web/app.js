@@ -229,6 +229,10 @@ const el = {
   optCtxSwitches: document.getElementById("opt-ctx-switches"),
   optFocus: document.getElementById("opt-focus"),
   themeToggle: document.getElementById("theme-toggle"),
+  zoomIn: document.getElementById("zoom-in"),
+  zoomOut: document.getElementById("zoom-out"),
+  zoomReset: document.getElementById("zoom-reset"),
+  zoomVal: document.getElementById("zoom-val"),
 };
 
 // focusEnabled: whether the blue focus/attention overlay is shown (toggle in the
@@ -537,6 +541,44 @@ const GEO = {
   SUB_MERGE_GAP_PX: 3,      // adjacent slivers within this px gap merge into one marker
 };
 
+// Horizontal scale (time density). GEO.PX_PER_HOUR is the built-in default; the
+// footer zoom control overrides it live and persists the choice in localStorage,
+// so a chosen scale survives reloads. Bounded so the plot can't collapse to a
+// smear or blow up unboundedly.
+const ZOOM_KEY = "sb-pxph";
+const ZOOM_MIN = 60, ZOOM_MAX = 1200, ZOOM_FACTOR = 1.25;
+const clampZoom = (v) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, v));
+let pxPerHour = (function () {
+  let v = NaN;
+  try { v = parseFloat(localStorage.getItem(ZOOM_KEY)); } catch (e) {}
+  return clampZoom(isFinite(v) && v > 0 ? v : GEO.PX_PER_HOUR);
+})();
+
+// setZoom changes the horizontal density and repaints, holding the time point at
+// the viewport center steady so zooming feels anchored instead of snapping to 0.
+function setZoom(next) {
+  next = Math.round(clampZoom(next));
+  if (next === Math.round(pxPerHour)) { updateZoomReadout(); return; }
+  const wrap = el.wrap;
+  const sw = wrap.scrollWidth, cw = wrap.clientWidth;
+  const centerFrac = sw > cw ? (wrap.scrollLeft + cw / 2) / sw : 0.5;
+  pxPerHour = next;
+  try { localStorage.setItem(ZOOM_KEY, String(next)); } catch (e) {}
+  updateZoomReadout();
+  if (lastData) {
+    renderTimeline(lastData);
+    const nsw = wrap.scrollWidth;
+    if (nsw > wrap.clientWidth) wrap.scrollLeft = centerFrac * nsw - wrap.clientWidth / 2;
+  }
+}
+
+// updateZoomReadout syncs the numeric label and greys out a button at its bound.
+function updateZoomReadout() {
+  if (el.zoomVal) el.zoomVal.textContent = String(Math.round(pxPerHour));
+  if (el.zoomOut) el.zoomOut.disabled = pxPerHour <= ZOOM_MIN + 0.5;
+  if (el.zoomIn) el.zoomIn.disabled = pxPerHour >= ZOOM_MAX - 0.5;
+}
+
 // Project groups fold to a one-line summary when they get too small to read; the
 // user can click to override either way. Keyed by project name so the choice
 // survives the ~3s repaints. undefined = follow the auto (size-based) default.
@@ -598,7 +640,7 @@ function renderTimeline(data) {
   // overflow-x:auto), instead of squishing a whole day into the visible width.
   const containerW = Math.max(620, el.wrap.clientWidth);
   const fitPlotW = Math.max(160, containerW - GEO.GUTTER - GEO.RIGHT);
-  const minPlotW = (span / 3600e3) * GEO.PX_PER_HOUR;
+  const minPlotW = (span / 3600e3) * pxPerHour;
   const plotW = Math.max(fitPlotW, minPlotW);
   const W = GEO.GUTTER + plotW + GEO.RIGHT;
   // unclamped ms→px width, for the collapse decision (needs pixel widths before x()).
@@ -1577,6 +1619,12 @@ function init() {
   el.dateField.addEventListener("click", () => { try { el.day.showPicker(); } catch (_) {} });
   el.optCtxSwitches.addEventListener("change", () => { if (lastData) renderTimeline(lastData); });
   el.optFocus.addEventListener("change", () => { if (lastData) renderTimeline(lastData); });
+
+  // horizontal-scale zoom: step the px/hour density, reset to the built-in default
+  el.zoomIn.addEventListener("click", () => setZoom(pxPerHour * ZOOM_FACTOR));
+  el.zoomOut.addEventListener("click", () => setZoom(pxPerHour / ZOOM_FACTOR));
+  el.zoomReset.addEventListener("click", () => setZoom(GEO.PX_PER_HOUR));
+  updateZoomReadout();
 
   // dismiss popout on outside click / Escape
   document.addEventListener("click", (ev) => {

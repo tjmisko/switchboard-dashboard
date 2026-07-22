@@ -74,6 +74,12 @@
         <div id="empty" class="empty" hidden>No activity for this window.</div>
       </div>
       <div class="chart-footer">
+        <div class="zoom" role="group" aria-label="horizontal time scale">
+          <span class="zoom-cap">scale</span>
+          <button id="zoom-out" class="zoom-btn" type="button" title="zoom out — compress time" aria-label="zoom out">−</button>
+          <button id="zoom-reset" class="zoom-read" type="button" title="reset to default scale"><span id="zoom-val">240</span> px/h</button>
+          <button id="zoom-in" class="zoom-btn" type="button" title="zoom in — stretch time" aria-label="zoom in">+</button>
+        </div>
         <label class="toggle" for="opt-focus">
           <input type="checkbox" id="opt-focus" class="toggle-input" />
           <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
