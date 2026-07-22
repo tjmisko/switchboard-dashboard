@@ -63,18 +63,63 @@ go build -o switchboard-dashboard .
 
 ## Flags
 
-| Flag     | Default                       | Description                                        |
-| -------- | ----------------------------- | -------------------------------------------------- |
-| `--port` | `8080`                        | HTTP port.                                         |
-| `--ctl`  | `switchboard-ctl`             | The `switchboard-ctl` binary, resolved via `PATH`. |
-| `--dir`  | `""`                          | History dir passed to ctl; empty uses ctl's own.   |
-| `--plan` | `/tmp/claude-plan-usage.json` | Cached plan-usage file, read-only, for the gauge.  |
+| Flag          | Default                       | Description                                                              |
+| ------------- | ----------------------------- | ------------------------------------------------------------------------ |
+| `--port`      | `8080`                        | HTTP port.                                                               |
+| `--ctl`       | `switchboard-ctl`             | The `switchboard-ctl` binary for the default Claude provider.            |
+| `--dir`       | `""`                          | History dir passed to ctl; empty uses ctl's own.                         |
+| `--plan`      | `/tmp/claude-plan-usage.json` | Cached plan-usage file, read-only, for the gauge.                        |
+| `--providers` | `""`                          | Providers config JSON; when set, merges the listed adapters (see below). |
+
+## Data providers (adapters)
+
+The dashboard renders a normalized **timeline envelope** and knows nothing about
+where it comes from. A _provider_ is any binary that prints that envelope for a
+window — `<exec…> timeline --json [--dir D] [--day D] [--since S] [--until U]`.
+Claude (via `switchboard-ctl`) is just the default provider; any other source
+that can emit the envelope plugs in the same way.
+
+With no `--providers`, the dashboard runs the single Claude provider and proxies
+its bytes verbatim (unchanged from before). Point `--providers` at a config to
+**merge** several adapters into one namespaced view — lanes from every provider
+in one timeline and one cross-provider "agents aloft" count, each lane tagged
+with its provider (accent spine + legend chip). A provider that fails is recorded
+in the envelope's `provider_errors` rather than blanking the dashboard; only an
+all-providers-failed request is a `502`. See `examples/providers.json`.
+
+### Arachne provider (docker long-running sessions)
+
+`arachne-switchboard-recorder` + `arachne-switchboard-ctl` add
+[Arachne](https://github.com/tjmisko/Arachne)'s docker-based agent fleet as a
+provider. Arachne containers run `--rm` with no labels, so Docker keeps no
+history; the recorder is the durable memory it lacks.
+
+```sh
+go install ./cmd/arachne-switchboard-recorder ./cmd/arachne-switchboard-ctl
+
+# 1. run the recorder (polls `docker ps`, tails container logs) — writes an
+#    append-only history under ~/.arachne-switchboard/
+arachne-switchboard-recorder -interval 5s      # or the systemd/ user unit
+
+# 2. run the dashboard with both providers merged
+switchboard-dashboard --providers examples/providers.json
+```
+
+The recorder polls `docker ps --filter name=arachne-agent`, extracts session
+metadata (task/phase/model/workspace) via `docker inspect`, and parses each
+container's stream-json log for Claude `Task` subagents and token usage. Because
+containers vanish on exit, it records its own time series and, on restart,
+reconciles against `docker ps` — closing sessions that ended while it was down at
+their last-seen time. Each running container is counted as one agent aloft for
+its lifetime (unattended auto mode), with subagent sub-bars layered on top.
 
 ## HTTP API
 
-- **`GET /api/timeline`** — proxies `switchboard-ctl timeline --json`, forwarding
-  `day`, `since`, `until`, and `dir` as ctl flags. Returns ctl's JSON on success,
-  or `502 {error, stderr}` when ctl exits non-zero.
+- **`GET /api/timeline`** — with one provider, proxies its `timeline --json`,
+  forwarding `day`, `since`, `until`, and `dir` as flags, and returns its JSON
+  (or `502 {error, stderr}` on non-zero exit). With `--providers`, fetches every
+  adapter in parallel and returns the merged envelope; per-provider failures land
+  in `provider_errors` and only an all-failed request is a `502`.
 - **`GET /api/plan`** — returns a normalized, read-only view of the cached
   plan-usage file for the cost gauge:
   `{available, mtime, age_seconds, stale, five_hour, seven_day, seven_day_opus}`.
@@ -109,3 +154,10 @@ The render model — identity keying, name spans, and row packing — lives in
 `web/model.js` as DOM-free pure functions covered by `web/model.test.js`. The Go
 tests inject a stub `ctl` and temporary plan files, so they need no real
 switchboard install.
+
+The provider layer lives under `internal/`: `internal/timeline` (the envelope
+types + `Merge`), `internal/provider` (the `Provider` interface, subprocess
+adapter, and config), and `internal/arachne` (docker enumeration, stream-json log
+parsing, the append-only history recorder, and the compiler). Each has its own
+unit tests, including a recorder test that fakes docker and a fixed clock to
+exercise lifecycle and restart reconciliation.

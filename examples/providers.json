@@ -1,0 +1,16 @@
+{
+  "providers": [
+    {
+      "id": "claude",
+      "label": "Claude",
+      "exec": ["switchboard-ctl", "timeline", "--json", "--plan-window"],
+      "capabilities": { "plan": true }
+    },
+    {
+      "id": "arachne",
+      "label": "Arachne",
+      "exec": ["arachne-switchboard-ctl", "timeline", "--json"],
+      "capabilities": { "plan": false }
+    }
+  ]
+}
