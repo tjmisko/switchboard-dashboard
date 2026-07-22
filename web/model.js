@@ -136,6 +136,27 @@
     return waited / dur;
   }
 
+  // switchArrivals identifies the operator's real context switches from focus
+  // spans. A context switch is a focus ARRIVAL you actually landed on — the span's
+  // dwell (end − start) ≥ flickerMs — which filters ONLY sub-flicker focus noise
+  // (a notification or focus-follows-mouse stealing focus for a few hundred ms is
+  // not a switch). It deliberately does NOT gate on long dwell: rapid thrash
+  // (many short-but-real spans) is the most disruptive pattern and must count.
+  //
+  // Returns the qualifying arrival start times (epoch ms), sorted. This is the
+  // SINGLE source of truth for switches: the displayed COUNT, the overlay, and the
+  // recovery-time subtraction all derive from it, so what you see is exactly what
+  // is charged against free time. (The prior split — count every arrival but
+  // charge recovery only for ≥15s dwells — is what made free time overcounted.)
+  // Pure; reads raw focus spans ({start,end} RFC3339) and Date.parses internally.
+  function switchArrivals(focusSpans, flickerMs) {
+    return (focusSpans || [])
+      .map((f) => [Date.parse(f.start), Date.parse(f.end)])
+      .filter(([s, e]) => isFinite(s) && isFinite(e) && e - s >= flickerMs)
+      .map(([s]) => s)
+      .sort((a, b) => a - b);
+  }
+
   // packLanes performs greedy interval partitioning on a group's lanes: it
   // returns an array of ROWS, each row an array of lanes sorted by start, with no
   // two lanes on a row overlapping in time. Time-serializable sessions (one ends
@@ -241,6 +262,6 @@
 
   return {
     laneIdentity, leadLabel, nameSegments, buildBar, buildBars,
-    spanInefficiency, packLanes, workIntervalsMs, concurrencyProfile,
+    spanInefficiency, switchArrivals, packLanes, workIntervalsMs, concurrencyProfile,
   };
 });
