@@ -1,14 +1,18 @@
 package main
 
 import (
-	"bytes"
 	"embed"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"net/http"
 	"os"
-	"os/exec"
+	"strings"
+	"sync"
 	"time"
+
+	"github.com/tjmisko/switchboard-dashboard/internal/provider"
+	"github.com/tjmisko/switchboard-dashboard/internal/timeline"
 )
 
 // Embed only the served assets (not web/*.test.js, which is dev-only).
@@ -26,44 +30,34 @@ const DefaultPlanPath = "/tmp/claude-plan-usage.json"
 // is expected and surfaced (grayed) rather than treated as an error.
 const planStaleAfter = 5 * time.Minute
 
-// TimelineParams holds the request-derived inputs that map onto
-// `switchboard-ctl timeline` flags.
-type TimelineParams struct {
-	Day   string
-	Since string
-	Until string
-	Dir   string
-}
-
-// argvFor builds the full argv for invoking switchboard-ctl, including the
-// binary itself as argv[0]. It is a pure function so the param->flag mapping
-// can be unit-tested directly. Empty params are omitted, letting ctl apply its
-// own defaults.
-func argvFor(ctl string, p TimelineParams) []string {
-	// --plan-window asks ctl to attach the rolling 5h plan_window total (the $
-	// half of the cost gauge). It is always "now"-anchored regardless of the
-	// viewed day, so we request it unconditionally; ctl omits it without the flag.
-	argv := []string{ctl, "timeline", "--json", "--plan-window"}
-	if p.Dir != "" {
-		argv = append(argv, "--dir", p.Dir)
-	}
-	if p.Day != "" {
-		argv = append(argv, "--day", p.Day)
-	}
-	if p.Since != "" {
-		argv = append(argv, "--since", p.Since)
-	}
-	if p.Until != "" {
-		argv = append(argv, "--until", p.Until)
-	}
-	return argv
-}
-
-// Server wires the configured ctl binary and history dir into HTTP handlers.
+// Server wires the configured providers into HTTP handlers. With no explicit
+// Providers, it synthesizes a single "claude" provider from Ctl/Dir, preserving
+// the original byte-for-byte switchboard-ctl proxy behavior.
 type Server struct {
-	Ctl      string // path or name of switchboard-ctl (resolved via PATH by exec)
-	Dir      string // default history dir; "" lets ctl pick its own default
+	Ctl      string // path or name of switchboard-ctl for the default claude provider
+	Dir      string // default history dir for the default claude provider; "" lets ctl default
 	PlanPath string // cached OAuth plan-usage file; "" uses DefaultPlanPath
+	// Providers, when non-empty, replaces the default single-claude provider with
+	// an explicit adapter set whose envelopes are merged into one unified view.
+	Providers []provider.Provider
+}
+
+// providerList returns the configured providers, or a single default claude
+// provider built from Ctl/Dir when none are configured.
+func (s *Server) providerList() []provider.Provider {
+	if len(s.Providers) > 0 {
+		return s.Providers
+	}
+	ctl := s.Ctl
+	if ctl == "" {
+		ctl = "switchboard-ctl"
+	}
+	// --plan-window attaches the rolling 5h plan_window total (the $ half of the
+	// cost gauge); it is always "now"-anchored, so we request it unconditionally.
+	base := []string{ctl, "timeline", "--json", "--plan-window"}
+	return []provider.Provider{
+		provider.NewSubprocessProvider("claude", "Claude", base, s.Dir, provider.Capabilities{Plan: true}),
+	}
 }
 
 // Handler returns the mux serving both the API and the embedded static UI.
@@ -92,40 +86,145 @@ type timelineError struct {
 	Stderr string `json:"stderr,omitempty"`
 }
 
-// handleTimeline execs `switchboard-ctl timeline --json` with the requested
-// window and proxies its stdout. A non-zero ctl exit becomes a 502 carrying the
-// captured stderr.
+// handleTimeline produces the timeline envelope. With a single provider it
+// proxies that provider's stdout verbatim (byte-identical, preserving any fields
+// the Go structs don't model). With multiple providers it fetches them in
+// parallel and merges their envelopes into one unified, namespaced view; a
+// provider that fails is recorded in provider_errors rather than blanking the
+// whole dashboard, and only an all-providers-failed request becomes a 502.
 func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	dir := q.Get("dir")
-	if dir == "" {
-		dir = s.Dir
-	}
-	p := TimelineParams{
-		Day:   q.Get("day"),
-		Since: q.Get("since"),
-		Until: q.Get("until"),
-		Dir:   dir,
-	}
-	argv := argvFor(s.Ctl, p)
+	ps := s.providerList()
+	ctx := r.Context()
 
-	cmd := exec.CommandContext(r.Context(), argv[0], argv[1:]...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
+	if len(ps) == 1 {
+		params := provider.Params{Day: q.Get("day"), Since: q.Get("since"), Until: q.Get("until"), Dir: q.Get("dir")}
+		raw, err := ps[0].Fetch(ctx, params)
+		if err != nil {
+			s.writeTimelineError(w, ps[0].ID(), err)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadGateway)
-		_ = json.NewEncoder(w).Encode(timelineError{
-			Error:  "switchboard-ctl failed: " + err.Error(),
-			Stderr: stderr.String(),
-		})
+		_, _ = w.Write(raw)
 		return
 	}
 
+	// Multi-provider: the query dir is single-source and does not map across
+	// providers, so each uses its own configured dir; only the window flags
+	// (day/since/until) are provider-agnostic and forwarded.
+	params := provider.Params{Day: q.Get("day"), Since: q.Get("since"), Until: q.Get("until")}
+
+	type result struct {
+		id  string
+		tl  *timeline.Timeline
+		err error
+	}
+	results := make([]result, len(ps))
+	var wg sync.WaitGroup
+	for i, p := range ps {
+		wg.Add(1)
+		go func(i int, p provider.Provider) {
+			defer wg.Done()
+			raw, err := p.Fetch(ctx, params)
+			if err != nil {
+				results[i] = result{id: p.ID(), err: err}
+				return
+			}
+			tl, perr := timeline.Parse(raw)
+			if perr != nil {
+				results[i] = result{id: p.ID(), err: perr}
+				return
+			}
+			results[i] = result{id: p.ID(), tl: tl}
+		}(i, p)
+	}
+	wg.Wait()
+
+	var sourced []timeline.Sourced
+	var provErrs []timeline.ProviderError
+	for _, res := range results {
+		if res.err != nil {
+			provErrs = append(provErrs, timeline.ProviderError{Provider: res.id, Error: providerErrString(res.err)})
+			continue
+		}
+		sourced = append(sourced, timeline.Sourced{Provider: res.id, Timeline: res.tl})
+	}
+
+	if len(sourced) == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(timelineError{Error: "all providers failed", Stderr: joinProviderErrors(provErrs)})
+		return
+	}
+
+	merged := timeline.Merge(sourced, timeline.MergeOptions{Window: windowLabel(q)})
+	merged.ProviderErrors = append(merged.ProviderErrors, provErrs...)
+	out, err := merged.Marshal()
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(timelineError{Error: "merge encode failed: " + err.Error()})
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(stdout.Bytes())
+	_, _ = w.Write(out)
+}
+
+// writeTimelineError writes a 502 for a single-provider failure, surfacing the
+// subprocess stderr when present.
+func (s *Server) writeTimelineError(w http.ResponseWriter, id string, err error) {
+	stderr := ""
+	var ee *provider.ExecError
+	if errors.As(err, &ee) {
+		stderr = ee.Stderr
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusBadGateway)
+	_ = json.NewEncoder(w).Encode(timelineError{
+		Error:  "provider " + id + " failed: " + err.Error(),
+		Stderr: stderr,
+	})
+}
+
+// providerErrString renders a provider failure into a single line, folding in
+// the subprocess stderr when available.
+func providerErrString(err error) string {
+	var ee *provider.ExecError
+	if errors.As(err, &ee) && strings.TrimSpace(ee.Stderr) != "" {
+		return err.Error() + ": " + strings.TrimSpace(ee.Stderr)
+	}
+	return err.Error()
+}
+
+// joinProviderErrors renders the collected provider errors for an all-failed 502.
+func joinProviderErrors(errs []timeline.ProviderError) string {
+	parts := make([]string, 0, len(errs))
+	for _, e := range errs {
+		parts = append(parts, e.Provider+": "+e.Error)
+	}
+	return strings.Join(parts, "; ")
+}
+
+// windowLabel derives a display window label for the merged envelope from the
+// request params.
+func windowLabel(q map[string][]string) string {
+	get := func(k string) string {
+		if v := q[k]; len(v) > 0 {
+			return v[0]
+		}
+		return ""
+	}
+	if day := get("day"); day != "" {
+		return day
+	}
+	since := get("since")
+	if since == "" {
+		return ""
+	}
+	if until := get("until"); until != "" {
+		return since + ".." + until
+	}
+	return since
 }
 
 // planBucket is one rolling-limit window from the cached OAuth file. The
