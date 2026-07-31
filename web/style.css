@@ -345,18 +345,19 @@ main { padding: 16px 18px 36px; }
   .viewseg.glider-ready .viewseg-glider, .viewseg-btn { transition: none; }
 }
 
-/* view-scoped visibility: the three views (bars, aloft line, per-project hours)
-   all key off one class on the section, so switching is a single class flip.
-   Bars is the default and carries no class; the other two set .view-line /
-   .view-projects. The time-scale zoom is meaningless for per-project totals, so
-   the projects view drops it along with the bar-only toggles. */
+/* view-scoped visibility: the three views (sessions, aloft line, per-project
+   hours) all key off one class on the section, so switching is a single class
+   flip. Sessions is the default and carries no class; the other two set
+   .view-line / .view-projects. The time-scale zoom is meaningless for
+   per-project totals, so the projects view drops it along with the
+   .sessions-only toggles. */
 #concurrency, #projects { display: none; }
 .timeline-section.view-line #timeline { display: none; }
 .timeline-section.view-line #concurrency { display: block; }
-.timeline-section.view-line .bar-only { display: none; }
+.timeline-section.view-line .sessions-only { display: none; }
 .timeline-section.view-projects #timeline { display: none; }
 .timeline-section.view-projects #projects { display: flex; }
-.timeline-section.view-projects .bar-only { display: none; }
+.timeline-section.view-projects .sessions-only { display: none; }
 .timeline-section.view-projects .zoom { display: none; }
 /* the zoom pill normally carries the footer's margin-right:auto (anchoring the
    switcher left); with it hidden here the switcher takes that role itself. */
