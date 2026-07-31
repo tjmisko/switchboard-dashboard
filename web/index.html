@@ -60,9 +60,11 @@
     <!-- Topline: the dominant agent-hours figure, top-left. -->
     <section class="topline" id="topline"></section>
 
-    <!-- Swimlanes (bars) OR the "agents aloft" concurrency line chart, toggled
-         by the footer view switcher. The section carries .view-line while the
-         line chart is active; CSS keys every view-dependent bit off that class. -->
+    <!-- Three views of the same window, toggled by the footer view switcher:
+         swimlanes (bars, the default), the "agents aloft" concurrency line
+         chart, and hours of work per project. The section carries .view-line or
+         .view-projects while those are active; CSS keys every view-dependent
+         bit off those classes. -->
     <section class="timeline-section" id="timeline-section">
       <div class="timeline-wrap" id="timeline-wrap">
         <svg id="timeline" role="img" aria-label="session swimlanes">
@@ -74,10 +76,11 @@
           </defs>
         </svg>
         <canvas id="concurrency" role="img" aria-label="number of agents working over time"></canvas>
+        <div id="projects" class="projects" aria-label="hours of work per project"></div>
         <div id="empty" class="empty" hidden>No activity for this window.</div>
       </div>
       <!-- line-view caption: legend + peak/avg readout, sitting under the plot
-           it describes (hidden in the bar view). -->
+           it describes (hidden in the bar and projects views). -->
       <div class="chart-caption" id="chart-caption">
         <div class="chart-legend">
           <span class="cl-item"><span class="cl-swatch inst"></span>instantaneous</span>
@@ -87,9 +90,11 @@
         <div class="chart-stats" id="chart-stats"></div>
       </div>
       <div class="chart-footer">
-        <div class="viewseg" role="group" aria-label="chart view">
+        <div class="viewseg" id="viewseg" role="group" aria-label="chart view">
+          <span class="viewseg-glider" id="viewseg-glider" aria-hidden="true"></span>
           <button id="view-bars" class="viewseg-btn" type="button" aria-pressed="true" title="session swimlanes">bars</button>
           <button id="view-line" class="viewseg-btn" type="button" aria-pressed="false" title="agents working over time">agents aloft</button>
+          <button id="view-projects" class="viewseg-btn" type="button" aria-pressed="false" title="hours of work per project">projects</button>
         </div>
         <div class="zoom" role="group" aria-label="horizontal time scale">
           <span class="zoom-cap">scale</span>

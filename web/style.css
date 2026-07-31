@@ -302,32 +302,65 @@ main { padding: 16px 18px 36px; }
 }
 .zoom-read:hover { border-color: var(--border); }
 
-/* view switcher: a two-segment pill (bars | agents aloft) at the LEFT of the
-   footer, mirroring the zoom pill's chrome. The pressed segment fills accent. */
+/* view switcher: a segmented "channel selector" at the LEFT of the footer.
+   A glider pill slides under the active segment — the same faint green fill +
+   hairline the aloft chart draws under its step line. Labels are mono microcaps
+   to match the page's caption language (SCALE / PEAK / CUMULATIVE TIME). app.js
+   measures the glider's geometry (the labels differ in width); CSS animates it
+   once .glider-ready is stamped, so the first paint doesn't slide in from 0. */
 .viewseg {
+  position: relative;
   margin-right: 10px;
   display: inline-flex;
+  padding: 3px;
   border: 1px solid var(--border-soft);
   border-radius: 999px;
-  overflow: hidden;
   background: var(--bg-elev);
 }
-.viewseg-btn {
-  border: 0; border-radius: 0;
-  background: transparent; color: var(--fg-muted);
-  font-size: 12px; padding: 6px 13px;
+.viewseg-glider {
+  position: absolute; top: 3px; bottom: 3px; left: 0; width: 0;
+  border-radius: 999px;
+  background: rgba(63, 185, 80, 0.13);
+  border: 1px solid rgba(63, 185, 80, 0.35);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  opacity: 0; /* hidden until app.js takes the first measurement */
 }
-.viewseg-btn:hover { color: var(--fg); border-color: transparent; }
-.viewseg-btn[aria-pressed="true"] { background: var(--accent); color: #fff; }
-.viewseg-btn[aria-pressed="true"]:hover { color: #fff; }
-.viewseg-btn + .viewseg-btn { border-left: 1px solid var(--border-soft); }
+.viewseg.glider-ready .viewseg-glider {
+  opacity: 1;
+  transition: transform 0.32s cubic-bezier(0.26, 1.36, 0.44, 1),
+              width 0.32s cubic-bezier(0.26, 1.36, 0.44, 1);
+}
+.viewseg-btn {
+  position: relative; z-index: 1;
+  border: 0; border-radius: 999px;
+  background: transparent; color: var(--fg-dim);
+  font-family: var(--mono); font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.6px;
+  padding: 5px 13px;
+  transition: color 0.18s ease;
+}
+.viewseg-btn:hover { color: var(--fg); }
+.viewseg-btn[aria-pressed="true"] { color: var(--fg); }
+@media (prefers-reduced-motion: reduce) {
+  .viewseg.glider-ready .viewseg-glider, .viewseg-btn { transition: none; }
+}
 
-/* view-scoped visibility: everything keys off .view-line on the section, so the
-   toggle is one class flip. Bars view is the default (no class). */
-#concurrency { display: none; }
+/* view-scoped visibility: the three views (bars, aloft line, per-project hours)
+   all key off one class on the section, so switching is a single class flip.
+   Bars is the default and carries no class; the other two set .view-line /
+   .view-projects. The time-scale zoom is meaningless for per-project totals, so
+   the projects view drops it along with the bar-only toggles. */
+#concurrency, #projects { display: none; }
 .timeline-section.view-line #timeline { display: none; }
 .timeline-section.view-line #concurrency { display: block; }
 .timeline-section.view-line .bar-only { display: none; }
+.timeline-section.view-projects #timeline { display: none; }
+.timeline-section.view-projects #projects { display: flex; }
+.timeline-section.view-projects .bar-only { display: none; }
+.timeline-section.view-projects .zoom { display: none; }
+/* the zoom pill normally carries the footer's margin-right:auto (anchoring the
+   switcher left); with it hidden here the switcher takes that role itself. */
+.timeline-section.view-projects .viewseg { margin-right: auto; }
 .timeline-section:not(.view-line) .line-only { display: none; }
 .timeline-section:not(.view-line) .chart-caption { display: none; }
 
@@ -363,6 +396,58 @@ main { padding: 16px 18px 36px; }
   text-align: center;
   color: var(--fg-dim);
   font-family: var(--mono);
+}
+
+/* ---------- projects view: hours of work per project ----------
+   One horizontal STACKED bar per project: a segment per contributing session in
+   lane-start (roughly temporal) order, so a bar reads as the project's day —
+   who worked, in what order, for how long. A single measure on a single hue
+   (the identity green, alternating depth so adjacent segments part) — no ramp
+   restating the bar's own length. The mono total at the row end means no value
+   is gated behind the bar. Rows are HTML, not SVG: the list is short and grows
+   with its content, so the plot area just gets taller. */
+.projects { flex-direction: column; gap: 6px; padding: 12px 16px; width: 100%; }
+.proj-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 220px) 1fr max-content;
+  align-items: center; gap: 12px;
+  padding: 3px 6px; border-radius: 6px;
+}
+/* rows lift on hover so they read as inspectable; the track steps up with them
+   so its unfilled remainder — the 100% reference — doesn't dissolve into the
+   lifted row background (both would otherwise be --bg-elev-2). */
+.proj-row:hover { background: var(--bg-elev-2); }
+.proj-row:hover .proj-track { background: var(--border); }
+.proj-name { font-size: 12px; color: var(--fg-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.proj-track {
+  height: 16px; border-radius: 4px; background: var(--bg-elev-2);
+  overflow: hidden; display: flex; gap: 2px;
+}
+.proj-seg {
+  flex: none; display: block; height: 100%; border-radius: 1px; min-width: 2px;
+  background: var(--c-working); opacity: 0.85;
+  transition: width 0.35s cubic-bezier(0.25, 1, 0.35, 1);
+}
+/* alternate depth so same-hue neighbors stay distinguishable past the 2px gap */
+.proj-seg:nth-child(even) { opacity: 0.55; }
+.proj-hours { font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--fg); }
+
+/* entry animation: app.js stamps .enter on the container when the view is
+   opened and strips it once the run finishes, so bars grow in on arrival while
+   a live refresh just glides the width transition above. --row-i staggers the
+   rows top-down and --seg-i walks each stack left to right, so a bar assembles
+   in the same temporal order its sessions ran. */
+@keyframes proj-grow { from { width: 0; } }
+.projects.enter .proj-seg {
+  animation: proj-grow 0.5s cubic-bezier(0.25, 1, 0.35, 1) backwards;
+  animation-delay: calc(var(--row-i) * 45ms + var(--seg-i) * 30ms);
+}
+
+.projects-empty { padding: 56px 20px; text-align: center; color: var(--fg-dim); font-family: var(--mono); }
+
+@media (prefers-reduced-motion: reduce) {
+  .proj-seg { transition: none; }
+  .projects.enter .proj-seg { animation: none; }
 }
 
 /* svg elements */

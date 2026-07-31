@@ -241,6 +241,7 @@ const el = {
   providerKey: document.getElementById("provider-key"),
   svg: document.getElementById("timeline"),
   canvas: document.getElementById("concurrency"),
+  projects: document.getElementById("projects"),
   wrap: document.getElementById("timeline-wrap"),
   section: document.getElementById("timeline-section"),
   chartCaption: document.getElementById("chart-caption"),
@@ -255,6 +256,9 @@ const el = {
   optSmooth: document.getElementById("opt-smooth"),
   viewBars: document.getElementById("view-bars"),
   viewLine: document.getElementById("view-line"),
+  viewProjects: document.getElementById("view-projects"),
+  viewseg: document.getElementById("viewseg"),
+  viewGlider: document.getElementById("viewseg-glider"),
   themeToggle: document.getElementById("theme-toggle"),
   zoomIn: document.getElementById("zoom-in"),
   zoomOut: document.getElementById("zoom-out"),
@@ -280,11 +284,15 @@ let fetchOK = false;
 let timelineTimer = null;
 let planTimer = null;
 
-// Which chart occupies the plot area: "bars" (the SVG swimlanes) or "line" (the
-// "agents aloft" concurrency canvas). Persisted so the choice survives reloads.
+// Which chart occupies the plot area: "bars" (the SVG swimlanes), "line" (the
+// "agents aloft" concurrency canvas) or "projects" (the agent-time-per-project
+// ranking). Persisted so the choice survives reloads.
 const VIEW_KEY = "sb-view";
 let currentView = (function () {
-  try { const v = localStorage.getItem(VIEW_KEY); if (v === "bars" || v === "line") return v; } catch (e) {}
+  try {
+    const v = localStorage.getItem(VIEW_KEY);
+    if (v === "bars" || v === "line" || v === "projects") return v;
+  } catch (e) {}
   return "bars";
 })();
 function smoothEnabled() { return !el.optSmooth || el.optSmooth.checked; }
@@ -477,27 +485,83 @@ function render(data) {
 }
 
 // renderChartArea draws whichever chart the view switcher selects into the plot
-// area. Both share the horizontal scale (zoom) and the scroll wrap, so toggling
-// keeps the time axis put. Called from render() and from every repaint trigger
-// (zoom, resize, theme, view/toggle change).
+// area. The bar and line views share the horizontal scale (zoom) and the scroll
+// wrap, so toggling between them keeps the time axis put; the projects view is
+// time-less (a ranking, not a timeline). Called from render() and from every
+// repaint trigger (zoom, resize, theme, view/toggle change).
 function renderChartArea(data) {
   if (currentView === "line") renderConcurrencyChart(data);
+  else if (currentView === "projects") renderProjectsChart(data);
   else renderTimeline(data);
 }
 
-// setView flips the plot between the bar swimlanes and the line chart. All
-// view-dependent visibility is CSS, keyed off .view-line on the section, so this
-// just toggles the class + the segmented control's pressed state, then repaints.
+// The projects view's grow-in is a CSS animation gated on .enter being present
+// on the container, so this arms its removal. The class must outlive the LAST
+// row's run, and style.css staggers each row's animation-delay by --row-i, so
+// the timer is sized to the rows on screen rather than a flat guess (a fixed
+// ~800ms would cut off row 7 onward, snapping those bars to full width).
+// Mirrors the .projects.enter .proj-fill rule in style.css.
+const PROJECTS_ANIM_MS = 500;        // CSS animation duration
+const PROJECTS_STAGGER_MS = 45;      // CSS per-row animation-delay step
+const PROJECTS_SEG_STAGGER_MS = 30;  // CSS per-segment step within a row
+let projectsEnterTimer = null;       // re-armed, never stacked, on repeated flips
+
+// startProjectsEnter replays the staggered grow-in. Call ONLY on entry to the
+// view — the ~3s live repaints must not restart it.
+function startProjectsEnter() {
+  el.projects.classList.add("enter");
+  if (projectsEnterTimer) clearTimeout(projectsEnterTimer);
+  // the last animation to finish is the last segment of the last row
+  let maxSegs = 0;
+  for (const row of el.projects.children) {
+    maxSegs = Math.max(maxSegs, row.querySelectorAll(".proj-seg").length);
+  }
+  const hold = PROJECTS_ANIM_MS
+    + el.projects.children.length * PROJECTS_STAGGER_MS
+    + maxSegs * PROJECTS_SEG_STAGGER_MS + 100;
+  projectsEnterTimer = setTimeout(() => {
+    projectsEnterTimer = null;
+    el.projects.classList.remove("enter");
+  }, hold);
+}
+
+// setView flips the plot between the bar swimlanes, the line chart and the
+// project ranking. All view-dependent visibility is CSS, keyed off .view-line /
+// .view-projects on the section, so this just toggles the classes + the
+// segmented control's pressed state, then repaints. The bars are the only view
+// that uses the shared #empty placeholder — the other two draw their own — and
+// renderTimeline un-hides it, so both non-bar views re-hide it on entry.
 function setView(view) {
-  if (view !== "bars" && view !== "line") view = "bars";
+  if (view !== "bars" && view !== "line" && view !== "projects") view = "bars";
+  const entering = view === "projects" && currentView !== "projects";
   currentView = view;
   try { localStorage.setItem(VIEW_KEY, view); } catch (e) {}
   el.section.classList.toggle("view-line", view === "line");
+  el.section.classList.toggle("view-projects", view === "projects");
   el.viewBars.setAttribute("aria-pressed", String(view === "bars"));
   el.viewLine.setAttribute("aria-pressed", String(view === "line"));
+  el.viewProjects.setAttribute("aria-pressed", String(view === "projects"));
+  positionViewGlider();
   hideTip();
-  if (view === "line") el.empty.hidden = true; // the line chart draws its own empty state
+  if (view !== "bars") el.empty.hidden = true; // line + projects draw their own empty state
   if (lastData) renderChartArea(lastData);
+  // Arm the grow-in only when the view is newly ENTERED (live re-renders must
+  // not restart it), and only after the render above, so the hold is sized to
+  // the rows that just landed. The animation starts when .enter is applied, so
+  // stamping it after the rows exist is what makes them all run together.
+  if (entering) startProjectsEnter();
+}
+
+// positionViewGlider slides the view switcher's green thumb under the active
+// segment. The segments differ in width, so geometry is measured, not styled;
+// clientLeft corrects for the container border (offsetLeft spans it, the
+// absolutely-positioned glider doesn't).
+function positionViewGlider() {
+  const btn = currentView === "line" ? el.viewLine
+    : currentView === "projects" ? el.viewProjects
+    : el.viewBars;
+  el.viewGlider.style.width = btn.offsetWidth + "px";
+  el.viewGlider.style.transform = "translateX(" + (btn.offsetLeft - el.viewseg.clientLeft) + "px)";
 }
 
 // renderTopline: two dominant figures framing AI's payoff.
@@ -1464,6 +1528,125 @@ function concurrencyTipHTML(h, t) {
 }
 
 // ---------------------------------------------------------------------------
+// render: project ranking (HTML bars)
+//
+// Where the day's agent time actually went, by project: model.js projectHoursMs
+// sums each project's agent-time (working intervals + subagent spans, already
+// sorted longest-first with zero-work projects dropped) and each row's bar is
+// scaled against the top project. Unlike the other two views this one is
+// time-less — a ranking, not a timeline — so it ignores the zoom/scroll scale.
+// Plain HTML + CSS vars (no canvas), so it restyles itself on a theme flip.
+// ---------------------------------------------------------------------------
+
+// lastProjectKeys: one structural key per drawn row (project + its parts'
+// labels in order). It decides the in-place update path below; null means "no
+// comparable rows" (nothing drawn yet, or the empty state is showing).
+let lastProjectKeys = null;
+
+// projectRowKey captures everything the in-place path can NOT change: the
+// project and its stack's membership/order. Part widths and totals move freely.
+function projectRowKey(entry) {
+  return [entry.project].concat(entry.parts.map((p) => p.label)).join("");
+}
+
+// sameProjectRows reports whether the freshly computed ranking has the same
+// rows AND the same per-row session stacks as what's drawn. The child count is
+// checked too, so any DOM desync (e.g. the empty state took over) falls back to
+// a rebuild.
+function sameProjectRows(keys) {
+  if (!lastProjectKeys || lastProjectKeys.length !== keys.length) return false;
+  if (el.projects.children.length !== keys.length) return false;
+  return keys.every((k, i) => lastProjectKeys[i] === k);
+}
+
+function renderProjectsChart(data) {
+  const rows = projectHoursMs(renderableLanes(data.lanes));
+  el.empty.hidden = true; // this view draws its own empty state
+
+  if (!rows.length) {
+    lastProjectKeys = null;
+    el.projects.innerHTML = `<div class="projects-empty">No agent work for this window.</div>`;
+    return;
+  }
+
+  // rows are sorted ms-descending, so the leader sets the 100% width; each
+  // session segment takes its share of the row's stack at the same scale.
+  const maxMs = rows[0].ms || 0;
+  const widthPct = (ms) => (maxMs > 0 ? (ms / maxMs) * 100 : 0).toFixed(2) + "%";
+  const keys = rows.map(projectRowKey);
+
+  // In-place update when the ranking's membership, order, and stacks are all
+  // unchanged: only segment widths and the duration text move, so the CSS width
+  // transition glides the ~3s live refreshes instead of the rows being torn
+  // down and rebuilt (a rebuild would snap the bars and re-run the grow-in
+  // every poll). A session joining/leaving/renaming changes a row's key and
+  // falls through to the rebuild.
+  if (sameProjectRows(keys)) {
+    rows.forEach((entry, i) => {
+      const row = el.projects.children[i];
+      row._entry = entry; // the retained hover listeners read this, so keep it live
+      const segs = row.querySelectorAll(".proj-seg");
+      entry.parts.forEach((part, j) => {
+        segs[j]._part = part;
+        segs[j].style.width = widthPct(part.ms);
+      });
+      row.querySelector(".proj-hours").textContent = humanDurationCoarseMs(entry.ms);
+    });
+    return;
+  }
+
+  el.projects.innerHTML = "";
+  rows.forEach((entry, i) => {
+    const row = document.createElement("div");
+    row.className = "proj-row";
+    row.style.setProperty("--row-i", String(i)); // stagger key for the grow-in
+    row.innerHTML =
+        `<span class="proj-name">${escapeHTML(entry.project)}</span>`
+      + `<span class="proj-track"></span>`
+      + `<span class="proj-hours">${escapeHTML(humanDurationCoarseMs(entry.ms))}</span>`;
+    // one segment per session, in the model's lane-start (temporal) order; the
+    // hover readouts read seg._part / row._entry (not closed-over values) so an
+    // in-place update shows refreshed figures without re-wiring listeners.
+    const track = row.querySelector(".proj-track");
+    entry.parts.forEach((part, j) => {
+      const seg = document.createElement("span");
+      seg.className = "proj-seg";
+      seg.style.width = widthPct(part.ms);
+      seg.style.setProperty("--seg-i", String(j)); // stagger key within the row
+      seg._part = part;
+      seg.addEventListener("mousemove", (ev) => {
+        ev.stopPropagation(); // the segment's readout wins over the row's
+        showTip(projectSegTipHTML(row._entry, seg._part), ev);
+      });
+      seg.addEventListener("mouseleave", hideTip);
+      track.appendChild(seg);
+    });
+    row._entry = entry;
+    row.addEventListener("mousemove", (ev) => showTip(projectTipHTML(row._entry), ev));
+    row.addEventListener("mouseleave", hideTip);
+    el.projects.appendChild(row);
+  });
+  lastProjectKeys = keys;
+}
+
+// projectTipHTML: hover readout for one project row — the exact (to-the-second)
+// duration the coarse row label rounds away, plus the session count behind it.
+function projectTipHTML(entry) {
+  const n = entry.sessions || 0;
+  return `<div class="t-status" style="color:var(--c-working)">${escapeHTML(entry.project)}</div>`
+    + `<div class="t-row">${humanDurationMs(entry.ms)} of agent time</div>`
+    + `<div class="t-row">${n} session${n === 1 ? "" : "s"}</div>`;
+}
+
+// projectSegTipHTML: hover readout for one session's segment of the stack —
+// the session's name and share, framed against its project's total.
+function projectSegTipHTML(entry, part) {
+  return `<div class="t-status" style="color:var(--c-working)">${escapeHTML(part.label)}</div>`
+    + `<div class="t-row">${humanDurationMs(part.ms)} of agent time</div>`
+    + `<div class="t-row">${escapeHTML(entry.project)} · ${humanDurationCoarseMs(entry.ms)} total</div>`;
+}
+
+// ---------------------------------------------------------------------------
 // tooltip HTML builders
 // ---------------------------------------------------------------------------
 
@@ -1912,10 +2095,10 @@ function reloadNow() { hidePopout(); loadTimeline(); }
 function applyUrlParams() {
   const q = new URLSearchParams(window.location.search);
   el.day.value = q.get("day") || todayLocal();
-  // ?view=bars|line deep-links the chart view (URL wins over the persisted
-  // choice for this load, mirroring how ?day overrides the default day).
+  // ?view=bars|line|projects deep-links the chart view (URL wins over the
+  // persisted choice for this load, mirroring how ?day overrides the default day).
   const v = q.get("view");
-  if (v === "bars" || v === "line") currentView = v;
+  if (v === "bars" || v === "line" || v === "projects") currentView = v;
   syncDayDisplay();
 }
 
@@ -1989,12 +2172,18 @@ function init() {
   el.optFocus.addEventListener("change", () => { if (lastData) renderTimeline(lastData); });
   el.optSmooth.addEventListener("change", () => { if (lastData && currentView === "line") renderConcurrencyChart(lastData); });
 
-  // view switcher: bars ↔ agents-aloft line chart
+  // view switcher: bars ↔ agents-aloft line chart ↔ project ranking
   el.viewBars.addEventListener("click", () => setView("bars"));
   el.viewLine.addEventListener("click", () => setView("line"));
+  el.viewProjects.addEventListener("click", () => setView("projects"));
   el.section.classList.toggle("view-line", currentView === "line");
+  el.section.classList.toggle("view-projects", currentView === "projects");
   el.viewBars.setAttribute("aria-pressed", String(currentView === "bars"));
   el.viewLine.setAttribute("aria-pressed", String(currentView === "line"));
+  el.viewProjects.setAttribute("aria-pressed", String(currentView === "projects"));
+  // seat the glider without motion, then arm its transitions for real flips
+  positionViewGlider();
+  requestAnimationFrame(() => el.viewseg.classList.add("glider-ready"));
 
   // horizontal-scale zoom: step the px/hour density, reset to the built-in default
   el.zoomIn.addEventListener("click", () => setZoom(pxPerHour * ZOOM_FACTOR));
