@@ -69,6 +69,7 @@ go build -o switchboard-dashboard .
 | `--ctl`       | `switchboard-ctl`             | The `switchboard-ctl` binary for the default Claude provider.            |
 | `--dir`       | `""`                          | History dir passed to ctl; empty uses ctl's own.                         |
 | `--plan`      | `/tmp/claude-plan-usage.json` | Cached plan-usage file, read-only, for the gauge.                        |
+| `--summaries` | `~/.local/share/switchboard/summaries` | Session-summary records from `session-digest`; empty disables.  |
 | `--providers` | `""`                          | Providers config JSON; when set, merges the listed adapters (see below). |
 
 ## Data providers (adapters)
@@ -148,6 +149,11 @@ summarizer's own `claude -p` transcripts are excluded from scanning. To keep the
 archive current automatically, wire `scripts/session-summary-hook` into a
 `SessionEnd` hook in `~/.claude/settings.json` (instructions in the script).
 
+The dashboard serves the archive at `/api/summaries` (see `--summaries`) and
+surfaces it on the timeline: hovering a session's name band shows the generated
+one-line description, and clicking pins a card with the full name / description
+/ narrative — the same interaction subagent sub-bars already have.
+
 ## HTTP API
 
 - **`GET /api/timeline`** — with one provider, proxies its `timeline --json`,
@@ -155,6 +161,9 @@ archive current automatically, wire `scripts/session-summary-hook` into a
   (or `502 {error, stderr}` on non-zero exit). With `--providers`, fetches every
   adapter in parallel and returns the merged envelope; per-provider failures land
   in `provider_errors` and only an all-failed request is a `502`.
+- **`GET /api/summaries`** — returns `{sessions: {<session_id>: {name,
+  description, summary, generated_at}}}` from the `--summaries` store, omitting
+  digest-only records. Always `200`; a missing store yields an empty set.
 - **`GET /api/plan`** — returns a normalized, read-only view of the cached
   plan-usage file for the cost gauge:
   `{available, mtime, age_seconds, stale, five_hour, seven_day, seven_day_opus}`.

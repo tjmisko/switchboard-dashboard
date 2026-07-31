@@ -505,7 +505,9 @@ main { padding: 16px 18px 36px; }
 /* name-span band: each /name slug labels the stretch it was active, drawn just
    above the session's status bar. The leading pre-/name stretch (".lead") is
    dimmer/italic so it reads as a project fallback rather than a chosen name. */
-.name-seg { fill: rgba(88, 166, 255, 0.13); cursor: default; }
+/* pointer signals the click-to-pin summary card (a no-op for sessions the
+   summarizer hasn't reached yet — the tooltip only advertises it when real) */
+.name-seg { fill: rgba(88, 166, 255, 0.13); cursor: pointer; }
 .name-seg:hover { fill: rgba(88, 166, 255, 0.24); }
 .name-seg.lead { fill: rgba(110, 118, 129, 0.10); }
 .name-seg.lead:hover { fill: rgba(110, 118, 129, 0.18); }
@@ -718,6 +720,8 @@ main { padding: 16px 18px 36px; }
 .popout .po-row { color: var(--fg-muted); margin-top: 6px; font-family: var(--mono); font-size: 12px; }
 .popout .po-row b { color: var(--fg); }
 .popout .po-id { color: var(--fg-dim); margin-top: 8px; font-family: var(--mono); font-size: 11px; word-break: break-all; }
+/* the archival session narrative (session-digest summary) — body copy, not mono */
+.popout .po-summary { color: var(--fg-muted); margin-top: 8px; line-height: 1.5; font-size: 12.5px; }
 
 /* ---------- footer ---------- */
 .footer {
