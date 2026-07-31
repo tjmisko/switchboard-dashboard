@@ -449,3 +449,78 @@ func mustContainPair(t *testing.T, args []string, flag, val string) {
 	}
 	t.Fatalf("expected argv to contain %q %q, got %v", flag, val, args)
 }
+
+// writeSummaryRecord drops a session-digest record file under
+// dir/<slug>/<id>.json with the given summary JSON fragment ("" for a
+// digest-only record).
+func writeSummaryRecord(t *testing.T, dir, slug, id, summaryJSON string) {
+	t.Helper()
+	slugDir := filepath.Join(dir, slug)
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"digest":{"sessionId":"` + id + `"}`
+	if summaryJSON != "" {
+		body += `,"summary":` + summaryJSON + `,"generatedAt":"2026-07-31T22:00:00Z"`
+	}
+	body += `}`
+	if err := os.WriteFile(filepath.Join(slugDir, id+".json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSummariesShouldServeGeneratedRecordsAndOmitDigestOnlyOnes(t *testing.T) {
+	dir := t.TempDir()
+	writeSummaryRecord(t, dir, "-home-u-proj", "sess-summarized",
+		`{"name":"fix-flaky-test","description":"Fixed the flaky auth test","summary":"The session fixed a race."}`)
+	writeSummaryRecord(t, dir, "-home-u-proj", "sess-digest-only", "")
+
+	srv := &Server{SummariesDir: dir}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/summaries", nil)
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var resp struct {
+		Sessions map[string]struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+			Summary     string `json:"summary"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Sessions) != 1 {
+		t.Fatalf("sessions = %v, want only the summarized one", resp.Sessions)
+	}
+	got, ok := resp.Sessions["sess-summarized"]
+	if !ok {
+		t.Fatalf("missing sess-summarized in %v", resp.Sessions)
+	}
+	if got.Name != "fix-flaky-test" || got.Description != "Fixed the flaky auth test" {
+		t.Errorf("entry = %+v, want summary fields verbatim", got)
+	}
+}
+
+func TestSummariesShouldServeEmptySetWhenStoreMissing(t *testing.T) {
+	srv := &Server{SummariesDir: filepath.Join(t.TempDir(), "nonexistent")}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/summaries", nil)
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for a missing store", rec.Code)
+	}
+	var resp struct {
+		Sessions map[string]any `json:"sessions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Sessions) != 0 {
+		t.Fatalf("sessions = %v, want empty", resp.Sessions)
+	}
+}

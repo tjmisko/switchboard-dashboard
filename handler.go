@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -37,6 +38,10 @@ type Server struct {
 	Ctl      string // path or name of switchboard-ctl for the default claude provider
 	Dir      string // default history dir for the default claude provider; "" lets ctl default
 	PlanPath string // cached OAuth plan-usage file; "" uses DefaultPlanPath
+	// SummariesDir is the session-summary record store written by
+	// cmd/session-digest (<dir>/<project-slug>/<session-id>.json); "" disables
+	// the /api/summaries endpoint (it serves an empty set).
+	SummariesDir string
 	// Providers, when non-empty, replaces the default single-claude provider with
 	// an explicit adapter set whose envelopes are merged into one unified view.
 	Providers []provider.Provider
@@ -65,6 +70,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/timeline", s.handleTimeline)
 	mux.HandleFunc("/api/plan", s.handlePlan)
+	mux.HandleFunc("/api/summaries", s.handleSummaries)
 	mux.Handle("/", s.staticHandler())
 	return mux
 }
@@ -302,4 +308,90 @@ func (s *Server) handlePlan(w http.ResponseWriter, r *http.Request) {
 	resp := readPlan(s.planPath(), time.Now())
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// summaryEntry is the per-session slice of a session-digest record the UI
+// needs for hover enrichment: the generated identity, not the full digest.
+type summaryEntry struct {
+	Name        string `json:"name,omitempty"`
+	Description string `json:"description"`
+	Summary     string `json:"summary,omitempty"`
+	GeneratedAt string `json:"generated_at,omitempty"`
+}
+
+// summariesResponse maps session id → generated summary. Sessions without a
+// generated summary (digest-only records) are omitted — the UI already shows
+// digest-level identity from the timeline itself.
+type summariesResponse struct {
+	Sessions map[string]summaryEntry `json:"sessions"`
+}
+
+// summaryRecord is the subset of cmd/session-digest's Record this endpoint
+// reads back from disk.
+type summaryRecord struct {
+	Digest struct {
+		SessionID string `json:"sessionId"`
+	} `json:"digest"`
+	Summary *struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Summary     string `json:"summary"`
+	} `json:"summary"`
+	GeneratedAt string `json:"generatedAt"`
+}
+
+// readSummaries walks dir (<project-slug>/<session-id>.json, as written by
+// cmd/session-digest) and collects the generated summaries by session id. A
+// missing or empty dir yields an empty map; malformed records are skipped —
+// the endpoint is best-effort enrichment, never an error surface.
+func readSummaries(dir string) map[string]summaryEntry {
+	out := map[string]summaryEntry{}
+	if dir == "" {
+		return out
+	}
+	slugs, err := os.ReadDir(dir)
+	if err != nil {
+		return out
+	}
+	for _, slug := range slugs {
+		if !slug.IsDir() {
+			continue
+		}
+		slugDir := filepath.Join(dir, slug.Name())
+		files, err := os.ReadDir(slugDir)
+		if err != nil {
+			continue
+		}
+		for _, f := range files {
+			if f.IsDir() || !strings.HasSuffix(f.Name(), ".json") {
+				continue
+			}
+			raw, err := os.ReadFile(filepath.Join(slugDir, f.Name()))
+			if err != nil {
+				continue
+			}
+			var rec summaryRecord
+			if json.Unmarshal(raw, &rec) != nil || rec.Summary == nil || rec.Summary.Description == "" {
+				continue
+			}
+			id := rec.Digest.SessionID
+			if id == "" {
+				id = strings.TrimSuffix(f.Name(), ".json")
+			}
+			out[id] = summaryEntry{
+				Name:        rec.Summary.Name,
+				Description: rec.Summary.Description,
+				Summary:     rec.Summary.Summary,
+				GeneratedAt: rec.GeneratedAt,
+			}
+		}
+	}
+	return out
+}
+
+// handleSummaries serves the session-summary map. Always 200 JSON; an absent
+// store is the expected pre-backfill state and yields an empty set.
+func (s *Server) handleSummaries(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(summariesResponse{Sessions: readSummaries(s.SummariesDir)})
 }
