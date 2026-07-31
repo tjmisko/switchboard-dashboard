@@ -1,9 +1,9 @@
 # switchboard-dashboard
 
 A self-contained web activity monitor for the
-[switchboard](https://github.com/tjmisko/switchboard) session timeline. It reads
+[Switchboard](https://github.com/tjmisko/switchboard) session timeline. It reads
 the timeline through the stable `switchboard-ctl timeline --json` contract, which
-keeps it decoupled from switchboard's on-disk history format, and renders a live
+keeps it decoupled from Switchboard's on-disk history format, and renders a live
 swimlane view with attention, operator, and cost summaries.
 
 The entire UI (HTML, CSS, JS) is embedded into one Go binary via `go:embed`. It
@@ -45,7 +45,7 @@ go build -o switchboard-dashboard .
 ```
 
 It requires a current `switchboard-ctl` on `PATH` (with the `timeline` subcommand
-and the v2 fields) and history recording enabled in switchboard
+and the v2 fields) and history recording enabled in Switchboard
 (`~/.config/switchboard/history.json` set to `{"enabled":true,"detail":"full"}`).
 Use `--ctl` to point at a specific binary and `--dir` for a non-default history
 directory.
@@ -53,7 +53,7 @@ directory.
 ### Run against the bundled fixture
 
 `testdata/` ships a synthetic v2 timeline and a stub `ctl`, so the full UI runs
-with no switchboard install:
+with no Switchboard install:
 
 ```sh
 go build -o switchboard-dashboard .
@@ -130,7 +130,7 @@ its lifetime (unattended auto mode), with subagent sub-bars layered on top.
 
 ## Data contract
 
-The JSON shape and units are owned by switchboard (`docs/history-schema.md`):
+The JSON shape and units are owned by Switchboard (`docs/history-schema.md`):
 
 - **Durations are nanoseconds**, **token fields are raw counts**, and **`cost_usd`
   is a float in dollars** recomputed by the producer from tokens × per-model price.
@@ -153,7 +153,7 @@ go vet ./...
 The render model — identity keying, name spans, and row packing — lives in
 `web/model.js` as DOM-free pure functions covered by `web/model.test.js`. The Go
 tests inject a stub `ctl` and temporary plan files, so they need no real
-switchboard install.
+Switchboard install.
 
 The provider layer lives under `internal/`: `internal/timeline` (the envelope
 types + `Merge`), `internal/provider` (the `Provider` interface, subprocess

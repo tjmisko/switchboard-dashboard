@@ -1,5 +1,5 @@
 // Command arachne-switchboard-ctl compiles the recorder's append-only history
-// into a switchboard timeline envelope. It implements the same consumer contract
+// into a Switchboard timeline envelope. It implements the same consumer contract
 // as switchboard-ctl — `arachne-switchboard-ctl timeline --json [--dir D]
 // [--day D] [--since S] [--until U]` prints an envelope on stdout — so the
 // dashboard plugs it in as just another provider.

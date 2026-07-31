@@ -14,7 +14,7 @@
 //     "lead" segment covering the pre-/name stretch (labeled by project_full,
 //     else project, else the first raw labels[] entry, else unlabeled).
 //
-// Contract reminders (see switchboard docs/history-schema.md):
+// Contract reminders (see Switchboard docs/history-schema.md):
 //   - names[] is slug-only span history: [{label,start,end}, …] in order,
 //     empty/absent until the first /name. Spans need not start at lane.start.
 //   - labels[] is the full raw name history (incl. the "Claude Code" default

@@ -1,5 +1,5 @@
 // Package timeline defines the normalized "timeline envelope" that every
-// switchboard data provider emits and the dashboard renders. The envelope is the
+// Switchboard data provider emits and the dashboard renders. The envelope is the
 // stable adapter contract: a provider observes some source (Claude Code history,
 // Arachne docker sessions, …) and turns it into this shape. The frontend knows
 // only this contract, so any source that can produce a valid envelope plugs in

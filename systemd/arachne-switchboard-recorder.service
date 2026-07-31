@@ -1,5 +1,5 @@
 [Unit]
-Description=Arachne switchboard recorder — polls docker for Arachne agent sessions
+Description=Arachne Switchboard recorder — polls docker for Arachne agent sessions
 # The recorder needs the docker daemon; Arachne agents run as docker containers.
 # It writes an append-only history the dashboard's arachne provider compiles.
 After=graphical-session.target docker.service

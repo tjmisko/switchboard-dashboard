@@ -1,5 +1,5 @@
 // Command switchboard-dashboard serves a small web UI over the activity
-// timeline produced by switchboard. It shells out to `switchboard-ctl timeline
+// timeline produced by Switchboard. It shells out to `switchboard-ctl timeline
 // --json` (the stable consumer contract) and renders the result; it never reads
 // history files directly.
 package main

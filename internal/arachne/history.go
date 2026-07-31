@@ -1,4 +1,4 @@
-// Package arachne implements a switchboard data provider for Arachne's
+// Package arachne implements a Switchboard data provider for Arachne's
 // docker-based long-running agent sessions.
 //
 // Arachne keeps no session history of its own: each agent is a `docker run --rm`

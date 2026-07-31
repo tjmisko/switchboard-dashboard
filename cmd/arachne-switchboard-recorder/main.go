@@ -1,5 +1,5 @@
 // Command arachne-switchboard-recorder is the standalone daemon that gives the
-// switchboard dashboard visibility into Arachne's docker-based long-running
+// Switchboard dashboard visibility into Arachne's docker-based long-running
 // sessions. Arachne containers run with `--rm` and set no labels, so once one
 // exits Docker forgets it entirely. This daemon polls `docker ps` on an interval,
 // inspects each arachne-agent-* container for its session metadata, tails the

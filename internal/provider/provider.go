@@ -1,4 +1,4 @@
-// Package provider defines the switchboard data-provider adapter: anything that
+// Package provider defines the Switchboard data-provider adapter: anything that
 // can emit a timeline envelope for a requested window is a Provider. The Claude
 // path (switchboard-ctl) and the Arachne path (arachne-ctl) are both realized as
 // SubprocessProviders — external binaries that print an envelope on stdout — so
