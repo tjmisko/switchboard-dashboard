@@ -1375,9 +1375,13 @@ function renderConcurrencyChart(data) {
     ctx.moveTo(CGEO.LEFT, plotBottom + 0.5); ctx.lineTo(CGEO.LEFT + plotW, plotBottom + 0.5);
     ctx.stroke();
 
-    // instantaneous step: faint filled area, then the step line on top
-    const stepPath = () => {
-      ctx.moveTo(X(pts[0].t), Y(pts[0].n));
+    // instantaneous step: faint filled area, then the step line on top.
+    // continueSubpath joins the steps onto an in-progress path with lineTo (a
+    // moveTo would orphan the fill's baseline anchor into its own subpath and
+    // closePath would then cut a diagonal back to the first level).
+    const stepPath = (continueSubpath) => {
+      const x0 = X(pts[0].t), y0 = Y(pts[0].n);
+      if (continueSubpath) ctx.lineTo(x0, y0); else ctx.moveTo(x0, y0);
       for (let k = 1; k < pts.length; k++) {
         const xx = X(pts[k].t);
         ctx.lineTo(xx, Y(pts[k - 1].n)); // hold previous level across the segment
@@ -1386,7 +1390,7 @@ function renderConcurrencyChart(data) {
     };
     ctx.beginPath();
     ctx.moveTo(X(pts[0].t), Y(0));
-    stepPath();
+    stepPath(true);
     ctx.lineTo(X(pts[pts.length - 1].t), Y(0));
     ctx.closePath();
     ctx.globalAlpha = 0.12; ctx.fillStyle = C.inst; ctx.fill(); ctx.globalAlpha = 1;
