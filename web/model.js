@@ -260,8 +260,74 @@
     };
   }
 
+  // sessionPartLabel names one session inside a project's stacked bar: the most
+  // recent names[] slug (what the session is called NOW), else leadLabel's
+  // fallbacks, else "session". Private to projectHoursMs.
+  function sessionPartLabel(lane) {
+    const names = (lane && lane.names) || [];
+    for (let i = names.length - 1; i >= 0; i--) {
+      if (names[i] && names[i].label) return names[i].label;
+    }
+    return leadLabel(lane) || "session";
+  }
+
+  // projectHoursMs totals AGENT-TIME per project:
+  //   [{project, ms, sessions, parts}] sorted by ms descending, ties broken by
+  //   project name ascending.
+  //
+  // A lane's contribution is the sum of its 'working' interval durations plus the
+  // sum of its subagent span durations — the same aloft spans workIntervalsMs
+  // collects, and with the same hygiene (unparseable or end <= start is dropped).
+  // Overlapping spans within a project SUM rather than union: two agents working
+  // the same wall-clock minute is two agent-minutes, which is exactly the fanout
+  // this chart is meant to show.
+  //
+  // parts breaks the total down per contributing SESSION for stacked rendering:
+  // [{label, ms, startMs}] ordered by lane start (roughly temporal; unparseable
+  // starts carry startMs null and sort last, ties by label). label comes from
+  // sessionPartLabel above; sessions === parts.length.
+  //
+  // Grouping is by project_full (the pretty name) else project else "(no
+  // project)" — deliberately NOT leadLabel, whose labels[] fallback would leak
+  // per-session titles in as if they were projects. A lane that did no work
+  // contributes no part, and a project with no work at all is dropped. Pure and
+  // DOM-free; tolerant of an absent lanes array.
+  function projectHoursMs(lanes) {
+    const totals = new Map(); // project -> {ms, parts}
+    for (const lane of lanes || []) {
+      let laneMs = 0;
+      for (const iv of lane.intervals || []) {
+        if (iv.status !== "working") continue;
+        const s = Date.parse(iv.start), e = Date.parse(iv.end);
+        if (isFinite(s) && isFinite(e) && e > s) laneMs += e - s;
+      }
+      for (const sa of lane.subagents || []) {
+        const s = Date.parse(sa.start), e = Date.parse(sa.end);
+        if (isFinite(s) && isFinite(e) && e > s) laneMs += e - s;
+      }
+      if (laneMs <= 0) continue;
+      const project = lane.project_full || lane.project || "(no project)";
+      const start = Date.parse(lane.start);
+      const acc = totals.get(project) || { ms: 0, parts: [] };
+      acc.ms += laneMs;
+      acc.parts.push({ label: sessionPartLabel(lane), ms: laneMs, startMs: isFinite(start) ? start : null });
+      totals.set(project, acc);
+    }
+    return [...totals]
+      .map(([project, acc]) => ({
+        project, ms: acc.ms, sessions: acc.parts.length,
+        parts: acc.parts.sort((a, b) => {
+          const as = a.startMs == null ? Infinity : a.startMs;
+          const bs = b.startMs == null ? Infinity : b.startMs;
+          return as - bs || a.label.localeCompare(b.label);
+        }),
+      }))
+      .sort((a, b) => b.ms - a.ms || a.project.localeCompare(b.project));
+  }
+
   return {
     laneIdentity, leadLabel, nameSegments, buildBar, buildBars,
     spanInefficiency, switchArrivals, packLanes, workIntervalsMs, concurrencyProfile,
+    projectHoursMs,
   };
 });

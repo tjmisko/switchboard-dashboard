@@ -9,7 +9,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   laneIdentity, leadLabel, nameSegments, buildBars, spanInefficiency, switchArrivals, packLanes,
-  workIntervalsMs, concurrencyProfile,
+  workIntervalsMs, concurrencyProfile, projectHoursMs,
 } = require("./model.js");
 
 // ms helper: a fixed base instant + offset minutes, as RFC3339 with offset.
@@ -352,4 +352,186 @@ test("concurrencyProfile merges simultaneous starts into one point at the shared
   assert.equal(prof.maxN, 3);
   assert.equal(prof.points[0].t, ms(0));
   assert.equal(prof.points[0].n, 3, "coincident starts collapse to one +3 step");
+});
+
+// ---------------------------------------------------------------------------
+// projectHoursMs: agent-time totalled per project
+// ---------------------------------------------------------------------------
+
+// subagent helper: a {start,end} subagent span in epoch-ms bounds.
+function subagent(fromMs, toMs) {
+  return { start: new Date(fromMs).toISOString(), end: new Date(toMs).toISOString() };
+}
+const MIN = 60000;
+
+// totals strips the per-session parts, leaving the {project, ms, sessions}
+// rollup — most cases here assert on the rollup; parts get their own tests.
+function totals(rows) {
+  return rows.map(({ project, ms, sessions }) => ({ project, ms, sessions }));
+}
+
+test("projectHoursMs groups by project_full, falling back to project then '(no project)'", () => {
+  const lanes = [
+    { project_full: "Switchboard", project: "sb", intervals: [interval("working", ms(0), ms(30))] },
+    { project: "sspi", intervals: [interval("working", ms(0), ms(20))] },
+    { intervals: [interval("working", ms(0), ms(10))] },
+  ];
+  assert.deepEqual(totals(projectHoursMs(lanes)), [
+    { project: "Switchboard", ms: 30 * MIN, sessions: 1 },
+    { project: "sspi", ms: 20 * MIN, sessions: 1 },
+    { project: "(no project)", ms: 10 * MIN, sessions: 1 },
+  ]);
+});
+
+test("projectHoursMs merges lanes that share a project and counts them as sessions", () => {
+  const lanes = [
+    { project_full: "Switchboard", intervals: [interval("working", ms(0), ms(30))] },
+    { project_full: "Switchboard", intervals: [interval("working", ms(40), ms(50))] },
+  ];
+  assert.deepEqual(totals(projectHoursMs(lanes)), [
+    { project: "Switchboard", ms: 40 * MIN, sessions: 2 },
+  ]);
+});
+
+test("projectHoursMs adds subagent spans to the lane's project total", () => {
+  // 10 min of parent work + two subagent spans (15 + 8 min) = 33 agent-min.
+  const lanes = [{
+    project: "sb",
+    intervals: [interval("working", ms(0), ms(10)), interval("dormant", ms(10), ms(30))],
+    subagents: [subagent(ms(10), ms(25)), subagent(ms(12), ms(20))],
+  }];
+  assert.deepEqual(totals(projectHoursMs(lanes)), [{ project: "sb", ms: 33 * MIN, sessions: 1 }]);
+});
+
+test("projectHoursMs counts only 'working' intervals, not idle/permission/dormant/suspended", () => {
+  const lanes = [{
+    project: "sb",
+    intervals: [
+      interval("working", ms(0), ms(10)),
+      interval("idle", ms(10), ms(20)),
+      interval("permission", ms(20), ms(30)),
+      interval("dormant", ms(30), ms(40)),
+      interval("suspended", ms(40), ms(50)),
+      interval("working", ms(50), ms(55)),
+    ],
+  }];
+  assert.deepEqual(totals(projectHoursMs(lanes)), [{ project: "sb", ms: 15 * MIN, sessions: 1 }]);
+});
+
+test("projectHoursMs sums overlapping work as agent-time rather than unioning it", () => {
+  // Two lanes on the same project working the same wall-clock 10 min: the point
+  // of fanout is that this is 20 agent-min, not 10.
+  const lanes = [
+    { project: "sb", intervals: [interval("working", ms(0), ms(10))] },
+    { project: "sb", intervals: [interval("working", ms(0), ms(10))] },
+  ];
+  assert.deepEqual(totals(projectHoursMs(lanes)), [{ project: "sb", ms: 20 * MIN, sessions: 2 }]);
+});
+
+test("projectHoursMs sums overlapping spans within a single lane too", () => {
+  // A parent working while its own subagent runs is two concurrent work streams.
+  const lanes = [{
+    project: "sb",
+    intervals: [interval("working", ms(0), ms(10)), interval("working", ms(5), ms(15))],
+    subagents: [subagent(ms(0), ms(10))],
+  }];
+  assert.deepEqual(totals(projectHoursMs(lanes)), [{ project: "sb", ms: 30 * MIN, sessions: 1 }]);
+});
+
+test("projectHoursMs sorts by ms descending, breaking ties by project name ascending", () => {
+  const lanes = [
+    { project: "zeta", intervals: [interval("working", ms(0), ms(10))] },
+    { project: "alpha", intervals: [interval("working", ms(0), ms(10))] },
+    { project: "middle", intervals: [interval("working", ms(0), ms(50))] },
+  ];
+  assert.deepEqual(
+    projectHoursMs(lanes).map((p) => p.project),
+    ["middle", "alpha", "zeta"],
+    "biggest first; the two equal totals fall back to name order",
+  );
+});
+
+test("projectHoursMs drops projects whose lanes did no work at all", () => {
+  const lanes = [
+    { project: "sb", intervals: [interval("working", ms(0), ms(10))] },
+    { project: "idle-only", intervals: [interval("idle", ms(0), ms(60))] },
+    { project: "empty", intervals: [], subagents: [] },
+  ];
+  assert.deepEqual(totals(projectHoursMs(lanes)), [{ project: "sb", ms: 10 * MIN, sessions: 1 }]);
+});
+
+test("projectHoursMs counts only lanes that contributed time toward sessions", () => {
+  const lanes = [
+    { project: "sb", intervals: [interval("working", ms(0), ms(10))] },
+    { project: "sb", intervals: [interval("idle", ms(0), ms(60))] },  // no work -> not a session
+    { project: "sb", intervals: [interval("working", ms(20), ms(25))] },
+  ];
+  assert.deepEqual(totals(projectHoursMs(lanes)), [{ project: "sb", ms: 15 * MIN, sessions: 2 }]);
+});
+
+test("projectHoursMs ignores unparseable timestamps and non-positive spans", () => {
+  const lanes = [{
+    project: "sb",
+    intervals: [
+      { status: "working", start: "nope", end: "nah" },
+      interval("working", ms(10), ms(10)),  // zero length
+      interval("working", ms(30), ms(20)),  // end before start
+      interval("working", ms(0), ms(10)),
+    ],
+    subagents: [{ start: "nope", end: "nah" }, subagent(ms(40), ms(40))],
+  }];
+  assert.deepEqual(totals(projectHoursMs(lanes)), [{ project: "sb", ms: 10 * MIN, sessions: 1 }]);
+});
+
+test("projectHoursMs returns an empty list for no lanes", () => {
+  assert.deepEqual(projectHoursMs([]), []);
+  assert.deepEqual(projectHoursMs(null), []);
+  assert.deepEqual(projectHoursMs(undefined), []);
+});
+
+test("projectHoursMs parts break the total down per session in lane-start order", () => {
+  // the later-starting lane is listed first in the input to prove parts order
+  // comes from lane.start, not input order.
+  const lanes = [
+    { project: "sb", start: at(20), names: [span("beta", 20, 30)], intervals: [interval("working", ms(20), ms(30))] },
+    { project: "sb", start: at(0), names: [span("alpha", 0, 10)], intervals: [interval("working", ms(0), ms(10)), interval("working", ms(5), ms(10))] },
+  ];
+  assert.deepEqual(projectHoursMs(lanes), [{
+    project: "sb", ms: 25 * MIN, sessions: 2,
+    parts: [
+      { label: "alpha", ms: 15 * MIN, startMs: ms(0) },
+      { label: "beta", ms: 10 * MIN, startMs: ms(20) },
+    ],
+  }]);
+});
+
+test("projectHoursMs part labels prefer the latest names[] slug, then the lead fallbacks", () => {
+  const lanes = [
+    { project: "sb", start: at(0), names: [span("old", 0, 5), span("new", 5, 10)], intervals: [interval("working", ms(0), ms(10))] },
+    { project: "sb", start: at(20), intervals: [interval("working", ms(20), ms(30))] },
+    { start: at(0), labels: [{ label: "Claude Code" }], intervals: [interval("working", ms(0), ms(10))] },
+    { start: at(20), intervals: [interval("working", ms(20), ms(30))] },
+  ];
+  const rows = projectHoursMs(lanes);
+  assert.deepEqual(
+    rows.find((r) => r.project === "sb").parts.map((p) => p.label),
+    ["new", "sb"],
+    "renamed session shows its CURRENT slug; an unnamed one falls back to the lead label",
+  );
+  assert.deepEqual(
+    rows.find((r) => r.project === "(no project)").parts.map((p) => p.label),
+    ["Claude Code", "session"],
+    "projectless lanes fall through to raw labels[], then the generic 'session'",
+  );
+});
+
+test("projectHoursMs parts with unparseable lane starts sort last with null startMs", () => {
+  const lanes = [
+    { project: "sb", names: [span("undated", 0, 10)], intervals: [interval("working", ms(0), ms(10))] },
+    { project: "sb", start: at(30), names: [span("dated", 30, 40)], intervals: [interval("working", ms(30), ms(40))] },
+  ];
+  assert.deepEqual(projectHoursMs(lanes)[0].parts, [
+    { label: "dated", ms: 10 * MIN, startMs: ms(30) },
+    { label: "undated", ms: 10 * MIN, startMs: null },
+  ]);
 });
