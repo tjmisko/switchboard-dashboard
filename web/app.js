@@ -297,6 +297,12 @@ let currentView = (function () {
 })();
 function smoothEnabled() { return !el.optSmooth || el.optSmooth.checked; }
 
+// syncSmoothLegend collapses the legend's 30-min-average entry in step with its
+// toggle; CSS (.smooth-off on the caption) animates the exit and return.
+function syncSmoothLegend() {
+  el.chartCaption.classList.toggle("smooth-off", !smoothEnabled());
+}
+
 // ---------------------------------------------------------------------------
 // data loading
 // ---------------------------------------------------------------------------
@@ -2170,7 +2176,11 @@ function init() {
   el.dateField.addEventListener("click", () => { try { el.day.showPicker(); } catch (_) {} });
   el.optCtxSwitches.addEventListener("change", () => { if (lastData) renderTimeline(lastData); });
   el.optFocus.addEventListener("change", () => { if (lastData) renderTimeline(lastData); });
-  el.optSmooth.addEventListener("change", () => { if (lastData && currentView === "line") renderConcurrencyChart(lastData); });
+  el.optSmooth.addEventListener("change", () => {
+    syncSmoothLegend();
+    if (lastData && currentView === "line") renderConcurrencyChart(lastData);
+  });
+  syncSmoothLegend(); // seat the legend to the toggle's initial state
 
   // view switcher: bars ↔ agents-aloft line chart ↔ project ranking
   el.viewBars.addEventListener("click", () => setView("bars"));
