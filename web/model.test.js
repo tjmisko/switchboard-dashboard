@@ -8,7 +8,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
-  laneIdentity, leadLabel, nameSegments, buildBars, spanInefficiency, switchArrivals, packLanes,
+  laneIdentity, rawSessionId, leadLabel, nameSegments, buildBars, spanInefficiency, switchArrivals, packLanes,
   workIntervalsMs, concurrencyProfile, projectHoursMs,
 } = require("./model.js");
 
@@ -534,4 +534,28 @@ test("projectHoursMs parts with unparseable lane starts sort last with null star
     { label: "dated", ms: 10 * MIN, startMs: ms(30) },
     { label: "undated", ms: 10 * MIN, startMs: null },
   ]);
+});
+
+// ---------------------------------------------------------------------------
+// rawSessionId — joining lanes to stores keyed by the bare session UUID
+// ---------------------------------------------------------------------------
+
+test("rawSessionId should strip the lane's own provider namespace in the merged view", () => {
+  const lane = { provider: "claude", session_id: "claude:abc-123" };
+  assert.equal(rawSessionId(lane), "abc-123");
+});
+
+test("rawSessionId should pass a single-provider id through unchanged", () => {
+  assert.equal(rawSessionId({ session_id: "abc-123" }), "abc-123");
+});
+
+test("rawSessionId should not strip a foreign or coincidental prefix", () => {
+  // A different provider's prefix (or an id that merely contains a colon)
+  // is not this lane's namespace — leave it alone.
+  assert.equal(rawSessionId({ provider: "arachne", session_id: "claude:abc" }), "claude:abc");
+});
+
+test("rawSessionId should return null when the lane has no session id", () => {
+  assert.equal(rawSessionId({ pid: 42 }), null);
+  assert.equal(rawSessionId(null), null);
 });

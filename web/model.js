@@ -40,6 +40,20 @@
     return "?";
   }
 
+  // rawSessionId is the provider-agnostic session id, for joining a lane to
+  // stores keyed by the bare Claude session UUID (e.g. /api/summaries). The
+  // merged multi-provider view namespaces lane.session_id as
+  // "<provider>:<id>", so the lane's own provider prefix is stripped; a
+  // single-provider id passes through unchanged. Null when the lane has none.
+  function rawSessionId(lane) {
+    if (!lane || !lane.session_id) return null;
+    const id = lane.session_id;
+    if (lane.provider && id.startsWith(lane.provider + ":")) {
+      return id.slice(lane.provider.length + 1);
+    }
+    return id;
+  }
+
   // leadLabel is the name shown for the pre-/name stretch: project_full if the
   // (optional) field is present, else the project abbreviation, else the first
   // raw labels[] entry, else "" (unlabeled).
@@ -326,7 +340,7 @@
   }
 
   return {
-    laneIdentity, leadLabel, nameSegments, buildBar, buildBars,
+    laneIdentity, rawSessionId, leadLabel, nameSegments, buildBar, buildBars,
     spanInefficiency, switchArrivals, packLanes, workIntervalsMs, concurrencyProfile,
     projectHoursMs,
   };

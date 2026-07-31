@@ -367,8 +367,11 @@ async function loadSummaries() {
 }
 
 // sessionSummary returns the generated summary record for a lane, or null.
+// Summaries are keyed by the bare session UUID, so the merged view's
+// "<provider>:" namespace is stripped first (model.js rawSessionId).
 function sessionSummary(lane) {
-  return lane.session_id ? lastSummaries[lane.session_id] || null : null;
+  const id = rawSessionId(lane);
+  return id ? lastSummaries[id] || null : null;
 }
 
 function showError(msg) { el.error.textContent = msg; el.error.hidden = false; }
