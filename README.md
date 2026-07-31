@@ -113,6 +113,41 @@ reconciles against `docker ps` — closing sessions that ended while it was down
 their last-seen time. Each running container is counted as one agent aloft for
 its lifetime (unattended auto mode), with subagent sub-bars layered on top.
 
+## Session summaries (`session-digest`)
+
+Subagents carry an authored identity from birth — the parent model writes a
+`description` when it spawns them (the hover-modal text) — but interactive
+sessions get only an auto-title. `session-digest` closes that gap: it condenses
+each Claude Code transcript under `~/.claude/projects/` into a per-session
+record, and can top it with an LLM-written name/description/summary so sessions
+read like subagents.
+
+```sh
+go install ./cmd/session-digest
+
+session-digest                  # backfill deterministic digests for every session
+session-digest -condense        # + generate name/description/summary via `claude -p`
+session-digest -print -session <id>   # inspect one record on stdout
+```
+
+Records land in `~/.local/share/switchboard/summaries/<project-slug>/<session-id>.json`
+as `{digest, summary, model, generatedAt}`. The digest half is deterministic
+extraction — the session title records (`custom-title`/`ai-title`/`agent-name`),
+the human prompts, authored Bash step descriptions, files edited, commit
+subjects, tool counts, and the subagent roster. Subagent names and descriptions
+are harvested verbatim from the session's `subagents/` metadata (falling back to
+`Task`/`Agent` tool_use records for older sessions) and are never re-summarized.
+The condenser sees only the digest, never the raw transcript, so the `claude -p`
+call stays cheap and grounded.
+
+Runs are incremental: digests rebuild when the transcript is newer than the
+record, summaries generate only when missing (`-force` overrides), transcripts
+touched in the last `-min-idle` (default 10m) are presumed live and skipped, and
+sessions with no extractable signal are never sent to the model. The
+summarizer's own `claude -p` transcripts are excluded from scanning. To keep the
+archive current automatically, wire `scripts/session-summary-hook` into a
+`SessionEnd` hook in `~/.claude/settings.json` (instructions in the script).
+
 ## HTTP API
 
 - **`GET /api/timeline`** — with one provider, proxies its `timeline --json`,
