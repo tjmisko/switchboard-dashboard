@@ -2,19 +2,33 @@
 # Claude Code SessionEnd hook: digest and summarize the session that just
 # ended. Claude Code pipes a JSON payload on stdin; only session_id is needed.
 #
-# Wire into ~/.claude/settings.json:
+# Wire into ~/.claude/settings.json (absolute paths — hook environments may
+# lack ~/go/bin on PATH):
 #   "hooks": {
 #     "SessionEnd": [
-#       {"hooks": [{"type": "command", "command": "session-summary-hook"}]}
+#       {"hooks": [{"type": "command",
+#                   "command": "$HOME/Projects/switchboard-dashboard/scripts/session-summary-hook",
+#                   "timeout": 5}]}
 #     ]
 #   }
 #
-# Requires session-digest on PATH (go install ./cmd/session-digest) and the
-# claude CLI for the -condense step.
+# The condense step shells out to `claude -p` and can take tens of seconds, so
+# the work is detached: the hook returns immediately and the digest run logs to
+# ~/.local/share/switchboard/summaries/hook.log. Recursion is bounded — the
+# summarizer's own claude -p sessions land under the summaries dir's project
+# slug, which session-digest always skips, so their SessionEnd firings no-op.
 set -euo pipefail
 
 session_id=$(jq -r '.session_id // empty')
 if [ -z "$session_id" ]; then
     exit 0
 fi
-exec session-digest -session "$session_id" -condense
+
+digest_bin=$(command -v session-digest || true)
+if [ -z "$digest_bin" ]; then
+    digest_bin="$HOME/go/bin/session-digest"
+fi
+
+log_dir="$HOME/.local/share/switchboard/summaries"
+mkdir -p "$log_dir"
+nohup "$digest_bin" -session "$session_id" -condense >>"$log_dir/hook.log" 2>&1 &
