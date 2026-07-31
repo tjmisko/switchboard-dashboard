@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Claude Code SessionEnd hook: digest and summarize the session that just
+# ended. Claude Code pipes a JSON payload on stdin; only session_id is needed.
+#
+# Wire into ~/.claude/settings.json:
+#   "hooks": {
+#     "SessionEnd": [
+#       {"hooks": [{"type": "command", "command": "session-summary-hook"}]}
+#     ]
+#   }
+#
+# Requires session-digest on PATH (go install ./cmd/session-digest) and the
+# claude CLI for the -condense step.
+set -euo pipefail
+
+session_id=$(jq -r '.session_id // empty')
+if [ -z "$session_id" ]; then
+    exit 0
+fi
+exec session-digest -session "$session_id" -condense
