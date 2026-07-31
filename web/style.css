@@ -331,10 +331,11 @@ main { padding: 16px 18px 36px; }
 .timeline-section:not(.view-line) .line-only { display: none; }
 .timeline-section:not(.view-line) .chart-caption { display: none; }
 
-/* line-view caption: legend on the left, peak/avg readout on the right. */
+/* line-view caption: legend on the left, peak/avg readout on the right. Sits
+   BELOW the plot area, reading as a footnote to the chart above it. */
 .chart-caption {
   display: flex; align-items: center; justify-content: space-between;
-  gap: 16px; flex-wrap: wrap; margin: 0 2px 8px;
+  gap: 16px; flex-wrap: wrap; margin: 8px 2px 0;
 }
 .chart-legend { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 .cl-item { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--fg-muted); }
