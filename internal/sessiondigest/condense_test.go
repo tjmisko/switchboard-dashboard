@@ -166,6 +166,29 @@ func TestParseSummaryShouldCapTasksWhenModelReturnsMoreThanTheLimit(t *testing.T
 	}
 }
 
+func TestParseSummaryShouldCapTasksWhenTheBulletStringHoldsMoreThanTheLimit(t *testing.T) {
+	// the newline-string path splits before it caps, so it needs its own guard.
+	var lines []string
+	for i := 0; i < maxSummaryTasks+2; i++ {
+		lines = append(lines, fmt.Sprintf("- task %d", i))
+	}
+	raw, err := json.Marshal(strings.Join(lines, "\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := fmt.Sprintf(`{"name":"n","description":"d","summary":"s","tasks":%s}`, raw)
+	s, err := ParseSummary(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Tasks) != maxSummaryTasks {
+		t.Fatalf("len(Tasks) = %d, want %d", len(s.Tasks), maxSummaryTasks)
+	}
+	if s.Tasks[maxSummaryTasks-1] != fmt.Sprintf("task %d", maxSummaryTasks-1) {
+		t.Errorf("Tasks = %#v, want the first %d lines kept", s.Tasks, maxSummaryTasks)
+	}
+}
+
 func TestNeedsCondenseShouldRegenerateWhenSummaryIsMissingOrPredatesTheSchema(t *testing.T) {
 	digestOnly := Record{}
 	if !NeedsCondense(digestOnly, false) {
@@ -184,6 +207,16 @@ func TestNeedsCondenseShouldSkipACurrentRecordUnlessForced(t *testing.T) {
 	}
 	if !NeedsCondense(current, true) {
 		t.Error("want condense for a current record when forced")
+	}
+}
+
+func TestNeedsCondenseShouldLeaveARecordWrittenByANewerSchemaAlone(t *testing.T) {
+	// a newer binary sharing the store writes records this one cannot produce;
+	// re-condensing them would downgrade their summaries. Only an older version
+	// is stale, which is why the check is `<` and not `!=`.
+	future := Record{Summary: &Summary{Description: "d"}, SummaryVersion: CurrentSummaryVersion + 1}
+	if NeedsCondense(future, false) {
+		t.Error("want no condense for a record written by a newer schema version")
 	}
 }
 
