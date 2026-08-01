@@ -120,19 +120,36 @@ Subagents carry an authored identity from birth — the parent model writes a
 `description` when it spawns them (the hover-modal text) — but interactive
 sessions get only an auto-title. `session-digest` closes that gap: it condenses
 each Claude Code transcript under `~/.claude/projects/` into a per-session
-record, and can top it with an LLM-written name/description/summary so sessions
-read like subagents.
+record, and can top it with an LLM-written name/description/tasks/summary so
+sessions read like subagents.
 
 ```sh
 go install ./cmd/session-digest
 
 session-digest                  # backfill deterministic digests for every session
-session-digest -condense        # + generate name/description/summary via `claude -p`
+session-digest -condense        # + generate name/description/tasks/summary via `claude -p`
 session-digest -print -session <id>   # inspect one record on stdout
 ```
 
 Records land in `~/.local/share/switchboard/summaries/<project-slug>/<session-id>.json`
-as `{digest, summary, model, generatedAt}`. The digest half is deterministic
+as `{digest, summary, summaryVersion, model, generatedAt}`, where the generated
+`summary` object is:
+
+```json
+{
+  "name": "fix-merged-view-lookup",
+  "description": "Fixed the merged view's summary lookup and shipped the hover card",
+  "tasks": ["Stripped the provider namespace from session ids", "Added the hover card"],
+  "summary": "Framing prose — 1-2 sentences when tasks are present, 3-6 when they aren't."
+}
+```
+
+`tasks` is the session's distinct work items in chronological order, at most six
+(a busier session gets its six most substantial), and is omitted entirely for a
+single continuous task — those sessions keep the full 3-6 sentence narrative.
+`summaryVersion` is the output-schema version that produced the record
+(currently `2`); a plain `-condense` run regenerates anything older, so schema
+changes roll through the archive without `-force`. The digest half is deterministic
 extraction — the session title records (`custom-title`/`ai-title`/`agent-name`),
 the human prompts, authored Bash step descriptions, files edited, commit
 subjects, tool counts, and the subagent roster. Subagent names and descriptions
@@ -142,7 +159,8 @@ The condenser sees only the digest, never the raw transcript, so the `claude -p`
 call stays cheap and grounded.
 
 Runs are incremental: digests rebuild when the transcript is newer than the
-record, summaries generate only when missing (`-force` overrides), transcripts
+record, summaries generate when missing or written by an older schema version
+(`-force` regenerates everything), transcripts
 touched in the last `-min-idle` (default 10m) are presumed live and skipped, and
 sessions with no extractable signal are never sent to the model. The
 summarizer's own `claude -p` transcripts are excluded from scanning. To keep the
@@ -151,8 +169,9 @@ archive current automatically, wire `scripts/session-summary-hook` into a
 
 The dashboard serves the archive at `/api/summaries` (see `--summaries`) and
 surfaces it on the timeline: hovering a session's name band shows the generated
-one-line description, and clicking pins a card with the full name / description
-/ narrative — the same interaction subagent sub-bars already have.
+one-line description (and how many steps the card holds), and clicking pins a
+card with the full name / description / task bullets / narrative — the same
+interaction subagent sub-bars already have.
 
 ## HTTP API
 
@@ -162,8 +181,11 @@ one-line description, and clicking pins a card with the full name / description
   adapter in parallel and returns the merged envelope; per-provider failures land
   in `provider_errors` and only an all-failed request is a `502`.
 - **`GET /api/summaries`** — returns `{sessions: {<session_id>: {name,
-  description, summary, generated_at}}}` from the `--summaries` store, omitting
-  digest-only records. Always `200`; a missing store yields an empty set.
+  description, tasks, summary, generated_at}}}` from the `--summaries` store,
+  omitting digest-only records. `tasks` is the (optional, at most six) list of
+  distinct work items the pinned card renders as bullets; it is absent for
+  single-task sessions and for records generated before the field existed.
+  Always `200`; a missing store yields an empty set.
 - **`GET /api/plan`** — returns a normalized, read-only view of the cached
   plan-usage file for the cost gauge:
   `{available, mtime, age_seconds, stale, five_hour, seven_day, seven_day_opus}`.

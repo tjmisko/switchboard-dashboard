@@ -339,6 +339,64 @@
       .sort((a, b) => b.ms - a.ms || a.project.localeCompare(b.project));
   }
 
+  // -------------------------------------------------------------------------
+  // session summary rendering (session-digest records from /api/summaries)
+  //
+  // A record is {name, description, tasks?, summary}: tasks carries the
+  // session's DISTINCT work items and summary the framing prose. Pre-v2 records
+  // (and genuinely single-task sessions) have no tasks and must keep rendering
+  // exactly as prose alone. These helpers return HTML STRINGS — no DOM — so the
+  // node suite can assert on them.
+  // -------------------------------------------------------------------------
+
+  // escapeHTML is private to this module: summary text is model-written and is
+  // interpolated into innerHTML, so every field is escaped on the way out.
+  // (app.js keeps its own copy for the rest of the UI.)
+  function escapeHTML(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
+  // summaryTasks is a record's task bullets, trimmed and with empties dropped.
+  // A tasks field that is not an array yields none: the shipped endpoint always
+  // sends an array, but the helper must not throw on a record it did not write.
+  function summaryTasks(summary) {
+    const tasks = summary && summary.tasks;
+    if (!Array.isArray(tasks)) return [];
+    return tasks
+      .map((task) => String(task == null ? "" : task).trim())
+      .filter((task) => task !== "");
+  }
+
+  // summaryBodyHTML renders the body of the pinned session card: the task
+  // bullets first, then the framing prose beneath them. With no tasks it is the
+  // prose-only body the card has always shown.
+  function summaryBodyHTML(summary) {
+    if (!summary) return "";
+    const tasks = summaryTasks(summary);
+    let html = "";
+    if (tasks.length) {
+      html += `<ul class="po-tasks">`
+        + tasks.map((task) => `<li>${escapeHTML(task)}</li>`).join("")
+        + `</ul>`;
+    }
+    if (summary.summary) html += `<div class="po-summary">${escapeHTML(summary.summary)}</div>`;
+    return html;
+  }
+
+  // summaryHintText is the hover tooltip's click affordance. The tooltip keeps
+  // the one-line description — bullets are the reason to CLICK, not a second
+  // tooltip — so a multi-task session only advertises how much the card holds.
+  // Empty when nothing extra sits behind the click, which is exactly when
+  // summaryBodyHTML is empty: a lone task still renders a bullet the tooltip
+  // never showed, so it has to advertise the click too.
+  function summaryHintText(summary) {
+    const count = summaryTasks(summary).length;
+    if (count > 1) return `click for ${count} steps`;
+    if (count === 1 || (summary && summary.summary)) return "click for the session summary";
+    return "";
+  }
+
   // normalizeView validates a chart-view name, resolving "bars" — the sessions
   // view's pre-rename spelling — so persisted `sb-view` choices and old ?view=
   // links keep working. Returns null for anything that isn't a view, which both
@@ -352,6 +410,6 @@
   return {
     laneIdentity, rawSessionId, leadLabel, nameSegments, buildBar, buildBars,
     spanInefficiency, switchArrivals, packLanes, workIntervalsMs, concurrencyProfile,
-    projectHoursMs, normalizeView,
+    projectHoursMs, summaryTasks, summaryBodyHTML, summaryHintText, normalizeView,
   };
 });

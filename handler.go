@@ -313,10 +313,11 @@ func (s *Server) handlePlan(w http.ResponseWriter, r *http.Request) {
 // summaryEntry is the per-session slice of a session-digest record the UI
 // needs for hover enrichment: the generated identity, not the full digest.
 type summaryEntry struct {
-	Name        string `json:"name,omitempty"`
-	Description string `json:"description"`
-	Summary     string `json:"summary,omitempty"`
-	GeneratedAt string `json:"generated_at,omitempty"`
+	Name        string   `json:"name,omitempty"`
+	Description string   `json:"description"`
+	Tasks       []string `json:"tasks,omitempty"`
+	Summary     string   `json:"summary,omitempty"`
+	GeneratedAt string   `json:"generated_at,omitempty"`
 }
 
 // summariesResponse maps session id → generated summary. Sessions without a
@@ -335,9 +336,32 @@ type summaryRecord struct {
 	Summary *struct {
 		Name        string `json:"name"`
 		Description string `json:"description"`
-		Summary     string `json:"summary"`
+		// tasks is held raw and decoded by summaryTasks: typing it []string
+		// here would make an unexpected shape fail the whole record's
+		// Unmarshal, costing the session its name and prose over a field that
+		// is only enrichment.
+		Tasks   json.RawMessage `json:"tasks"`
+		Summary string          `json:"summary"`
 	} `json:"summary"`
 	GeneratedAt string `json:"generatedAt"`
+}
+
+// summaryTasks decodes a record's raw tasks field, keeping the entries that are
+// strings and dropping anything else. A malformed or unexpected shape yields no
+// bullets rather than discarding the record.
+func summaryTasks(raw json.RawMessage) []string {
+	var elements []json.RawMessage
+	if json.Unmarshal(raw, &elements) != nil {
+		return nil
+	}
+	var tasks []string
+	for _, element := range elements {
+		var task string
+		if json.Unmarshal(element, &task) == nil && task != "" {
+			tasks = append(tasks, task)
+		}
+	}
+	return tasks
 }
 
 // readSummaries walks dir (<project-slug>/<session-id>.json, as written by
@@ -381,6 +405,7 @@ func readSummaries(dir string) map[string]summaryEntry {
 			out[id] = summaryEntry{
 				Name:        rec.Summary.Name,
 				Description: rec.Summary.Description,
+				Tasks:       summaryTasks(rec.Summary.Tasks),
 				Summary:     rec.Summary.Summary,
 				GeneratedAt: rec.GeneratedAt,
 			}

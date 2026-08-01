@@ -6,9 +6,10 @@
 //
 // Records land in -out as <slug>/<session-id>.json and are updated
 // incrementally: a digest is rebuilt when its transcript is newer than the
-// record, and a summary is generated only when missing (or with -force).
-// Subagent descriptions are harvested verbatim — the parent model authored
-// them at spawn time — and are never re-summarized.
+// record, and a summary is generated when it is missing or was written by an
+// older output schema (or with -force). Subagent descriptions are harvested
+// verbatim — the parent model authored them at spawn time — and are never
+// re-summarized.
 package main
 
 import (
@@ -32,7 +33,7 @@ func main() {
 	out := flag.String("out", filepath.Join(home, ".local", "share", "switchboard", "summaries"), "output dir for per-session records")
 	project := flag.String("project", "", "only process sessions under this project slug")
 	session := flag.String("session", "", "only process this session id (also bypasses -min-idle)")
-	condense := flag.Bool("condense", false, "generate name/description/summary via `claude -p` for records lacking one")
+	condense := flag.Bool("condense", false, "generate name/description/tasks/summary via `claude -p` for records lacking one or written by an older schema")
 	model := flag.String("model", "haiku", "model passed to `claude -p`")
 	minIdle := flag.Duration("min-idle", 10*time.Minute, "skip transcripts modified more recently than this (likely still live)")
 	force := flag.Bool("force", false, "rebuild digests and regenerate summaries even when up to date")
@@ -97,20 +98,14 @@ func main() {
 			changed = true
 		}
 
-		if *condense && (record.Summary == nil || *force) {
+		if *condense && sessiondigest.NeedsCondense(record, *force) {
 			if record.Digest.Thin() {
 				skippedThin++
+			} else if err := sessiondigest.CondenseRecord(&record, run, *model, time.Now()); err != nil {
+				log.Printf("condense %s/%s: %v", ref.ProjectSlug, ref.SessionID, err)
 			} else {
-				summary, err := sessiondigest.Condense(record.Digest, run)
-				if err != nil {
-					log.Printf("condense %s/%s: %v", ref.ProjectSlug, ref.SessionID, err)
-				} else {
-					record.Summary = &summary
-					record.Model = *model
-					record.GeneratedAt = time.Now().UTC().Format(time.RFC3339)
-					condensed++
-					changed = true
-				}
+				condensed++
+				changed = true
 			}
 		}
 

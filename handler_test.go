@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -502,6 +503,78 @@ func TestSummariesShouldServeGeneratedRecordsAndOmitDigestOnlyOnes(t *testing.T)
 	}
 	if got.Name != "fix-flaky-test" || got.Description != "Fixed the flaky auth test" {
 		t.Errorf("entry = %+v, want summary fields verbatim", got)
+	}
+}
+
+func TestSummariesShouldPassTasksThroughWhenTheRecordCarriesThem(t *testing.T) {
+	dir := t.TempDir()
+	writeSummaryRecord(t, dir, "-home-u-proj", "sess-multi",
+		`{"name":"three-jobs","description":"Did three jobs","tasks":["Fixed the lookup","Added the endpoint"],"summary":"A mixed session."}`)
+	writeSummaryRecord(t, dir, "-home-u-proj", "sess-prose",
+		`{"name":"one-job","description":"Did one job","summary":"A single continuous task."}`)
+
+	srv := &Server{SummariesDir: dir}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/summaries", nil)
+	srv.Handler().ServeHTTP(rec, req)
+
+	var resp struct {
+		Sessions map[string]struct {
+			Tasks []string `json:"tasks"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"Fixed the lookup", "Added the endpoint"}
+	if got := resp.Sessions["sess-multi"].Tasks; !reflect.DeepEqual(got, want) {
+		t.Errorf("tasks = %#v, want %#v", got, want)
+	}
+	if got := resp.Sessions["sess-prose"].Tasks; len(got) != 0 {
+		t.Errorf("tasks = %#v, want none for a prose-only record", got)
+	}
+}
+
+func TestSummariesShouldKeepTheRecordWhenItsTasksFieldHasAnUnexpectedShape(t *testing.T) {
+	// tasks is enrichment: a schema change or a malformed field there must cost
+	// the bullets alone, never the session's name, description and prose.
+	dir := t.TempDir()
+	writeSummaryRecord(t, dir, "-home-u-proj", "sess-object-tasks",
+		`{"name":"odd-shape","description":"Did the work anyway","tasks":{"1":"Fixed the lookup"},"summary":"Landed on main."}`)
+	writeSummaryRecord(t, dir, "-home-u-proj", "sess-mixed-tasks",
+		`{"name":"mixed","description":"Mixed list","tasks":["Fixed the lookup",{"task":"dropped"}],"summary":"Landed."}`)
+
+	srv := &Server{SummariesDir: dir}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/summaries", nil)
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var resp struct {
+		Sessions map[string]struct {
+			Name        string   `json:"name"`
+			Description string   `json:"description"`
+			Tasks       []string `json:"tasks"`
+			Summary     string   `json:"summary"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := resp.Sessions["sess-object-tasks"]
+	if !ok {
+		t.Fatalf("record dropped over its tasks field; sessions = %v", resp.Sessions)
+	}
+	if got.Name != "odd-shape" || got.Description != "Did the work anyway" || got.Summary != "Landed on main." {
+		t.Errorf("entry = %+v, want name, description and prose preserved", got)
+	}
+	if len(got.Tasks) != 0 {
+		t.Errorf("tasks = %#v, want none for an unreadable field", got.Tasks)
+	}
+	if want := []string{"Fixed the lookup"}; !reflect.DeepEqual(resp.Sessions["sess-mixed-tasks"].Tasks, want) {
+		t.Errorf("tasks = %#v, want the string entries kept %#v", resp.Sessions["sess-mixed-tasks"].Tasks, want)
 	}
 }
 
