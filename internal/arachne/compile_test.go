@@ -147,3 +147,98 @@ func TestCompile_shouldDropSessionsWithoutAStart(t *testing.T) {
 		t.Fatalf("a session we never saw start for should be dropped, got %+v", tl.Lanes)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// plausibility post-check (the 2026-07-22 ghost-lane class, switchboard-dashboard#2)
+// ---------------------------------------------------------------------------
+
+func TestCompile_shouldFlagAnUnclosedLaneWhenItHasBeenSilentPastTheCap(t *testing.T) {
+	events := []Event{
+		{Type: EventSessionStart, TS: "2026-07-22T06:00:00Z", SessionID: "ghost", StartedAt: "2026-07-22T06:00:00Z"},
+		{Type: EventUsageSample, TS: "2026-07-22T06:30:00Z", SessionID: "ghost", TokIn: 10},
+	}
+	tl := Compile(events, CompileOptions{Now: mustTime(t, "2026-07-22T11:30:00Z")})
+	l := tl.Lanes[0]
+	if !l.Suspect {
+		t.Fatalf("a lane silent for 5h past its last event should be suspect: %+v", l)
+	}
+	if l.SuspectSince != "2026-07-22T06:30:00Z" {
+		t.Errorf("suspect_since = %q, want the last observed event", l.SuspectSince)
+	}
+	if l.SuspectReason == "" {
+		t.Error("a flagged lane must carry a human-readable reason")
+	}
+	// The bar is still drawn in full — flag, never drop.
+	if l.End != "2026-07-22T11:30:00Z" || len(l.Intervals) != 1 || l.Intervals[0].End != "2026-07-22T11:30:00Z" {
+		t.Errorf("the lane must not be truncated by the check: %+v", l)
+	}
+	// ...but only the evidenced half hour is credited as work.
+	if want := int64(30 * 60 * 1e9); tl.Summary.ByStatus["working"] != want {
+		t.Errorf("working = %d, want %d (06:00–06:30)", tl.Summary.ByStatus["working"], want)
+	}
+	if tl.Summary.AttentionUnion != int64(30*60*1e9) {
+		t.Errorf("attention_union = %d, want the evidenced half hour", tl.Summary.AttentionUnion)
+	}
+	if tl.Summary.SuspectLanes != 1 || tl.Summary.SuspectDuration != int64(5*3600*1e9) {
+		t.Errorf("suspect counters = %d lanes / %d ns, want 1 / 5h", tl.Summary.SuspectLanes, tl.Summary.SuspectDuration)
+	}
+}
+
+func TestCompile_shouldNotFlagALongSessionWhenItIsStillEmittingEvents(t *testing.T) {
+	events := []Event{
+		{Type: EventSessionStart, TS: "2026-07-22T01:00:00Z", SessionID: "busy", StartedAt: "2026-07-22T01:00:00Z"},
+		{Type: EventUsageSample, TS: "2026-07-22T05:00:00Z", SessionID: "busy", TokIn: 10},
+		{Type: EventUsageSample, TS: "2026-07-22T10:55:00Z", SessionID: "busy", TokIn: 20},
+	}
+	tl := Compile(events, CompileOptions{Now: mustTime(t, "2026-07-22T11:00:00Z")})
+	l := tl.Lanes[0]
+	if l.Suspect {
+		t.Fatalf("a 10h session that spoke 5 minutes ago is long, not suspect: %+v", l)
+	}
+	if want := int64(10 * 3600 * 1e9); tl.Summary.ByStatus["working"] != want {
+		t.Errorf("working = %d, want the full %d", tl.Summary.ByStatus["working"], want)
+	}
+}
+
+func TestCompile_shouldNotFlagAClosedSessionHoweverLongItRan(t *testing.T) {
+	events := []Event{
+		{Type: EventSessionStart, TS: "2026-07-22T00:00:00Z", SessionID: "marathon", StartedAt: "2026-07-22T00:00:00Z"},
+		{Type: EventSessionEnd, TS: "2026-07-22T09:00:00Z", SessionID: "marathon", End: "2026-07-22T09:00:00Z", Reason: ReasonExited},
+	}
+	tl := Compile(events, CompileOptions{Now: mustTime(t, "2026-07-22T11:00:00Z")})
+	if tl.Lanes[0].Suspect {
+		t.Fatal("a lane bounded by its own session_end ends where the evidence says, however long")
+	}
+	if tl.Summary.SuspectLanes != 0 {
+		t.Errorf("suspect_lanes = %d, want 0", tl.Summary.SuspectLanes)
+	}
+}
+
+func TestCompile_shouldFlagAnUnpairedSubagentSpanAndKeepItOutOfFanout(t *testing.T) {
+	events := []Event{
+		{Type: EventSessionStart, TS: "2026-07-22T10:00:00Z", SessionID: "parent", StartedAt: "2026-07-22T10:00:00Z"},
+		{Type: EventSubagentSpawn, TS: "2026-07-22T10:05:00Z", SessionID: "parent", ToolUseID: "s1", AgentType: "Explore"},
+		{Type: EventSessionEnd, TS: "2026-07-22T13:05:00Z", SessionID: "parent", End: "2026-07-22T13:05:00Z"},
+	}
+	tl := Compile(events, CompileOptions{Now: mustTime(t, "2026-07-22T13:05:00Z")})
+	sa := tl.Lanes[0].Subagents[0]
+	if !sa.Suspect || sa.SuspectReason == "" {
+		t.Fatalf("a 3h unpaired span should be flagged as a phantom: %+v", sa)
+	}
+	// The parent lane ran 3h05m; the phantom must add nothing on top of it.
+	if want := int64((3*3600 + 5*60) * 1e9); tl.Summary.AttentionFanout != want {
+		t.Errorf("attention_fanout = %d, want %d (parent only)", tl.Summary.AttentionFanout, want)
+	}
+}
+
+func TestCompile_shouldNotFlagAShortUnpairedSubagentSpan(t *testing.T) {
+	events := []Event{
+		{Type: EventSessionStart, TS: "2026-07-22T10:00:00Z", SessionID: "parent", StartedAt: "2026-07-22T10:00:00Z"},
+		{Type: EventSubagentSpawn, TS: "2026-07-22T10:05:00Z", SessionID: "parent", ToolUseID: "s1"},
+		{Type: EventSessionEnd, TS: "2026-07-22T10:35:00Z", SessionID: "parent", End: "2026-07-22T10:35:00Z"},
+	}
+	tl := Compile(events, CompileOptions{Now: mustTime(t, "2026-07-22T10:35:00Z")})
+	if tl.Lanes[0].Subagents[0].Suspect {
+		t.Fatal("a 30m unpaired span is ordinary work, not a phantom")
+	}
+}

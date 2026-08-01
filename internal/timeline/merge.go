@@ -73,6 +73,10 @@ func Merge(inputs []Sourced, opts MergeOptions) *Timeline {
 		}
 		out.Summary.AttentionPerSession += t.Summary.AttentionPerSession
 		out.Summary.AttentionFanout += t.Summary.AttentionFanout
+		// Both are plain per-provider counts of what that provider already excluded
+		// from the figures above, so they sum like the rest of the aggregates.
+		out.Summary.SuspectLanes += t.Summary.SuspectLanes
+		out.Summary.SuspectDuration += t.Summary.SuspectDuration
 		if t.Summary.PromptActive != nil {
 			promptSum += *t.Summary.PromptActive
 			havePrompt = true
@@ -157,20 +161,43 @@ func namespaceID(provider, sessionID string, pid, idx int) string {
 // laneAloftSpans returns the [startNs, endNs] windows during which the lane is
 // "aloft": every working interval plus every subagent span. This mirrors
 // web/model.js workIntervalsMs so the Go merge and the JS chart agree.
+// laneAloftSpans is the lane's contribution to attention_union. A suspect lane
+// contributes only the part of itself that predates its synthesized tail, and a
+// suspect subagent span contributes nothing at all — otherwise the merged union
+// would re-credit exactly the phantom time each provider's own summary already
+// subtracted, and a merged day would disagree with the same day single-provider.
 func laneAloftSpans(lane *Lane) [][2]int64 {
 	var out [][2]int64
+	trustedEnd, clip := trustedEndNanos(lane)
 	for _, iv := range lane.Intervals {
 		if iv.Status != "working" {
 			continue
 		}
-		if s, e, ok := SpanNanos(iv.Start, iv.End); ok {
-			out = append(out, [2]int64{s, e})
+		s, e, ok := SpanNanos(iv.Start, iv.End)
+		if !ok {
+			continue
 		}
+		if clip {
+			if s, e, ok = clipToTrusted(s, e, trustedEnd); !ok {
+				continue
+			}
+		}
+		out = append(out, [2]int64{s, e})
 	}
 	for _, sa := range lane.Subagents {
-		if s, e, ok := SpanNanos(sa.Start, sa.End); ok {
-			out = append(out, [2]int64{s, e})
+		if sa.Suspect {
+			continue
 		}
+		s, e, ok := SpanNanos(sa.Start, sa.End)
+		if !ok {
+			continue
+		}
+		if clip {
+			if s, e, ok = clipToTrusted(s, e, trustedEnd); !ok {
+				continue
+			}
+		}
+		out = append(out, [2]int64{s, e})
 	}
 	return out
 }

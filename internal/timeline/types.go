@@ -54,6 +54,17 @@ type Lane struct {
 	TokOut         int64      `json:"tok_out,omitempty"`
 	TokCacheRead   int64      `json:"tok_cache_read,omitempty"`
 	TokCacheCreate int64      `json:"tok_cache_create,omitempty"`
+
+	// Suspect and friends carry the producer's trailing-interval plausibility
+	// post-check: the lane's length is an artifact of the end bound rather than of
+	// anything observed. Start/End/Intervals are NOT truncated — SuspectSince is
+	// the last instant with evidence behind it, and everything from there to End is
+	// synthesized. Consumers render the tail as untrusted rather than hiding it,
+	// and must not credit it as work. Producers that do not run the check omit all
+	// three, so an unflagged lane is indistinguishable from today's envelope.
+	Suspect       bool   `json:"suspect,omitempty"`
+	SuspectReason string `json:"suspect_reason,omitempty"`
+	SuspectSince  string `json:"suspect_since,omitempty"`
 }
 
 // Interval is one status segment of a lane. Subagents is the count of subagents
@@ -79,6 +90,13 @@ type Subagent struct {
 	Description string `json:"description,omitempty"`
 	Start       string `json:"start"`
 	End         string `json:"end"`
+
+	// Suspect marks a span the producer closed at the lane's bound rather than at
+	// an observed stop, and which ran too long to be a plausible unit of delegated
+	// work. The span is still emitted in full; it is simply not credited as
+	// compute, and the UI draws it as a phantom.
+	Suspect       bool   `json:"suspect,omitempty"`
+	SuspectReason string `json:"suspect_reason,omitempty"`
 }
 
 // TimeSpan is an unlabeled [start,end] window (used for focus[]).
@@ -109,6 +127,14 @@ type Summary struct {
 	AttendedActive          *int64           `json:"attended_active,omitempty"`
 	DelegatedActive         *int64           `json:"delegated_active,omitempty"`
 	DelegationEffectiveness *float64         `json:"delegation_effectiveness,omitempty"`
+
+	// SuspectLanes counts lanes flagged by the plausibility post-check and
+	// SuspectDuration is exactly how much synthesized tail every other figure in
+	// this Summary already excludes. A consumer that re-derives an "active" number
+	// by summing interval durations will disagree with these aggregates unless it
+	// clips each suspect lane at its SuspectSince.
+	SuspectLanes    int   `json:"suspect_lanes,omitempty"`
+	SuspectDuration int64 `json:"suspect_duration,omitempty"`
 }
 
 // Totals carries window-level token/cost/subagent sums.
