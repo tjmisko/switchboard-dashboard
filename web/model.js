@@ -397,9 +397,19 @@
     return "";
   }
 
+  // normalizeView validates a chart-view name, resolving "bars" — the sessions
+  // view's pre-rename spelling — so persisted `sb-view` choices and old ?view=
+  // links keep working. Returns null for anything that isn't a view, which both
+  // call sites treat as "fall back to the default".
+  function normalizeView(view) {
+    if (view === "bars") return "sessions";
+    if (view === "sessions" || view === "line" || view === "projects") return view;
+    return null;
+  }
+
   return {
     laneIdentity, rawSessionId, leadLabel, nameSegments, buildBar, buildBars,
     spanInefficiency, switchArrivals, packLanes, workIntervalsMs, concurrencyProfile,
-    projectHoursMs, summaryTasks, summaryBodyHTML, summaryHintText,
+    projectHoursMs, summaryTasks, summaryBodyHTML, summaryHintText, normalizeView,
   };
 });

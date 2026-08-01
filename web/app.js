@@ -255,7 +255,7 @@ const el = {
   optCtxSwitches: document.getElementById("opt-ctx-switches"),
   optFocus: document.getElementById("opt-focus"),
   optSmooth: document.getElementById("opt-smooth"),
-  viewBars: document.getElementById("view-bars"),
+  viewSessions: document.getElementById("view-sessions"),
   viewLine: document.getElementById("view-line"),
   viewProjects: document.getElementById("view-projects"),
   viewseg: document.getElementById("viewseg"),
@@ -286,16 +286,25 @@ let fetchOK = false;
 let timelineTimer = null;
 let planTimer = null;
 
-// Which chart occupies the plot area: "bars" (the SVG swimlanes), "line" (the
-// "agents aloft" concurrency canvas) or "projects" (the agent-time-per-project
-// ranking). Persisted so the choice survives reloads.
+// Which chart occupies the plot area: "sessions" (the SVG swimlanes), "line"
+// (the "agents aloft" concurrency canvas) or "projects" (the
+// agent-time-per-project ranking). Persisted so the choice survives reloads.
 const VIEW_KEY = "sb-view";
+
+// Seeded from the PERSISTED choice only — ?view= is applied later, by
+// applyUrlParams, and deliberately never written back (the URL wins for the
+// load, but does not become sticky). Upgrading a stored legacy "bars" in place
+// here is what lets normalizeView's shim be deleted in a later release.
 let currentView = (function () {
   try {
-    const v = localStorage.getItem(VIEW_KEY);
-    if (v === "bars" || v === "line" || v === "projects") return v;
+    const stored = localStorage.getItem(VIEW_KEY);
+    const v = normalizeView(stored);
+    if (v) {
+      if (v !== stored) localStorage.setItem(VIEW_KEY, v);
+      return v;
+    }
   } catch (e) {}
-  return "bars";
+  return "sessions";
 })();
 function smoothEnabled() { return !el.optSmooth || el.optSmooth.checked; }
 
@@ -515,8 +524,8 @@ function render(data) {
 }
 
 // renderChartArea draws whichever chart the view switcher selects into the plot
-// area. The bar and line views share the horizontal scale (zoom) and the scroll
-// wrap, so toggling between them keeps the time axis put; the projects view is
+// area. The sessions and line views share the horizontal scale (zoom) and the
+// scroll wrap, so toggling between them keeps the time axis put; the projects view is
 // time-less (a ranking, not a timeline). Called from render() and from every
 // repaint trigger (zoom, resize, theme, view/toggle change).
 function renderChartArea(data) {
@@ -555,25 +564,25 @@ function startProjectsEnter() {
   }, hold);
 }
 
-// setView flips the plot between the bar swimlanes, the line chart and the
+// setView flips the plot between the session swimlanes, the line chart and the
 // project ranking. All view-dependent visibility is CSS, keyed off .view-line /
 // .view-projects on the section, so this just toggles the classes + the
-// segmented control's pressed state, then repaints. The bars are the only view
+// segmented control's pressed state, then repaints. Sessions is the only view
 // that uses the shared #empty placeholder — the other two draw their own — and
-// renderTimeline un-hides it, so both non-bar views re-hide it on entry.
+// renderTimeline un-hides it, so both other views re-hide it on entry.
 function setView(view) {
-  if (view !== "bars" && view !== "line" && view !== "projects") view = "bars";
+  view = normalizeView(view) || "sessions";
   const entering = view === "projects" && currentView !== "projects";
   currentView = view;
   try { localStorage.setItem(VIEW_KEY, view); } catch (e) {}
   el.section.classList.toggle("view-line", view === "line");
   el.section.classList.toggle("view-projects", view === "projects");
-  el.viewBars.setAttribute("aria-pressed", String(view === "bars"));
+  el.viewSessions.setAttribute("aria-pressed", String(view === "sessions"));
   el.viewLine.setAttribute("aria-pressed", String(view === "line"));
   el.viewProjects.setAttribute("aria-pressed", String(view === "projects"));
   positionViewGlider();
   hideTip();
-  if (view !== "bars") el.empty.hidden = true; // line + projects draw their own empty state
+  if (view !== "sessions") el.empty.hidden = true; // line + projects draw their own empty state
   if (lastData) renderChartArea(lastData);
   // Arm the grow-in only when the view is newly ENTERED (live re-renders must
   // not restart it), and only after the render above, so the hold is sized to
@@ -589,7 +598,7 @@ function setView(view) {
 function positionViewGlider() {
   const btn = currentView === "line" ? el.viewLine
     : currentView === "projects" ? el.viewProjects
-    : el.viewBars;
+    : el.viewSessions;
   el.viewGlider.style.width = btn.offsetWidth + "px";
   el.viewGlider.style.transform = "translateX(" + (btn.offsetLeft - el.viewseg.clientLeft) + "px)";
 }
@@ -1318,8 +1327,8 @@ function axisTicks(t0, t1, plotW) {
 // concurrencyProfile: sessions in 'working' status + running subagents) drawn as
 // a step line, with the day's average OVER ACTIVE TIME as a dashed horizontal
 // line (the force-multiplier figure) and an optional centered 30-min rolling
-// average. Shares the horizontal scale (zoom) + scroll wrap with the bar view; a
-// crosshair reads out the exact figures on hover.
+// average. Shares the horizontal scale (zoom) + scroll wrap with the sessions
+// view; a crosshair reads out the exact figures on hover.
 // ---------------------------------------------------------------------------
 
 const MONO = 'ui-monospace, "SFMono-Regular", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace';
@@ -2160,10 +2169,10 @@ function reloadNow() { hidePopout(); loadTimeline(); }
 function applyUrlParams() {
   const q = new URLSearchParams(window.location.search);
   el.day.value = q.get("day") || todayLocal();
-  // ?view=bars|line|projects deep-links the chart view (URL wins over the
+  // ?view=sessions|line|projects deep-links the chart view (URL wins over the
   // persisted choice for this load, mirroring how ?day overrides the default day).
-  const v = q.get("view");
-  if (v === "bars" || v === "line" || v === "projects") currentView = v;
+  const v = normalizeView(q.get("view"));
+  if (v) currentView = v;
   syncDayDisplay();
 }
 
@@ -2241,13 +2250,13 @@ function init() {
   });
   syncSmoothLegend(); // seat the legend to the toggle's initial state
 
-  // view switcher: bars ↔ agents-aloft line chart ↔ project ranking
-  el.viewBars.addEventListener("click", () => setView("bars"));
+  // view switcher: sessions ↔ agents-aloft line chart ↔ project ranking
+  el.viewSessions.addEventListener("click", () => setView("sessions"));
   el.viewLine.addEventListener("click", () => setView("line"));
   el.viewProjects.addEventListener("click", () => setView("projects"));
   el.section.classList.toggle("view-line", currentView === "line");
   el.section.classList.toggle("view-projects", currentView === "projects");
-  el.viewBars.setAttribute("aria-pressed", String(currentView === "bars"));
+  el.viewSessions.setAttribute("aria-pressed", String(currentView === "sessions"));
   el.viewLine.setAttribute("aria-pressed", String(currentView === "line"));
   el.viewProjects.setAttribute("aria-pressed", String(currentView === "projects"));
   // seat the glider without motion, then arm its transitions for real flips
