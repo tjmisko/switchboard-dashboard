@@ -358,8 +358,12 @@
   }
 
   // summaryTasks is a record's task bullets, trimmed and with empties dropped.
+  // A tasks field that is not an array yields none: the shipped endpoint always
+  // sends an array, but the helper must not throw on a record it did not write.
   function summaryTasks(summary) {
-    return ((summary && summary.tasks) || [])
+    const tasks = summary && summary.tasks;
+    if (!Array.isArray(tasks)) return [];
+    return tasks
       .map((task) => String(task == null ? "" : task).trim())
       .filter((task) => task !== "");
   }

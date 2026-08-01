@@ -613,6 +613,18 @@ test("summaryTasks should trim entries and drop empties when the model pads the 
   assert.deepEqual(summaryTasks(null), []);
 });
 
+test("summaryTasks should yield no tasks when the field is not an array", () => {
+  // unreachable through the shipped endpoint, which always sends an array —
+  // but the helper must not throw for a caller that reuses it on raw input.
+  for (const tasks of ["a\nb", 42, true, { 1: "Fixed it" }]) {
+    assert.deepEqual(summaryTasks({ description: "d", tasks }), []);
+  }
+  assert.equal(summaryBodyHTML({ tasks: "a\nb", summary: "Prose." }),
+    `<div class="po-summary">Prose.</div>`);
+  assert.equal(summaryHintText({ tasks: "a\nb", summary: "Prose." }),
+    "click for the session summary");
+});
+
 test("summaryHintText should advertise the step count when the session had several tasks", () => {
   assert.equal(
     summaryHintText({ tasks: ["a", "b", "c", "d", "e"], summary: "s" }),
