@@ -387,11 +387,13 @@
   // summaryHintText is the hover tooltip's click affordance. The tooltip keeps
   // the one-line description — bullets are the reason to CLICK, not a second
   // tooltip — so a multi-task session only advertises how much the card holds.
-  // Empty when nothing extra sits behind the click.
+  // Empty when nothing extra sits behind the click, which is exactly when
+  // summaryBodyHTML is empty: a lone task still renders a bullet the tooltip
+  // never showed, so it has to advertise the click too.
   function summaryHintText(summary) {
     const count = summaryTasks(summary).length;
     if (count > 1) return `click for ${count} steps`;
-    if (summary && summary.summary) return "click for the session summary";
+    if (count === 1 || (summary && summary.summary)) return "click for the session summary";
     return "";
   }
 

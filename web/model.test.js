@@ -637,7 +637,20 @@ test("summaryHintText should keep the plain hint when there are no tasks to coun
   assert.equal(summaryHintText({ tasks: ["only one"], summary: "s" }), "click for the session summary");
 });
 
+test("summaryHintText should advertise the click when a lone task is all the card holds", () => {
+  // the tooltip shows the description only, so that one bullet is still
+  // something new behind the click even with no prose to follow it.
+  const sum = { description: "d", tasks: ["Fixed the lookup"] };
+  assert.equal(summaryHintText(sum), "click for the session summary");
+  assert.notEqual(summaryBodyHTML(sum), "", "the card does render that bullet");
+});
+
 test("summaryHintText should be empty when the record has nothing behind the click", () => {
   assert.equal(summaryHintText({ description: "d" }), "");
   assert.equal(summaryHintText(null), "");
+  // the hint and the card body agree: no hint exactly when there is no body.
+  for (const sum of [{ description: "d" }, { description: "d", tasks: [] }, { description: "d", tasks: ["  "] }]) {
+    assert.equal(summaryHintText(sum) === "", summaryBodyHTML(sum) === "",
+      `hint and body disagree for ${JSON.stringify(sum)}`);
+  }
 });
