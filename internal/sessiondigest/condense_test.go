@@ -45,8 +45,9 @@ func TestBuildPromptShouldRequestTasksWhenRenderingAnyDigest(t *testing.T) {
 	if !strings.Contains(p, `"tasks"`) {
 		t.Error("prompt does not request a tasks field")
 	}
-	if !strings.Contains(p, "At most 6 entries") {
-		t.Error("prompt does not state the 6-entry cap")
+	// the prompt's cap and the parser's backstop must not drift apart.
+	if !strings.Contains(p, fmt.Sprintf("At most %d entries", maxSummaryTasks)) {
+		t.Errorf("prompt does not state the %d-entry cap", maxSummaryTasks)
 	}
 	if !strings.Contains(p, "MOST SUBSTANTIAL") {
 		t.Error("prompt does not state which tasks to keep past the cap")
