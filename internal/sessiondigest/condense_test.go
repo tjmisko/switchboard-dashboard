@@ -2,6 +2,7 @@ package sessiondigest
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -39,6 +40,25 @@ func TestBuildPromptShouldRenderSubagentDescriptionsVerbatim(t *testing.T) {
 	}
 }
 
+func TestBuildPromptShouldRequestTasksWhenRenderingAnyDigest(t *testing.T) {
+	p := BuildPrompt(Digest{Title: "Multi-task day"})
+	if !strings.Contains(p, `"tasks"`) {
+		t.Error("prompt does not request a tasks field")
+	}
+	if !strings.Contains(p, "At most 6 entries") {
+		t.Error("prompt does not state the 6-entry cap")
+	}
+	if !strings.Contains(p, "MOST SUBSTANTIAL") {
+		t.Error("prompt does not state which tasks to keep past the cap")
+	}
+	if !strings.Contains(p, "chronological order") {
+		t.Error("prompt does not ask for chronological order")
+	}
+	if !strings.Contains(p, "1-2 plain sentences") || !strings.Contains(p, "3-6 plain sentences") {
+		t.Error("prompt does not state the shorter-prose-with-tasks rule")
+	}
+}
+
 func TestParseSummaryShouldExtractJSONWhenModelWrapsItInFencesOrProse(t *testing.T) {
 	out := "Sure! Here is the card:\n```json\n{\"name\":\"fix-flaky-test\",\"description\":\"Fixed the flaky auth test\",\"summary\":\"The session fixed a race.\"}\n```\n"
 	s, err := ParseSummary(out)
@@ -56,6 +76,85 @@ func TestParseSummaryShouldErrorWhenDescriptionMissing(t *testing.T) {
 	}
 	if _, err := ParseSummary("no json here"); err == nil {
 		t.Error("want error when output has no JSON object")
+	}
+}
+
+func TestParseSummaryShouldKeepTasksInOrderWhenModelReturnsAnArray(t *testing.T) {
+	s, err := ParseSummary(`{"name":"n","description":"d","summary":"s","tasks":["Fixed the lookup","Added the endpoint"]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"Fixed the lookup", "Added the endpoint"}
+	if !reflect.DeepEqual(s.Tasks, want) {
+		t.Errorf("Tasks = %#v, want %#v", s.Tasks, want)
+	}
+}
+
+func TestParseSummaryShouldYieldNoTasksWhenFieldIsAbsentOrNull(t *testing.T) {
+	for _, out := range []string{
+		`{"name":"n","description":"d","summary":"s"}`,
+		`{"name":"n","description":"d","summary":"s","tasks":null}`,
+		`{"name":"n","description":"d","summary":"s","tasks":[]}`,
+		`{"name":"n","description":"d","summary":"s","tasks":42}`,
+	} {
+		s, err := ParseSummary(out)
+		if err != nil {
+			t.Fatalf("ParseSummary(%s): %v", out, err)
+		}
+		if len(s.Tasks) != 0 {
+			t.Errorf("ParseSummary(%s).Tasks = %#v, want none", out, s.Tasks)
+		}
+	}
+}
+
+func TestParseSummaryShouldSplitAndStripMarkersWhenTasksIsOneBulletString(t *testing.T) {
+	out := `{"name":"n","description":"d","summary":"s","tasks":"- Fixed the lookup\n* Added the endpoint\n1. Wrote the docs\n\n"}`
+	s, err := ParseSummary(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"Fixed the lookup", "Added the endpoint", "Wrote the docs"}
+	if !reflect.DeepEqual(s.Tasks, want) {
+		t.Errorf("Tasks = %#v, want %#v", s.Tasks, want)
+	}
+}
+
+func TestParseSummaryShouldCapTasksWhenModelReturnsMoreThanTheLimit(t *testing.T) {
+	var entries []string
+	for i := 0; i < maxSummaryTasks+3; i++ {
+		entries = append(entries, fmt.Sprintf(`"task %d"`, i))
+	}
+	out := fmt.Sprintf(`{"name":"n","description":"d","summary":"s","tasks":[%s]}`, strings.Join(entries, ","))
+	s, err := ParseSummary(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Tasks) != maxSummaryTasks {
+		t.Fatalf("len(Tasks) = %d, want %d", len(s.Tasks), maxSummaryTasks)
+	}
+	if s.Tasks[maxSummaryTasks-1] != fmt.Sprintf("task %d", maxSummaryTasks-1) {
+		t.Errorf("Tasks = %#v, want the first %d entries kept", s.Tasks, maxSummaryTasks)
+	}
+}
+
+func TestNeedsCondenseShouldRegenerateWhenSummaryIsMissingOrPredatesTheSchema(t *testing.T) {
+	digestOnly := Record{}
+	if !NeedsCondense(digestOnly, false) {
+		t.Error("want condense for a record with no summary")
+	}
+	v1 := Record{Summary: &Summary{Description: "d"}, SummaryVersion: 0}
+	if !NeedsCondense(v1, false) {
+		t.Error("want re-condense for a record written by an older schema version")
+	}
+}
+
+func TestNeedsCondenseShouldSkipACurrentRecordUnlessForced(t *testing.T) {
+	current := Record{Summary: &Summary{Description: "d"}, SummaryVersion: CurrentSummaryVersion}
+	if NeedsCondense(current, false) {
+		t.Error("want no condense for a record already at the current schema version")
+	}
+	if !NeedsCondense(current, true) {
+		t.Error("want condense for a current record when forced")
 	}
 }
 

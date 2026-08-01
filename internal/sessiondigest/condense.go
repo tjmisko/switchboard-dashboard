@@ -6,27 +6,43 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 )
 
 // Summary is the LLM-generated session identity — the analog of the authored
 // name/description a subagent gets from its parent at spawn time, which
-// interactive sessions otherwise lack — plus a short narrative.
+// interactive sessions otherwise lack — plus the discrete work items and a
+// short narrative.
 type Summary struct {
-	Name        string `json:"name"`        // kebab-case slug for the work
-	Description string `json:"description"` // one sentence, hover-modal sized
-	Summary     string `json:"summary"`     // 3-6 sentences on what happened
+	Name        string   `json:"name"`            // kebab-case slug for the work
+	Description string   `json:"description"`     // one sentence, hover-modal sized
+	Summary     string   `json:"summary"`         // framing prose: 1-2 sentences with tasks, 3-6 without
+	Tasks       []string `json:"tasks,omitempty"` // distinct tasks, chronological, at most maxSummaryTasks
 }
 
 // Record is the persisted per-session artifact: the deterministic digest plus
-// the generated summary and its provenance.
+// the generated summary, the output-schema version that generated it, and its
+// provenance.
 type Record struct {
-	Digest      Digest   `json:"digest"`
-	Summary     *Summary `json:"summary,omitempty"`
-	Model       string   `json:"model,omitempty"`
-	GeneratedAt string   `json:"generatedAt,omitempty"`
+	Digest         Digest   `json:"digest"`
+	Summary        *Summary `json:"summary,omitempty"`
+	SummaryVersion int      `json:"summaryVersion,omitempty"`
+	Model          string   `json:"model,omitempty"`
+	GeneratedAt    string   `json:"generatedAt,omitempty"`
 }
+
+// CurrentSummaryVersion is the condenser's output-schema version. v2 added
+// Summary.Tasks; records still at an older version are re-condensed by a plain
+// `-condense` run (see NeedsCondense) so the archive converges on the current
+// shape without -force, which would needlessly rebuild every digest too.
+const CurrentSummaryVersion = 2
+
+// maxSummaryTasks caps the task list. The prompt already asks for the six most
+// substantial tasks when a session had more, so truncating here is only a
+// backstop against a model that ignores the cap.
+const maxSummaryTasks = 6
 
 // Runner produces the model's raw response for a prompt. The default is
 // ClaudeRunner; tests substitute a fake.
@@ -46,10 +62,18 @@ func BuildPrompt(d Digest) string {
 	var sb strings.Builder
 	sb.WriteString(`Write an archival index card for a finished Claude Code session, from its digest below.
 Return ONLY a JSON object, no prose and no code fences:
-{"name": "...", "description": "...", "summary": "..."}
+{"name": "...", "description": "...", "tasks": ["...", "..."], "summary": "..."}
 - "name": kebab-case slug naming the work, at most six words
 - "description": one sentence, under 120 characters, saying what the session did
-- "summary": 3-6 plain sentences on what happened and where it landed
+- "tasks": one entry per DISTINCT task the session completed, in chronological order.
+  Return [] when the session was a single continuous task — never a one-entry list.
+  At most 6 entries. If the session had more distinct tasks than that, keep the SIX
+  MOST SUBSTANTIAL ones, not the first six.
+  Each entry is a short past-tense clause under 120 characters, not a sentence:
+  "Fixed the merged-view session-id lookup". No leading bullet or number.
+- "summary": when "tasks" is non-empty, 1-2 plain sentences of framing only — what the
+  session was about and where it landed — since the tasks already list the work.
+  When "tasks" is empty, 3-6 plain sentences on what happened and where it landed.
 
 Session digest:
 `)
@@ -109,21 +133,84 @@ Session digest:
 }
 
 // ParseSummary extracts the condenser's JSON object from a model response,
-// tolerating code fences and surrounding prose.
+// tolerating code fences and surrounding prose. Only description is required:
+// a schema-confused reply that drops or mangles tasks still yields a usable
+// card rather than an error.
 func ParseSummary(out string) (Summary, error) {
 	start := strings.Index(out, "{")
 	end := strings.LastIndex(out, "}")
 	if start < 0 || end <= start {
 		return Summary{}, errors.New("no JSON object in model output")
 	}
-	var s Summary
-	if err := json.Unmarshal([]byte(out[start:end+1]), &s); err != nil {
+	// tasks is decoded raw because models return it as an array, as one
+	// newline-delimited string, or as null — see parseTasks.
+	var wire struct {
+		Name        string          `json:"name"`
+		Description string          `json:"description"`
+		Summary     string          `json:"summary"`
+		Tasks       json.RawMessage `json:"tasks"`
+	}
+	if err := json.Unmarshal([]byte(out[start:end+1]), &wire); err != nil {
 		return Summary{}, fmt.Errorf("parse summary JSON: %w", err)
 	}
-	if s.Description == "" {
+	if wire.Description == "" {
 		return Summary{}, errors.New("summary JSON missing description")
 	}
-	return s, nil
+	return Summary{
+		Name:        wire.Name,
+		Description: wire.Description,
+		Summary:     wire.Summary,
+		Tasks:       parseTasks(wire.Tasks),
+	}, nil
+}
+
+// taskMarker matches a list marker the model sometimes leaves on an entry
+// ("- ", "* ", "1. "). A bullet character must be followed by whitespace so a
+// task that opens with a flag ("-force also rebuilds digests") keeps its text.
+var taskMarker = regexp.MustCompile(`^(?:[-*•]\s+|\d+[.)]\s*)`)
+
+// parseTasks normalizes the model's tasks field: absent, null, a JSON array of
+// strings, or a single string holding newline-delimited bullets. Entries are
+// stripped of list markers, trimmed, dropped when empty, and capped at
+// maxSummaryTasks. An unparseable field yields no tasks rather than an error —
+// tasks are optional enrichment, never a reason to lose the whole summary.
+func parseTasks(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var entries []string
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		var single string
+		if json.Unmarshal(raw, &single) != nil {
+			return nil
+		}
+		entries = strings.Split(single, "\n")
+	}
+	var tasks []string
+	for _, entry := range entries {
+		task := strings.TrimSpace(taskMarker.ReplaceAllString(strings.TrimSpace(entry), ""))
+		if task == "" {
+			continue
+		}
+		tasks = append(tasks, task)
+		if len(tasks) == maxSummaryTasks {
+			break
+		}
+	}
+	return tasks
+}
+
+// NeedsCondense reports whether a record's summary has to be generated: it is
+// missing, it was written by an older output schema (so it lacks fields the
+// current one carries, such as Tasks), or the caller passed -force.
+func NeedsCondense(record Record, force bool) bool {
+	if force {
+		return true
+	}
+	if record.Summary == nil {
+		return true
+	}
+	return record.SummaryVersion < CurrentSummaryVersion
 }
 
 // Condense generates a Summary for the digest via run.
