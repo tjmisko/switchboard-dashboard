@@ -218,19 +218,23 @@
   // -------------------------------------------------------------------------
 
   // workIntervalsMs collects the aloft spans as epoch-ms [start, end] pairs:
-  // every 'working' status interval plus every subagent span across all lanes.
-  // Pure; reads only lane.intervals[].status/start/end and lane.subagents[].
+  // every 'working' status interval plus every non-phantom subagent span across
+  // all lanes, each held to its lane's evidence bound (see clipSpanMs). Pure;
+  // reads only lane.intervals[].status/start/end, lane.subagents[], and the
+  // lane's suspect fields.
   function workIntervalsMs(lanes) {
     const out = [];
     for (const lane of lanes || []) {
+      const cut = suspectSinceMs(lane);
       for (const iv of lane.intervals || []) {
         if (iv.status !== "working") continue;
-        const s = Date.parse(iv.start), e = Date.parse(iv.end);
-        if (isFinite(s) && isFinite(e) && e > s) out.push([s, e]);
+        const span = clipSpanMs(Date.parse(iv.start), Date.parse(iv.end), cut);
+        if (span) out.push(span);
       }
       for (const sa of lane.subagents || []) {
-        const s = Date.parse(sa.start), e = Date.parse(sa.end);
-        if (isFinite(s) && isFinite(e) && e > s) out.push([s, e]);
+        if (sa.suspect) continue; // a phantom span is drawn, never credited
+        const span = clipSpanMs(Date.parse(sa.start), Date.parse(sa.end), cut);
+        if (span) out.push(span);
       }
     }
     return out;
@@ -291,7 +295,9 @@
   //
   // A lane's contribution is the sum of its 'working' interval durations plus the
   // sum of its subagent span durations — the same aloft spans workIntervalsMs
-  // collects, and with the same hygiene (unparseable or end <= start is dropped).
+  // collects, and with the same hygiene (unparseable or end <= start is dropped,
+  // phantom subagents are skipped, and a suspect lane is held to its evidence
+  // bound so this view agrees with the producer's fanout).
   // Overlapping spans within a project SUM rather than union: two agents working
   // the same wall-clock minute is two agent-minutes, which is exactly the fanout
   // this chart is meant to show.
@@ -309,15 +315,17 @@
   function projectHoursMs(lanes) {
     const totals = new Map(); // project -> {ms, parts}
     for (const lane of lanes || []) {
+      const cut = suspectSinceMs(lane);
       let laneMs = 0;
       for (const iv of lane.intervals || []) {
         if (iv.status !== "working") continue;
-        const s = Date.parse(iv.start), e = Date.parse(iv.end);
-        if (isFinite(s) && isFinite(e) && e > s) laneMs += e - s;
+        const span = clipSpanMs(Date.parse(iv.start), Date.parse(iv.end), cut);
+        if (span) laneMs += span[1] - span[0];
       }
       for (const sa of lane.subagents || []) {
-        const s = Date.parse(sa.start), e = Date.parse(sa.end);
-        if (isFinite(s) && isFinite(e) && e > s) laneMs += e - s;
+        if (sa.suspect) continue; // a phantom span is drawn, never credited
+        const span = clipSpanMs(Date.parse(sa.start), Date.parse(sa.end), cut);
+        if (span) laneMs += span[1] - span[0];
       }
       if (laneMs <= 0) continue;
       const project = lane.project_full || lane.project || "(no project)";
@@ -355,6 +363,28 @@
     return Number.isFinite(ms) ? ms : null;
   }
 
+  // clipSpanMs trims one [startMs, endMs] span to the part backed by evidence and
+  // returns it as a fresh pair, or null when nothing survives. cutMs is a
+  // suspectSinceMs() result: null means "trust the whole span".
+  //
+  // This is the SINGLE clip used by every client-side re-derivation of agent time
+  // (laneActiveMs, workIntervalsMs, projectHoursMs, and app.js's operator lane),
+  // so they cannot drift apart from each other or from the producer. It is the
+  // twin of clipToTrusted in internal/timeline/suspect.go and agrees with it on
+  // every boundary: a span starting exactly at the cut yields nothing, one ending
+  // exactly at the cut is kept whole, and a zero-length or inverted span yields
+  // nothing whether or not a cut applies.
+  function clipSpanMs(startMs, endMs, cutMs) {
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return null;
+    let end = endMs;
+    if (cutMs != null) {
+      if (startMs >= cutMs) return null;
+      if (end > cutMs) end = cutMs;
+    }
+    if (!(end > startMs)) return null;
+    return [startMs, end];
+  }
+
   // laneActiveMs sums a lane's status intervals, held to the evidence bound so a
   // client-side "active" figure agrees with the producer's summary rather than
   // re-crediting the phantom tail the summary already subtracted.
@@ -362,14 +392,8 @@
     const cut = suspectSinceMs(lane);
     let total = 0;
     for (const iv of (lane && lane.intervals) || []) {
-      const s = Date.parse(iv.start);
-      let e = Date.parse(iv.end);
-      if (!Number.isFinite(s) || !Number.isFinite(e)) continue;
-      if (cut != null) {
-        if (s >= cut) continue;
-        if (e > cut) e = cut;
-      }
-      if (e > s) total += e - s;
+      const span = clipSpanMs(Date.parse(iv.start), Date.parse(iv.end), cut);
+      if (span) total += span[1] - span[0];
     }
     return total;
   }
@@ -387,6 +411,6 @@
   return {
     laneIdentity, rawSessionId, leadLabel, nameSegments, buildBar, buildBars,
     spanInefficiency, switchArrivals, packLanes, workIntervalsMs, concurrencyProfile,
-    projectHoursMs, suspectSinceMs, laneActiveMs, suspectTailMs,
+    projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs, suspectTailMs,
   };
 });

@@ -446,12 +446,17 @@ function computeOperatorTime(data) {
   // detection applies the flicker floor via model.switchArrivals), and the ≥15s
   // focus pairs used for TYPING only (a ≥15s focus while active is real editing —
   // a separate concept from a switch, hence its own gate).
+  // The running window is held to each lane's evidence bound: a ghost lane's
+  // synthesized tail is not time an agent was observed running, so painting it
+  // green would stretch the free-time lane across phantom hours and inflate
+  // freeFrac (runningMs is its denominator).
   const runPairs = [], focusPairs = [], focusSpans = [];
   for (const lane of lanes) {
+    const cut = suspectSinceMs(lane);
     for (const iv of lane.intervals || []) {
       if (!RUNNING_STATUSES.has(iv.status)) continue;
-      const s = Date.parse(iv.start), e = Date.parse(iv.end);
-      if (isFinite(s) && isFinite(e) && e > s) runPairs.push([s, e]);
+      const span = clipSpanMs(Date.parse(iv.start), Date.parse(iv.end), cut);
+      if (span) runPairs.push(span);
     }
     for (const f of lane.focus || []) {
       const s = Date.parse(f.start), e = Date.parse(f.end);

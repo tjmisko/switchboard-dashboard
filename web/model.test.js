@@ -9,7 +9,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   laneIdentity, rawSessionId, leadLabel, nameSegments, buildBars, spanInefficiency, switchArrivals, packLanes,
-  workIntervalsMs, concurrencyProfile, projectHoursMs, suspectSinceMs, laneActiveMs, suspectTailMs,
+  workIntervalsMs, concurrencyProfile, projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs,
+  suspectTailMs,
 } = require("./model.js");
 
 // ms helper: a fixed base instant + offset minutes, as RFC3339 with offset.
@@ -621,4 +622,112 @@ test("suspectTailMs should return null when there is no tail to draw", () => {
   lane.end = lane.suspect_since; // flagged, but nothing was synthesized
   assert.equal(suspectTailMs(lane), null);
   assert.equal(suspectTailMs({ start: at(0), end: at(10) }), null);
+});
+
+// clipSpanMs boundaries. These four cases are the contract shared with
+// clipToTrusted in internal/timeline/suspect.go — the Go merge and this model
+// re-derive the same figures from the same envelope, so they have to agree on
+// every edge or a merged day silently disagrees with a single-provider one.
+test("clipSpanMs should drop a span that starts exactly at the cut", () => {
+  assert.equal(clipSpanMs(ms(60), ms(90), ms(60)), null);
+});
+
+test("clipSpanMs should keep a span that ends exactly at the cut in full", () => {
+  assert.deepEqual(clipSpanMs(ms(30), ms(60), ms(60)), [ms(30), ms(60)]);
+});
+
+test("clipSpanMs should drop a zero-length span at the cut", () => {
+  assert.equal(clipSpanMs(ms(60), ms(60), ms(60)), null);
+});
+
+test("clipSpanMs should drop an inverted span whether or not a cut applies", () => {
+  assert.equal(clipSpanMs(ms(60), ms(30), null), null);
+  assert.equal(clipSpanMs(ms(60), ms(30), ms(90)), null);
+  assert.equal(clipSpanMs(ms(60), ms(30), ms(45)), null);
+});
+
+test("clipSpanMs should trim a straddling span and pass a trusted one through", () => {
+  assert.deepEqual(clipSpanMs(ms(30), ms(90), ms(60)), [ms(30), ms(60)]);
+  assert.deepEqual(clipSpanMs(ms(0), ms(30), null), [ms(0), ms(30)]);
+});
+
+test("clipSpanMs should drop a span with an unparseable endpoint", () => {
+  assert.equal(clipSpanMs(NaN, ms(30), null), null);
+  assert.equal(clipSpanMs(ms(0), NaN, ms(60)), null);
+});
+
+// ---------------------------------------------------------------------------
+// suspect lanes: the aloft chart and the projects view. Both re-derive agent
+// time from the same lanes the producer already summarized, so both have to
+// clip at the evidence bound — otherwise the chart's "active" readout and the
+// attention card's union disagree on the same page.
+// ---------------------------------------------------------------------------
+
+// a suspect lane whose synthesized tail carries a phantom subagent: the exact
+// shape of the 2026-07-22 episode, where three phantom spans each read as 4½
+// hours of work nobody ever did.
+function ghostLaneWithPhantom() {
+  const lane = ghostLane();
+  lane.project = "alpha";
+  lane.subagents = [{ agent_type: "Explore", start: at(60), end: at(360), suspect: true }];
+  return lane;
+}
+
+test("workIntervalsMs should hold a suspect lane's working interval to the evidence bound", () => {
+  assert.deepEqual(workIntervalsMs([ghostLane()]), [[ms(0), ms(60)]]);
+});
+
+test("workIntervalsMs should not credit a phantom subagent span at all", () => {
+  assert.deepEqual(workIntervalsMs([ghostLaneWithPhantom()]), [[ms(0), ms(60)]]);
+});
+
+test("workIntervalsMs should trim a non-phantom subagent span at the evidence bound", () => {
+  // A span the producer did NOT flag still cannot run past the last evidence:
+  // it is trimmed, not dropped, so its trusted head is kept.
+  const lane = ghostLane();
+  lane.subagents = [{ start: at(30), end: at(120) }];
+  assert.deepEqual(workIntervalsMs([lane]), [[ms(0), ms(60)], [ms(30), ms(60)]]);
+});
+
+test("workIntervalsMs should count an unflagged lane's spans in full", () => {
+  const lane = ghostLaneWithPhantom();
+  lane.suspect = false;
+  lane.subagents[0].suspect = false;
+  assert.deepEqual(workIntervalsMs([lane]), [[ms(0), ms(360)], [ms(60), ms(360)]]);
+});
+
+test("the aloft chart should agree with the producer's union on a ghost lane", () => {
+  // The regression this whole guard exists for: before the clip, the chart
+  // labeled 6h "active" and peaked at 2 agents on a lane the summary credited
+  // one hour of, with only one agent ever evidenced.
+  const prof = concurrencyProfile(workIntervalsMs([ghostLaneWithPhantom()]));
+  assert.equal(prof.activeMs, 60 * MIN, "active time matches attention_union");
+  assert.equal(prof.maxN, 1, "only one agent was ever evidenced");
+  assert.equal(prof.integralMs, 60 * MIN, "no phantom agent-minutes");
+  assert.equal(laneActiveMs(ghostLaneWithPhantom()), prof.activeMs);
+});
+
+test("projectHoursMs should credit a suspect lane only its evidenced fanout", () => {
+  // Unclipped this project reads 11h — 6h of lane plus a 5h phantom — against
+  // the 1h the producer's fanout reports.
+  const rows = projectHoursMs([ghostLaneWithPhantom()]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].project, "alpha");
+  assert.equal(rows[0].ms, 60 * MIN);
+  assert.equal(rows[0].parts[0].ms, 60 * MIN, "the session's stacked part is clipped too");
+});
+
+test("projectHoursMs should drop a lane whose evidenced work is entirely phantom", () => {
+  // Nothing survives the clip, so the lane contributes no part and the project
+  // disappears rather than showing a zero-hour row.
+  const lane = ghostLaneWithPhantom();
+  lane.intervals = [{ status: "working", start: at(60), end: at(360) }];
+  assert.deepEqual(projectHoursMs([lane]), []);
+});
+
+test("projectHoursMs should count an unflagged lane's spans in full", () => {
+  const lane = ghostLaneWithPhantom();
+  lane.suspect = false;
+  lane.subagents[0].suspect = false;
+  assert.equal(projectHoursMs([lane])[0].ms, 360 * MIN + 300 * MIN);
 });
