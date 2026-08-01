@@ -1183,7 +1183,10 @@ function drawSession(lane, rowTop, x, haveActivity, activeGlobal) {
   const tail = suspectTailMs(lane);
   if (tail) {
     const [ts, te] = tail;
-    const tx = x(ts), tw = Math.max(2, x(te) - tx);
+    // clamped to the bar's left edge: the contract puts suspect_since inside the
+    // lane, but a producer that ever dated it earlier must not hatch open canvas.
+    const tx = Math.max(x(Date.parse(lane.start)), x(ts));
+    const tw = Math.max(2, x(te) - tx);
     const overlay = svgEl("rect", {
       class: "suspect-overlay", x: tx, y: barY - 1.5, width: tw, height: GEO.BAR_H + 3, rx: 2,
       fill: "url(#suspecthatch)",
@@ -1191,9 +1194,10 @@ function drawSession(lane, rowTop, x, haveActivity, activeGlobal) {
     attachTip(overlay, () => suspectTipHTML(lane));
     el.svg.appendChild(overlay);
     if (tw >= 14) {
+      // no tip on the badge: it is pointer-events:none (style.css .suspect-badge),
+      // so the overlay underneath is what carries the hover.
       const badge = svgEl("text", { class: "suspect-badge", x: tx + 5, y: barY + GEO.BAR_H - 2 });
       badge.textContent = "?";
-      attachTip(badge, () => suspectTipHTML(lane));
       el.svg.appendChild(badge);
     }
   }
