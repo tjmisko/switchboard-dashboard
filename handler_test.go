@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -502,6 +503,35 @@ func TestSummariesShouldServeGeneratedRecordsAndOmitDigestOnlyOnes(t *testing.T)
 	}
 	if got.Name != "fix-flaky-test" || got.Description != "Fixed the flaky auth test" {
 		t.Errorf("entry = %+v, want summary fields verbatim", got)
+	}
+}
+
+func TestSummariesShouldPassTasksThroughWhenTheRecordCarriesThem(t *testing.T) {
+	dir := t.TempDir()
+	writeSummaryRecord(t, dir, "-home-u-proj", "sess-multi",
+		`{"name":"three-jobs","description":"Did three jobs","tasks":["Fixed the lookup","Added the endpoint"],"summary":"A mixed session."}`)
+	writeSummaryRecord(t, dir, "-home-u-proj", "sess-prose",
+		`{"name":"one-job","description":"Did one job","summary":"A single continuous task."}`)
+
+	srv := &Server{SummariesDir: dir}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/summaries", nil)
+	srv.Handler().ServeHTTP(rec, req)
+
+	var resp struct {
+		Sessions map[string]struct {
+			Tasks []string `json:"tasks"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"Fixed the lookup", "Added the endpoint"}
+	if got := resp.Sessions["sess-multi"].Tasks; !reflect.DeepEqual(got, want) {
+		t.Errorf("tasks = %#v, want %#v", got, want)
+	}
+	if got := resp.Sessions["sess-prose"].Tasks; len(got) != 0 {
+		t.Errorf("tasks = %#v, want none for a prose-only record", got)
 	}
 }
 

@@ -313,10 +313,11 @@ func (s *Server) handlePlan(w http.ResponseWriter, r *http.Request) {
 // summaryEntry is the per-session slice of a session-digest record the UI
 // needs for hover enrichment: the generated identity, not the full digest.
 type summaryEntry struct {
-	Name        string `json:"name,omitempty"`
-	Description string `json:"description"`
-	Summary     string `json:"summary,omitempty"`
-	GeneratedAt string `json:"generated_at,omitempty"`
+	Name        string   `json:"name,omitempty"`
+	Description string   `json:"description"`
+	Tasks       []string `json:"tasks,omitempty"`
+	Summary     string   `json:"summary,omitempty"`
+	GeneratedAt string   `json:"generated_at,omitempty"`
 }
 
 // summariesResponse maps session id → generated summary. Sessions without a
@@ -333,9 +334,10 @@ type summaryRecord struct {
 		SessionID string `json:"sessionId"`
 	} `json:"digest"`
 	Summary *struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
-		Summary     string `json:"summary"`
+		Name        string   `json:"name"`
+		Description string   `json:"description"`
+		Tasks       []string `json:"tasks"`
+		Summary     string   `json:"summary"`
 	} `json:"summary"`
 	GeneratedAt string `json:"generatedAt"`
 }
@@ -381,6 +383,7 @@ func readSummaries(dir string) map[string]summaryEntry {
 			out[id] = summaryEntry{
 				Name:        rec.Summary.Name,
 				Description: rec.Summary.Description,
+				Tasks:       rec.Summary.Tasks,
 				Summary:     rec.Summary.Summary,
 				GeneratedAt: rec.GeneratedAt,
 			}
