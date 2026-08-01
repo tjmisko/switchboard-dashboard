@@ -1,6 +1,7 @@
 package arachne
 
 import (
+	"fmt"
 	"sort"
 	"time"
 
@@ -50,7 +51,8 @@ func Compile(events []Event, opts CompileOptions) *timeline.Timeline {
 	for _, s := range sessions {
 		startRFC := sessStartTS(s)
 		endRFC := s.endTS
-		if endRFC == "" {
+		unclosed := endRFC == ""
+		if unclosed {
 			endRFC = nowRFC // still running
 		}
 		if !overlapsWindow(startRFC, endRFC, opts) {
@@ -60,16 +62,27 @@ func Compile(events []Event, opts CompileOptions) *timeline.Timeline {
 		subs := make([]timeline.Subagent, 0, len(s.subs))
 		for _, su := range s.subs {
 			suEnd := su.endTS
-			if suEnd == "" {
+			unpaired := suEnd == ""
+			if unpaired {
 				suEnd = nowRFC
 			}
-			subs = append(subs, timeline.Subagent{
+			sa := timeline.Subagent{
 				AgentType:   su.agentType,
 				ToolUseID:   su.toolUseID,
 				Description: su.description,
 				Start:       su.startTS,
 				End:         suEnd,
-			})
+			}
+			// A span we had to close at the bound, that ran longer than a plausible
+			// unit of delegated work, is a phantom: the stop event never arrived.
+			if unpaired {
+				if ss, se, ok := timeline.SpanNanos(sa.Start, sa.End); ok && se-ss >= int64(timeline.DefaultSuspectSubagentCap) {
+					sa.Suspect = true
+					sa.SuspectReason = fmt.Sprintf("unpaired subagent stretched to now: span %s >= %s cap",
+						roundSec(time.Duration(se-ss)), roundSec(timeline.DefaultSuspectSubagentCap))
+				}
+			}
+			subs = append(subs, sa)
 		}
 
 		lane := timeline.Lane{
@@ -92,15 +105,39 @@ func Compile(events []Event, opts CompileOptions) *timeline.Timeline {
 			lane.Name = s.start.TaskID
 			lane.Names = []timeline.Span{{Label: s.start.TaskID, Start: startRFC, End: endRFC}}
 		}
+
+		// The plausibility post-check, the same one the switchboard daemon runs over
+		// its own lanes: a lane nothing ever closed, stretched to the bound, whose
+		// stretch since the last observed event is longer than a session plausibly
+		// sits silent. Both halves matter — a live session emitting events all along
+		// is long, not suspect, however long it runs. The lane is flagged, never
+		// truncated; only the credit below is held to the evidence.
+		// trustedNs is meaningful only when clip is set: 0 is a real instant (the
+		// Unix epoch), not a sentinel, so the flag carries "there is a bound" the
+		// way timeline.trustedEndNanos does.
+		var trustedNs int64
+		clip := false
+		if unclosed {
+			evidenceTS := s.lastTS
+			if evidenceTS == "" {
+				evidenceTS = startRFC
+			}
+			if es, ee, ok := timeline.SpanNanos(evidenceTS, endRFC); ok && ee-es >= int64(timeline.DefaultSuspectTrailingCap) {
+				lane.Suspect = true
+				lane.SuspectSince = evidenceTS
+				lane.SuspectReason = fmt.Sprintf("unclosed lane stretched to now: %s since the last event >= %s cap",
+					roundSec(time.Duration(ee-es)), roundSec(timeline.DefaultSuspectTrailingCap))
+				trustedNs, clip = es, true
+				out.Summary.SuspectLanes++
+				out.Summary.SuspectDuration += ee - es
+			}
+		}
 		out.Lanes = append(out.Lanes, lane)
 
 		// aggregates
 		if ws, we, ok := timeline.SpanNanos(startRFC, endRFC); ok {
-			dur := we - ws
-			out.Summary.ByStatus["working"] += dur
-			out.Summary.AttentionPerSession += dur
-			out.Summary.AttentionFanout += dur
-			aloftSpans = append(aloftSpans, [2]int64{ws, we})
+			// Window bounds cover the lane as DRAWN — the tail is still on screen even
+			// when it is not counted — so from/to take the full extent.
 			if !haveBounds {
 				fromNs, toNs, haveBounds = ws, we, true
 			} else {
@@ -111,12 +148,36 @@ func Compile(events []Event, opts CompileOptions) *timeline.Timeline {
 					toNs = we
 				}
 			}
+			creditEnd := we
+			if clip && trustedNs < creditEnd {
+				creditEnd = trustedNs
+			}
+			if creditEnd > ws {
+				dur := creditEnd - ws
+				out.Summary.ByStatus["working"] += dur
+				out.Summary.AttentionPerSession += dur
+				out.Summary.AttentionFanout += dur
+				aloftSpans = append(aloftSpans, [2]int64{ws, creditEnd})
+			}
 		}
 		for _, su := range subs {
-			if ss, se, ok := timeline.SpanNanos(su.Start, su.End); ok {
-				out.Summary.AttentionFanout += se - ss
-				aloftSpans = append(aloftSpans, [2]int64{ss, se})
+			if su.Suspect {
+				continue // a phantom span is drawn, never credited
 			}
+			ss, se, ok := timeline.SpanNanos(su.Start, su.End)
+			if !ok {
+				continue
+			}
+			if clip {
+				if ss >= trustedNs {
+					continue
+				}
+				if se > trustedNs {
+					se = trustedNs
+				}
+			}
+			out.Summary.AttentionFanout += se - ss
+			aloftSpans = append(aloftSpans, [2]int64{ss, se})
 		}
 
 		out.Totals.TokIn += s.usage.TokIn
@@ -153,6 +214,13 @@ type sess struct {
 	subs      []*sub
 	usage     Usage
 	seen      bool
+
+	// lastTS is the newest event timestamp seen for this session, and lastNs its
+	// parsed form. For a session that never logged a session_end, this is the last
+	// instant there is evidence for — everything between it and the bound Compile
+	// stretches the lane to is inference. See the suspect check in Compile.
+	lastTS string
+	lastNs int64
 }
 
 // aggregate folds the event stream into per-session records.
@@ -173,6 +241,9 @@ func aggregate(events []Event) []*sess {
 			continue
 		}
 		s := get(e.SessionID)
+		if ns, ok := timeline.ParseNanos(e.TS); ok && ns > s.lastNs {
+			s.lastTS, s.lastNs = e.TS, ns
+		}
 		switch e.Type {
 		case EventSessionStart:
 			s.start = e
@@ -210,6 +281,10 @@ func aggregate(events []Event) []*sess {
 	}
 	return out
 }
+
+// roundSec keeps the suspect reason strings readable (and identical in shape to
+// the daemon's, which the operator sees side by side in a merged view).
+func roundSec(d time.Duration) time.Duration { return d.Round(time.Second) }
 
 func sessStartTS(s *sess) string {
 	if s.start.StartedAt != "" {
