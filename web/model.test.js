@@ -10,6 +10,7 @@ const assert = require("node:assert/strict");
 const {
   laneIdentity, rawSessionId, leadLabel, nameSegments, buildBars, spanInefficiency, switchArrivals, packLanes,
   workIntervalsMs, concurrencyProfile, projectHoursMs,
+  summaryTasks, summaryBodyHTML, summaryHintText,
 } = require("./model.js");
 
 // ms helper: a fixed base instant + offset minutes, as RFC3339 with offset.
@@ -558,4 +559,73 @@ test("rawSessionId should not strip a foreign or coincidental prefix", () => {
 test("rawSessionId should return null when the lane has no session id", () => {
   assert.equal(rawSessionId({ pid: 42 }), null);
   assert.equal(rawSessionId(null), null);
+});
+
+// ---------------------------------------------------------------------------
+// session summary rendering — task bullets vs. prose on the pinned card
+// ---------------------------------------------------------------------------
+
+test("summaryBodyHTML should list the tasks above the prose when the summary has tasks", () => {
+  const html = summaryBodyHTML({
+    description: "Did three jobs",
+    tasks: ["Fixed the lookup", "Added the endpoint"],
+    summary: "A mixed session that landed on main.",
+  });
+  assert.match(html, /<ul class="po-tasks">/, "tasks render as a bullet list");
+  assert.match(html, /<li>Fixed the lookup<\/li><li>Added the endpoint<\/li>/, "one li per task, in order");
+  assert.ok(
+    html.indexOf('class="po-tasks"') < html.indexOf('class="po-summary"'),
+    "the bullets sit above the framing prose",
+  );
+});
+
+test("summaryBodyHTML should render prose alone when the summary has no tasks", () => {
+  // pre-v2 records (and genuinely single-task sessions) must keep the old layout.
+  for (const sum of [
+    { description: "d", summary: "One continuous task." },
+    { description: "d", tasks: [], summary: "One continuous task." },
+    { description: "d", tasks: ["   ", ""], summary: "One continuous task." },
+  ]) {
+    const html = summaryBodyHTML(sum);
+    assert.doesNotMatch(html, /po-tasks/, "no empty bullet list");
+    assert.equal(html, `<div class="po-summary">One continuous task.</div>`);
+  }
+});
+
+test("summaryBodyHTML should escape markup when a task or the prose contains HTML", () => {
+  const html = summaryBodyHTML({
+    tasks: ["<img src=x onerror=alert(1)> & \"quoted\""],
+    summary: "<script>alert(2)</script>",
+  });
+  assert.doesNotMatch(html, /<img|<script/, "no raw markup survives into the card");
+  assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt; &amp; &quot;quoted&quot;/);
+  assert.match(html, /&lt;script&gt;alert\(2\)&lt;\/script&gt;/);
+});
+
+test("summaryBodyHTML should render nothing when there is no summary record", () => {
+  assert.equal(summaryBodyHTML(null), "");
+  assert.equal(summaryBodyHTML({ description: "d" }), "");
+});
+
+test("summaryTasks should trim entries and drop empties when the model pads the list", () => {
+  assert.deepEqual(summaryTasks({ tasks: ["  Fixed it  ", "", "   ", null, "Shipped it"] }),
+    ["Fixed it", "Shipped it"]);
+  assert.deepEqual(summaryTasks(null), []);
+});
+
+test("summaryHintText should advertise the step count when the session had several tasks", () => {
+  assert.equal(
+    summaryHintText({ tasks: ["a", "b", "c", "d", "e"], summary: "s" }),
+    "click for 5 steps",
+  );
+});
+
+test("summaryHintText should keep the plain hint when there are no tasks to count", () => {
+  assert.equal(summaryHintText({ summary: "s" }), "click for the session summary");
+  assert.equal(summaryHintText({ tasks: ["only one"], summary: "s" }), "click for the session summary");
+});
+
+test("summaryHintText should be empty when the record has nothing behind the click", () => {
+  assert.equal(summaryHintText({ description: "d" }), "");
+  assert.equal(summaryHintText(null), "");
 });

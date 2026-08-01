@@ -699,6 +699,8 @@ main { padding: 16px 18px 36px; }
 .tooltip .t-histrow .lead { color: var(--fg-dim); font-style: italic; }
 
 /* ---------- popout (pinned subagent) ---------- */
+/* a six-bullet session card can outgrow the viewport, so the card caps its
+   height and scrolls its own body instead of running off the plot */
 .popout {
   position: fixed; z-index: 70;
   background: var(--bg-elev-2);
@@ -707,12 +709,18 @@ main { padding: 16px 18px 36px; }
   padding: 12px 14px 12px;
   font-size: 13px;
   max-width: 340px;
+  max-height: min(60vh, 460px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   box-shadow: 0 10px 34px var(--shadow-2);
 }
+/* sticky rather than absolute so the close button survives that scroll; the
+   card background rides along so scrolled text never shows through it */
 .popout .po-close {
-  position: absolute; top: 8px; right: 8px;
+  position: sticky; top: 0; float: right;
+  margin: 0 -4px 0 6px;
   padding: 2px 7px; font-size: 12px;
-  background: transparent; border: none; color: var(--fg-dim);
+  background: var(--bg-elev-2); border: none; color: var(--fg-dim);
 }
 .popout .po-close:hover { color: var(--fg); }
 .popout .po-head { font-weight: 700; font-family: var(--mono); padding-right: 20px; }
@@ -722,6 +730,15 @@ main { padding: 16px 18px 36px; }
 .popout .po-id { color: var(--fg-dim); margin-top: 8px; font-family: var(--mono); font-size: 11px; word-break: break-all; }
 /* the archival session narrative (session-digest summary) — body copy, not mono */
 .popout .po-summary { color: var(--fg-muted); margin-top: 8px; line-height: 1.5; font-size: 12.5px; }
+/* the session's distinct tasks, listed above that narrative — same body-copy
+   voice as .po-summary, one clause per line */
+.popout .po-tasks {
+  color: var(--fg); margin: 8px 0 0; padding-left: 17px;
+  line-height: 1.45; font-size: 12.5px;
+}
+.popout .po-tasks li { margin-top: 4px; }
+.popout .po-tasks li:first-child { margin-top: 0; }
+.popout .po-tasks li::marker { color: var(--fg-dim); }
 
 /* ---------- footer ---------- */
 .footer {
