@@ -186,6 +186,33 @@ The summary exposes three attention figures: **union** (wall-clock with at least
 one session active), **per-session** (the sum of per-session active time), and
 **fanout** (active time weighted by subagents, approximating total agent compute).
 
+### Suspect lanes
+
+A session that no `session_end` ever closed is drawn out to the window bound, so
+its tail is *synthesized rather than observed* — the 2026-07-22 episode where
+three phantom subagent sessions each read as 4½ hours of work. The producer
+flags that shape instead of hiding it:
+
+- On a lane: `suspect`, `suspect_reason`, `suspect_since`. **`start`/`end`/
+  `intervals` are never truncated** — `suspect_since` is the last instant with
+  evidence behind it, and everything from there to `end` is inference. The UI
+  hatches that stretch in amber with a `?` badge; the reason is shown verbatim on
+  hover, because "stretched to now" (a live ghost) and "stretched to window
+  bound" (which also catches a legitimate session running across midnight) are
+  not the same claim.
+- On a subagent span: `suspect`, `suspect_reason` — a span whose stop event never
+  arrived. Drawn as a phantom, never credited as compute.
+- On the summary: `suspect_lanes` and `suspect_duration`, where the duration is
+  exactly how much synthesized time every *other* figure in the summary already
+  excludes.
+
+The consequence for consumers: any "active" figure re-derived client-side by
+summing interval durations must clip each suspect lane at `suspect_since`, or it
+will disagree with the summary. `web/model.js` exposes `laneActiveMs` for that.
+Providers this repo compiles itself (arachne) run the same check with the caps in
+`internal/timeline/suspect.go`; a provider that omits the fields entirely is
+merged exactly as before, never silently clipped.
+
 ## Development
 
 ```sh

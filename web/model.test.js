@@ -9,7 +9,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   laneIdentity, rawSessionId, leadLabel, nameSegments, buildBars, spanInefficiency, switchArrivals, packLanes,
-  workIntervalsMs, concurrencyProfile, projectHoursMs,
+  workIntervalsMs, concurrencyProfile, projectHoursMs, suspectSinceMs, laneActiveMs, suspectTailMs,
 } = require("./model.js");
 
 // ms helper: a fixed base instant + offset minutes, as RFC3339 with offset.
@@ -558,4 +558,67 @@ test("rawSessionId should not strip a foreign or coincidental prefix", () => {
 test("rawSessionId should return null when the lane has no session id", () => {
   assert.equal(rawSessionId({ pid: 42 }), null);
   assert.equal(rawSessionId(null), null);
+});
+
+// ---------------------------------------------------------------------------
+// suspect lanes — the plausibility post-check (switchboard-dashboard#2)
+// ---------------------------------------------------------------------------
+
+// a six-hour lane whose last five hours nothing ever observed
+function ghostLane() {
+  return {
+    session_id: "ghost",
+    start: at(0),
+    end: at(360),
+    intervals: [{ status: "working", start: at(0), end: at(360) }],
+    suspect: true,
+    suspect_reason: "unclosed lane stretched to now: final \"working\" interval 5h0m0s >= 4h0m0s cap",
+    suspect_since: at(60),
+  };
+}
+
+test("laneActiveMs should stop at the evidence bound when the lane is suspect", () => {
+  assert.equal(laneActiveMs(ghostLane()), 60 * MIN);
+});
+
+test("laneActiveMs should count the whole lane when it is not flagged", () => {
+  const lane = ghostLane();
+  lane.suspect = false;
+  assert.equal(laneActiveMs(lane), 360 * MIN);
+});
+
+test("laneActiveMs should count the whole lane when suspect_since is unusable", () => {
+  // Fail open: a malformed timestamp must not silently erase real work.
+  const lane = ghostLane();
+  lane.suspect_since = "not-a-timestamp";
+  assert.equal(laneActiveMs(lane), 360 * MIN);
+  const missing = ghostLane();
+  delete missing.suspect_since;
+  assert.equal(laneActiveMs(missing), 360 * MIN);
+});
+
+test("laneActiveMs should drop intervals that start inside the synthesized tail", () => {
+  const lane = ghostLane();
+  lane.intervals = [
+    { status: "working", start: at(0), end: at(30) },   // wholly trusted
+    { status: "idle", start: at(30), end: at(90) },     // straddles the bound
+    { status: "working", start: at(90), end: at(360) }, // wholly synthesized
+  ];
+  assert.equal(laneActiveMs(lane), 60 * MIN);
+});
+
+test("suspectSinceMs should return null for a lane the producer did not flag", () => {
+  assert.equal(suspectSinceMs({ intervals: [] }), null);
+  assert.equal(suspectSinceMs(null), null);
+});
+
+test("suspectTailMs should span from the last evidence to the lane end", () => {
+  assert.deepEqual(suspectTailMs(ghostLane()), [baseMs + 60 * MIN, baseMs + 360 * MIN]);
+});
+
+test("suspectTailMs should return null when there is no tail to draw", () => {
+  const lane = ghostLane();
+  lane.end = lane.suspect_since; // flagged, but nothing was synthesized
+  assert.equal(suspectTailMs(lane), null);
+  assert.equal(suspectTailMs({ start: at(0), end: at(10) }), null);
 });

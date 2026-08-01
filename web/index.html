@@ -74,6 +74,12 @@
               <rect width="6" height="6" fill="none"></rect>
               <line class="hatch-line" x1="0" y1="0" x2="0" y2="6" stroke-width="1.1" stroke-opacity="0.55"></line>
             </pattern>
+            <!-- suspect (synthesized) stretch: counter-rotated and denser than the
+                 focus hatch above, so the two never read as the same overlay. -->
+            <pattern id="suspecthatch" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(-45)">
+              <rect width="5" height="5" fill="none"></rect>
+              <line class="suspect-hatch-line" x1="0" y1="0" x2="0" y2="5" stroke-width="1.4"></line>
+            </pattern>
           </defs>
         </svg>
         <canvas id="concurrency" role="img" aria-label="number of agents working over time"></canvas>

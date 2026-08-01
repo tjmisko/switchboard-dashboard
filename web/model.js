@@ -339,9 +339,54 @@
       .sort((a, b) => b.ms - a.ms || a.project.localeCompare(b.project));
   }
 
+  // ---- plausibility post-check (producer side: internal/history/suspect.go) --
+  // A lane nothing ever closed is drawn out to the window bound, so its tail is
+  // synthesized rather than observed. The producer flags it instead of truncating
+  // it — the operator has to be able to see that something was flagged — and
+  // excludes the tail from every figure in `summary`.
+
+  // suspectSinceMs is the last instant of a lane there is evidence for, or null
+  // when the lane is unflagged or its timestamp is unusable. Null means "trust
+  // the whole lane": a producer that does not run the check must never have its
+  // lanes silently clipped, and a malformed timestamp must not erase real time.
+  function suspectSinceMs(lane) {
+    if (!lane || !lane.suspect || !lane.suspect_since) return null;
+    const ms = Date.parse(lane.suspect_since);
+    return Number.isFinite(ms) ? ms : null;
+  }
+
+  // laneActiveMs sums a lane's status intervals, held to the evidence bound so a
+  // client-side "active" figure agrees with the producer's summary rather than
+  // re-crediting the phantom tail the summary already subtracted.
+  function laneActiveMs(lane) {
+    const cut = suspectSinceMs(lane);
+    let total = 0;
+    for (const iv of (lane && lane.intervals) || []) {
+      const s = Date.parse(iv.start);
+      let e = Date.parse(iv.end);
+      if (!Number.isFinite(s) || !Number.isFinite(e)) continue;
+      if (cut != null) {
+        if (s >= cut) continue;
+        if (e > cut) e = cut;
+      }
+      if (e > s) total += e - s;
+    }
+    return total;
+  }
+
+  // suspectTailMs is the [start, end] of the synthesized stretch to draw as
+  // untrusted, or null when there is nothing to mark.
+  function suspectTailMs(lane) {
+    const cut = suspectSinceMs(lane);
+    if (cut == null) return null;
+    const end = Date.parse(lane.end);
+    if (!Number.isFinite(end) || end <= cut) return null;
+    return [cut, end];
+  }
+
   return {
     laneIdentity, rawSessionId, leadLabel, nameSegments, buildBar, buildBars,
     spanInefficiency, switchArrivals, packLanes, workIntervalsMs, concurrencyProfile,
-    projectHoursMs,
+    projectHoursMs, suspectSinceMs, laneActiveMs, suspectTailMs,
   };
 });

@@ -1031,7 +1031,7 @@ function drawCollapsedGroup(g, x, W) {
 
   let activeMs = 0, cost = 0;
   for (const lane of g.lanes) {
-    for (const iv of lane.intervals || []) activeMs += Math.max(0, Date.parse(iv.end) - Date.parse(iv.start));
+    activeMs += laneActiveMs(lane); // clipped at the evidence bound, like the summary
     if (lane.cost_usd != null) cost += lane.cost_usd;
   }
   const meta = svgEl("text", { class: "group-collapsed-meta", x: GEO.GUTTER - 10, y: midY + 4, "text-anchor": "end" });
@@ -1171,6 +1171,28 @@ function drawSession(lane, rowTop, x, haveActivity, activeGlobal) {
     el.svg.appendChild(rect);
   }
 
+  // ---- suspect tail: the stretch a producer synthesized because nothing ever
+  // closed the session. Drawn OVER the status bars rather than instead of them —
+  // the bar keeps its real geometry, and the hatch says "inferred, not observed".
+  // The "?" badge is what makes it legible at a glance on a crowded day. ----
+  const tail = suspectTailMs(lane);
+  if (tail) {
+    const [ts, te] = tail;
+    const tx = x(ts), tw = Math.max(2, x(te) - tx);
+    const overlay = svgEl("rect", {
+      class: "suspect-overlay", x: tx, y: barY - 1.5, width: tw, height: GEO.BAR_H + 3, rx: 2,
+      fill: "url(#suspecthatch)",
+    });
+    attachTip(overlay, () => suspectTipHTML(lane));
+    el.svg.appendChild(overlay);
+    if (tw >= 14) {
+      const badge = svgEl("text", { class: "suspect-badge", x: tx + 5, y: barY + GEO.BAR_H - 2 });
+      badge.textContent = "?";
+      attachTip(badge, () => suspectTipHTML(lane));
+      el.svg.appendChild(badge);
+    }
+  }
+
   // ---- provider accent spine: a colored left-edge marker keying the session to
   // its data provider in the merged view (absent in single-provider mode). ----
   if (lane.provider) {
@@ -1223,8 +1245,12 @@ function drawSession(lane, rowTop, x, haveActivity, activeGlobal) {
       } else {
         const sa = cell.sa;
         const sx = x(sa.s), sw = Math.max(2, x(sa.e) - sx);
+        // A span whose stop event never arrived and that ran too long to be real
+        // work is drawn as a phantom — visible, but never mistaken for compute.
         const bar = svgEl("rect", {
-          class: "subagent-bar", x: sx, y: ry, width: sw, height: GEO.SUB_ROW_H, rx: 1.5, fill: SUBAGENT_COLOR,
+          class: sa.suspect ? "subagent-bar subagent-phantom" : "subagent-bar",
+          x: sx, y: ry, width: sw, height: GEO.SUB_ROW_H, rx: 1.5,
+          fill: sa.suspect ? "url(#suspecthatch)" : SUBAGENT_COLOR,
         });
         attachTip(bar, () => subagentTipHTML(sa));
         bar.addEventListener("click", (ev) => { ev.stopPropagation(); pinPopout(subagentPopoutHTML(sa), ev); });
@@ -1769,7 +1795,22 @@ function subagentTipHTML(sa) {
   return `<div class="t-status" style="color:${SUBAGENT_COLOR}">${escapeHTML(sa.agent_type || "subagent")}</div>`
     + (sa.description ? `<div class="t-desc">${escapeHTML(sa.description)}</div>` : "")
     + `<div class="t-row">${fmtClock(sa.start)} – ${fmtClock(sa.end)} · ${humanDurationMs(durMs)}</div>`
+    + (sa.suspect ? `<div class="t-suspect">phantom span — not counted as work<div class="t-suspect-why">${escapeHTML(sa.suspect_reason || "")}</div></div>` : "")
     + `<div class="t-hint">click to pin</div>`;
+}
+
+// suspectTipHTML explains the hatched tail. The producer's reason string is
+// shown verbatim: it distinguishes a live-day ghost ("stretched to now") from a
+// session that merely ran across the window bound, and the operator needs to
+// tell those apart before trusting or discarding the bar.
+function suspectTipHTML(lane) {
+  const tail = suspectTailMs(lane);
+  const durMs = tail ? tail[1] - tail[0] : 0;
+  return `<div class="t-head"><span class="t-status t-status-suspect">unverified stretch</span>`
+    + `<span class="t-dur">${humanDurationMs(durMs)}</span></div>`
+    + `<div class="t-suspect-why">${escapeHTML(lane.suspect_reason || "no session end was ever observed")}</div>`
+    + `<div class="t-row">last evidence ${fmtClock(lane.suspect_since)}</div>`
+    + `<div class="t-hint">drawn, but excluded from every total</div>`;
 }
 
 function subagentPopoutHTML(sa) {
@@ -1844,6 +1885,10 @@ function sessionPopoutHTML(lane) {
 
 function gutterTipHTML(lane, name) {
   let html = `<div class="t-status">${escapeHTML(name)}</div>`;
+  if (lane.suspect) {
+    html += `<div class="t-suspect">unverified stretch to ${fmtClock(lane.end)}`
+      + `<div class="t-suspect-why">${escapeHTML(lane.suspect_reason || "")}</div></div>`;
+  }
   const sum = sessionSummary(lane);
   if (sum) html += `<div class="t-desc">${escapeHTML(sum.description)}</div>`;
   html += `<div class="t-row">${escapeHTML(lane.agent || "?")}`
@@ -1996,9 +2041,23 @@ function renderAttentionCard(summary, op) {
         result: humanDuration(perSession),
         why: "Total active agent-time counting parallel sessions separately; ×N is average parallelism (agent-hours ÷ active).",
       }, "deemph")}
-    </div>`;
+    </div>
+    ${suspectNoteHTML(summary)}`;
 
   attachFormulaTips(el.cardAttention);
+}
+
+// suspectNoteHTML footnotes the figures above with what the producer refused to
+// count. Without it the numbers silently disagree with the bars on screen — a
+// hatched tail is visible in the plot but absent from every total here.
+function suspectNoteHTML(summary) {
+  const lanes = summary.suspect_lanes || 0;
+  if (lanes <= 0) return "";
+  const dur = summary.suspect_duration || 0;
+  return `<div class="kv muted-note suspect-note">`
+    + `${lanes} lane${lanes === 1 ? "" : "s"} flagged as unverified — `
+    + `${humanDuration(dur)} of synthesized time excluded from these figures`
+    + `</div>`;
 }
 
 // ---------------------------------------------------------------------------

@@ -34,6 +34,7 @@
   --accent: #58a6ff;
 
   --hatch-line: #e6edf3;      /* diagonal focus-overlay hatch */
+  --suspect: #d29922;         /* synthesized (unobserved) stretch of a lane */
   --hover-stroke: #ffffff;    /* bar/op/subagent hover halo */
   --lane-odd: rgba(255, 255, 255, 0.014);
   --attention-tint: #15281a22;
@@ -56,6 +57,7 @@
     --accent: #0969da;
 
     --hatch-line: #1f2328;
+    --suspect: #9a6700;
     --hover-stroke: #1f2328;
     --lane-odd: rgba(31, 35, 40, 0.03);
     --attention-tint: #1a7f3722;
@@ -78,6 +80,7 @@
   --accent: #0969da;
 
   --hatch-line: #1f2328;
+  --suspect: #9a6700;
   --hover-stroke: #1f2328;
   --lane-odd: rgba(31, 35, 40, 0.03);
   --attention-tint: #1a7f3722;
@@ -473,6 +476,18 @@ main { padding: 16px 18px 36px; }
    surfaces (near-white on dark, near-black on light) */
 .hatch-line { stroke: var(--hatch-line); }
 
+/* suspect (synthesized) stretch: an amber counter-hatch over the bar's real
+   geometry. The bar underneath is NOT truncated — the operator has to be able to
+   see what was flagged — so this reads as "inferred", not as a status of its own.
+   Amber rather than red: nothing is broken, we simply stopped observing. */
+.suspect-hatch-line { stroke: var(--suspect); stroke-opacity: 0.85; }
+.suspect-overlay { stroke: var(--suspect); stroke-width: 0.8; stroke-opacity: 0.6; cursor: help; }
+.suspect-badge {
+  fill: var(--suspect); font-family: var(--mono); font-size: 9px; font-weight: 700;
+  pointer-events: none; user-select: none;
+}
+.subagent-bar.subagent-phantom { stroke: var(--suspect); stroke-width: 0.7; stroke-opacity: 0.7; }
+
 /* operator free-time lane (top row): green = free, dark red = occupied */
 .op-lane-bg { fill: rgba(63, 185, 80, 0.05); }
 .op-bar { stroke: rgba(0, 0, 0, 0.28); stroke-width: 0.5; cursor: default; }
@@ -583,6 +598,8 @@ main { padding: 16px 18px 36px; }
 .kv-sep { height: 1px; background: var(--border-soft); margin: 3px 0; }
 .kv-head { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--fg-dim); margin-bottom: 2px; }
 .muted-note { color: var(--fg-dim); font-style: italic; font-size: 12px; }
+/* footnote tying the figures above to the hatched tails in the plot */
+.suspect-note { color: var(--suspect); margin-top: 8px; }
 
 /* small color key dot before a kv label, tying the row to the split bar */
 .kv .k .dot-k, .dot-k { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 8px; vertical-align: middle; }
@@ -693,6 +710,11 @@ main { padding: 16px 18px 36px; }
 .tooltip .t-sub { color: #7ee787; margin-top: 4px; }
 .tooltip .t-id { color: var(--fg-dim); margin-top: 4px; font-family: var(--mono); font-size: 11px; word-break: break-all; }
 .tooltip .t-hint { color: var(--fg-dim); margin-top: 5px; font-style: italic; }
+/* the plausibility flag: amber, and always paired with the producer's reason so
+   the operator can judge the lane rather than just distrust it */
+.tooltip .t-status-suspect { color: var(--suspect); }
+.tooltip .t-suspect { color: var(--suspect); margin-top: 5px; }
+.tooltip .t-suspect-why { color: var(--fg-muted); margin-top: 3px; line-height: 1.45; }
 .tooltip .t-hist { color: var(--fg-dim); margin-top: 6px; text-transform: uppercase; font-size: 10px; letter-spacing: 0.5px; }
 .tooltip .t-histrow { color: var(--fg-muted); font-family: var(--mono); font-size: 11px; margin-top: 2px; }
 .tooltip .t-histrow > span { color: var(--fg-dim); margin-right: 6px; }
