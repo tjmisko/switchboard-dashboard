@@ -239,6 +239,23 @@ func Condense(d Digest, run Runner) (Summary, error) {
 	return ParseSummary(out)
 }
 
+// CondenseRecord condenses the record's digest in place and stamps the schema
+// version that produced the summary, which is what makes the next run's
+// NeedsCondense skip it — without the stamp every plain -condense run would
+// re-summarize the whole archive. A failed run leaves the record untouched, so
+// the retry happens next time rather than marking a missing summary current.
+func CondenseRecord(record *Record, run Runner, model string, now time.Time) error {
+	summary, err := Condense(record.Digest, run)
+	if err != nil {
+		return err
+	}
+	record.Summary = &summary
+	record.SummaryVersion = CurrentSummaryVersion
+	record.Model = model
+	record.GeneratedAt = now.UTC().Format(time.RFC3339)
+	return nil
+}
+
 // ClaudeRunner shells out to `claude -p` in headless mode. dir becomes the
 // subprocess working directory so the summarizer's own transcripts land under
 // dir's project slug — which callers skip via SlugFor — instead of polluting

@@ -2,10 +2,12 @@ package sessiondigest
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBuildPromptShouldCapListsAndNoteOverflow(t *testing.T) {
@@ -258,5 +260,53 @@ func TestCondenseShouldFeedDigestPromptToRunnerAndParseItsReply(t *testing.T) {
 	}
 	if s.Name != "projects-tab" {
 		t.Errorf("Summary = %#v", s)
+	}
+}
+
+func TestCondenseRecordShouldStampTheSchemaVersionWhenTheRunnerSucceeds(t *testing.T) {
+	// the stamp is what stops the next plain -condense run from re-summarizing
+	// the entire archive, one `claude -p` call per record.
+	record := Record{Digest: Digest{Title: "Wire projects view"}}
+	run := func(string) (string, error) {
+		return `{"name":"projects-tab","description":"Added a stacked hours tab","summary":"Built the tab.","tasks":["Added the tab","Wired the totals"]}`, nil
+	}
+	now := time.Date(2026, 7, 31, 22, 0, 0, 0, time.UTC)
+	if err := CondenseRecord(&record, run, "haiku", now); err != nil {
+		t.Fatal(err)
+	}
+	if record.Summary == nil || record.Summary.Name != "projects-tab" {
+		t.Fatalf("Summary = %#v", record.Summary)
+	}
+	if record.SummaryVersion != CurrentSummaryVersion {
+		t.Errorf("SummaryVersion = %d, want %d", record.SummaryVersion, CurrentSummaryVersion)
+	}
+	if NeedsCondense(record, false) {
+		t.Error("want the stamped record skipped by the next unforced run")
+	}
+	if record.Model != "haiku" {
+		t.Errorf("Model = %q, want the model that generated it", record.Model)
+	}
+	if record.GeneratedAt != "2026-07-31T22:00:00Z" {
+		t.Errorf("GeneratedAt = %q, want the run time in RFC3339 UTC", record.GeneratedAt)
+	}
+}
+
+func TestCondenseRecordShouldLeaveTheRecordStaleWhenTheRunnerFails(t *testing.T) {
+	// a failed call must not stamp the version: the record has no summary, so
+	// the next run has to try again rather than treat it as current.
+	for _, run := range []Runner{
+		func(string) (string, error) { return "", errors.New("claude -p: exit 1") },
+		func(string) (string, error) { return "I could not summarize that.", nil },
+	} {
+		record := Record{Digest: Digest{Title: "Wire projects view"}}
+		if err := CondenseRecord(&record, run, "haiku", time.Now()); err == nil {
+			t.Fatal("want an error from a failed condense")
+		}
+		if record.Summary != nil || record.SummaryVersion != 0 || record.GeneratedAt != "" {
+			t.Errorf("record = %#v, want it untouched by a failed condense", record)
+		}
+		if !NeedsCondense(record, false) {
+			t.Error("want the failed record still queued for the next run")
+		}
 	}
 }

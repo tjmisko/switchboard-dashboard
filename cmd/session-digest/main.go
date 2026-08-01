@@ -101,18 +101,11 @@ func main() {
 		if *condense && sessiondigest.NeedsCondense(record, *force) {
 			if record.Digest.Thin() {
 				skippedThin++
+			} else if err := sessiondigest.CondenseRecord(&record, run, *model, time.Now()); err != nil {
+				log.Printf("condense %s/%s: %v", ref.ProjectSlug, ref.SessionID, err)
 			} else {
-				summary, err := sessiondigest.Condense(record.Digest, run)
-				if err != nil {
-					log.Printf("condense %s/%s: %v", ref.ProjectSlug, ref.SessionID, err)
-				} else {
-					record.Summary = &summary
-					record.SummaryVersion = sessiondigest.CurrentSummaryVersion
-					record.Model = *model
-					record.GeneratedAt = time.Now().UTC().Format(time.RFC3339)
-					condensed++
-					changed = true
-				}
+				condensed++
+				changed = true
 			}
 		}
 
