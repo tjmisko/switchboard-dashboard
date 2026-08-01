@@ -291,15 +291,6 @@ let planTimer = null;
 // agent-time-per-project ranking). Persisted so the choice survives reloads.
 const VIEW_KEY = "sb-view";
 
-// normalizeView validates a view name, resolving "bars" — the sessions view's
-// pre-rename spelling — so persisted choices and old ?view= links keep working.
-// Returns null for anything that isn't a view.
-function normalizeView(view) {
-  if (view === "bars") return "sessions";
-  if (view === "sessions" || view === "line" || view === "projects") return view;
-  return null;
-}
-
 let currentView = (function () {
   try {
     const v = normalizeView(localStorage.getItem(VIEW_KEY));

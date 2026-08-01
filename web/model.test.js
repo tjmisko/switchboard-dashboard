@@ -9,7 +9,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   laneIdentity, rawSessionId, leadLabel, nameSegments, buildBars, spanInefficiency, switchArrivals, packLanes,
-  workIntervalsMs, concurrencyProfile, projectHoursMs,
+  workIntervalsMs, concurrencyProfile, projectHoursMs, normalizeView,
 } = require("./model.js");
 
 // ms helper: a fixed base instant + offset minutes, as RFC3339 with offset.
@@ -558,4 +558,29 @@ test("rawSessionId should not strip a foreign or coincidental prefix", () => {
 test("rawSessionId should return null when the lane has no session id", () => {
   assert.equal(rawSessionId({ pid: 42 }), null);
   assert.equal(rawSessionId(null), null);
+});
+
+// ---------------------------------------------------------------------------
+// normalizeView — the chart-view name, incl. the pre-rename "bars" spelling
+// ---------------------------------------------------------------------------
+
+test("normalizeView should resolve the legacy 'bars' spelling to 'sessions'", () => {
+  // Guards the rename's back-compat: every persisted sb-view and every existing
+  // ?view=bars link still lands on the sessions view. Deleting this branch would
+  // silently break both.
+  assert.equal(normalizeView("bars"), "sessions");
+});
+
+test("normalizeView should pass the current view names through unchanged", () => {
+  assert.equal(normalizeView("sessions"), "sessions");
+  assert.equal(normalizeView("line"), "line");
+  assert.equal(normalizeView("projects"), "projects");
+});
+
+test("normalizeView should return null when the view is unknown or missing", () => {
+  // Both call sites fall back on a falsy return, so absent must be as falsy as bogus.
+  assert.equal(normalizeView(null), null);
+  assert.equal(normalizeView(undefined), null);
+  assert.equal(normalizeView(""), null);
+  assert.equal(normalizeView("foo"), null);
 });
