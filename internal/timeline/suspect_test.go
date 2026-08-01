@@ -122,3 +122,85 @@ func TestMerge_shouldCountTheFullLaneWhenSuspectSinceIsUnparsable(t *testing.T) 
 		t.Errorf("attention_union = %d, want %d", out.Summary.AttentionUnion, want)
 	}
 }
+
+func TestMerge_shouldCountTheFullLaneWhenSuspectSinceIsEmpty(t *testing.T) {
+	// The flag alone is not a bound. A producer that says "suspect" without saying
+	// since when has given us nothing to clip at, and inventing one would erase
+	// observed work — so this fails open exactly like an unparsable timestamp.
+	lane := suspectLane()
+	lane.SuspectSince = ""
+	in := []Sourced{{Provider: "claude", Timeline: &Timeline{
+		Lanes:   []Lane{lane},
+		Summary: Summary{ByStatus: map[string]int64{}},
+	}}}
+	out := Merge(in, MergeOptions{})
+	if want := 6 * hourNs; out.Summary.AttentionUnion != want {
+		t.Errorf("attention_union = %d, want %d", out.Summary.AttentionUnion, want)
+	}
+}
+
+func TestMerge_shouldTrimANonSuspectSubagentSpanAtTheEvidenceBound(t *testing.T) {
+	// A span the producer did NOT flag is real work, but it still cannot run past
+	// the last instant its parent had evidence for: it is trimmed, not dropped.
+	lane := suspectLane()
+	// Work stops at 10:15; the subagent then runs 10:30–13:00, straddling the
+	// 11:00 bound. Only its trusted half hour may reach the union.
+	lane.Intervals = []Interval{
+		{Status: "working", Start: "2026-07-22T10:00:00Z", End: "2026-07-22T10:15:00Z"},
+		{Status: "idle", Start: "2026-07-22T10:15:00Z", End: "2026-07-22T16:00:00Z"},
+	}
+	lane.Subagents = []Subagent{{AgentType: "Explore", Start: "2026-07-22T10:30:00Z", End: "2026-07-22T13:00:00Z"}}
+	in := []Sourced{{Provider: "claude", Timeline: &Timeline{
+		Lanes:   []Lane{lane},
+		Summary: Summary{ByStatus: map[string]int64{}},
+	}}}
+	out := Merge(in, MergeOptions{})
+	// 15m of parent work + 30m of trusted subagent (10:30–11:00) = 45m.
+	if want := 45 * hourNs / 60; out.Summary.AttentionUnion != want {
+		t.Errorf("attention_union = %d, want %d (the span trimmed at 11:00, not counted to 13:00)",
+			out.Summary.AttentionUnion, want)
+	}
+}
+
+func TestMerge_shouldDropAnIntervalWhollyInsideTheSynthesizedTail(t *testing.T) {
+	// suspect_since can land in a GAP between intervals rather than inside one, so
+	// the trailing interval must be dropped outright rather than trimmed to zero.
+	lane := suspectLane()
+	lane.Intervals = []Interval{
+		{Status: "working", Start: "2026-07-22T10:00:00Z", End: "2026-07-22T10:30:00Z"},
+		{Status: "working", Start: "2026-07-22T12:00:00Z", End: "2026-07-22T16:00:00Z"},
+	}
+	in := []Sourced{{Provider: "claude", Timeline: &Timeline{
+		Lanes:   []Lane{lane},
+		Summary: Summary{ByStatus: map[string]int64{}},
+	}}}
+	out := Merge(in, MergeOptions{})
+	if want := hourNs / 2; out.Summary.AttentionUnion != want {
+		t.Errorf("attention_union = %d, want %d (only the interval before the 11:00 bound)",
+			out.Summary.AttentionUnion, want)
+	}
+}
+
+func TestMerge_shouldUnionOverlappingLanesAcrossProvidersWhenOneIsSuspect(t *testing.T) {
+	// The two behaviors only interact here: the suspect lane must be clipped FIRST
+	// and the survivors unioned SECOND. Clipping without unioning gives 2h30m
+	// (the sum); unioning without clipping gives 4h (10:00–14:00).
+	ghost := suspectLane() // 10:00–16:00, evidence to 11:00
+	ghost.End = "2026-07-22T14:00:00Z"
+	ghost.Intervals = []Interval{{Status: "working", Start: "2026-07-22T10:00:00Z", End: "2026-07-22T14:00:00Z"}}
+	trusted := Lane{
+		SessionID: "trusted",
+		Start:     "2026-07-22T10:30:00Z",
+		End:       "2026-07-22T12:00:00Z",
+		Intervals: []Interval{{Status: "working", Start: "2026-07-22T10:30:00Z", End: "2026-07-22T12:00:00Z"}},
+	}
+	in := []Sourced{
+		{Provider: "claude", Timeline: &Timeline{Lanes: []Lane{ghost}, Summary: Summary{ByStatus: map[string]int64{}}}},
+		{Provider: "arachne", Timeline: &Timeline{Lanes: []Lane{trusted}, Summary: Summary{ByStatus: map[string]int64{}}}},
+	}
+	out := Merge(in, MergeOptions{})
+	// clipped ghost 10:00–11:00 ∪ trusted 10:30–12:00 = 10:00–12:00 = 2h.
+	if want := 2 * hourNs; out.Summary.AttentionUnion != want {
+		t.Errorf("attention_union = %d, want %d (clip then union)", out.Summary.AttentionUnion, want)
+	}
+}
