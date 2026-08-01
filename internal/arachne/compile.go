@@ -112,7 +112,11 @@ func Compile(events []Event, opts CompileOptions) *timeline.Timeline {
 		// sits silent. Both halves matter — a live session emitting events all along
 		// is long, not suspect, however long it runs. The lane is flagged, never
 		// truncated; only the credit below is held to the evidence.
-		trustedNs := int64(0)
+		// trustedNs is meaningful only when clip is set: 0 is a real instant (the
+		// Unix epoch), not a sentinel, so the flag carries "there is a bound" the
+		// way timeline.trustedEndNanos does.
+		var trustedNs int64
+		clip := false
 		if unclosed {
 			evidenceTS := s.lastTS
 			if evidenceTS == "" {
@@ -123,7 +127,7 @@ func Compile(events []Event, opts CompileOptions) *timeline.Timeline {
 				lane.SuspectSince = evidenceTS
 				lane.SuspectReason = fmt.Sprintf("unclosed lane stretched to now: %s since the last event >= %s cap",
 					roundSec(time.Duration(ee-es)), roundSec(timeline.DefaultSuspectTrailingCap))
-				trustedNs = es
+				trustedNs, clip = es, true
 				out.Summary.SuspectLanes++
 				out.Summary.SuspectDuration += ee - es
 			}
@@ -145,7 +149,7 @@ func Compile(events []Event, opts CompileOptions) *timeline.Timeline {
 				}
 			}
 			creditEnd := we
-			if trustedNs > 0 && trustedNs < creditEnd {
+			if clip && trustedNs < creditEnd {
 				creditEnd = trustedNs
 			}
 			if creditEnd > ws {
@@ -164,7 +168,7 @@ func Compile(events []Event, opts CompileOptions) *timeline.Timeline {
 			if !ok {
 				continue
 			}
-			if trustedNs > 0 {
+			if clip {
 				if ss >= trustedNs {
 					continue
 				}
