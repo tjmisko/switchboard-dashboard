@@ -158,19 +158,38 @@ func namespaceID(provider, sessionID string, pid, idx int) string {
 	return provider + ":" + base
 }
 
-// laneAloftSpans returns the [startNs, endNs] windows during which the lane is
-// "aloft": every working interval plus every subagent span. This mirrors
-// web/model.js workIntervalsMs so the Go merge and the JS chart agree.
-// laneAloftSpans is the lane's contribution to attention_union. A suspect lane
-// contributes only the part of itself that predates its synthesized tail, and a
-// suspect subagent span contributes nothing at all — otherwise the merged union
-// would re-credit exactly the phantom time each provider's own summary already
-// subtracted, and a merged day would disagree with the same day single-provider.
+// isActiveStatus reports whether an interval status is the parent thread's own
+// agent work. It mirrors isActive in the switchboard daemon's
+// internal/history/timeline.go, which is what its summary counts: "delegating"
+// is the legacy spelling of a parent handing off to a subagent (superseded by
+// "dormant", still present in older history), and the producer credits it, so
+// attention_union must too or a merged day would undercount a legacy stream.
+// Idle, permission, suspended, and dormant are not active — for dormant the
+// subagent span carries the compute, and it is added separately below.
+func isActiveStatus(status string) bool {
+	return status == "working" || status == "delegating"
+}
+
+// laneAloftSpans is the lane's contribution to attention_union: the [startNs,
+// endNs] windows during which it was "aloft" — every active interval plus every
+// subagent span, left un-deduplicated because Merge unions them.
+//
+// A suspect lane contributes only the part of itself that predates its
+// synthesized tail, and a suspect subagent span contributes nothing at all —
+// otherwise the merged union would re-credit exactly the phantom time each
+// provider's own summary already subtracted, and a merged day would disagree
+// with the same day single-provider. web/model.js workIntervalsMs applies the
+// same clip and the same phantom skip (via clipSpanMs) so the Go merge and the
+// JS chart agree on which time is evidenced. The chart still omits
+// delegating/dormant parents, which this counts: it plots INSTANTANEOUS fanout,
+// where crediting a parent alongside the subagent it is waiting on would read as
+// two agents aloft; a union cannot double-count, so the two differ only for
+// legacy delegating time that no subagent span already covers.
 func laneAloftSpans(lane *Lane) [][2]int64 {
 	var out [][2]int64
 	trustedEnd, clip := trustedEndNanos(lane)
 	for _, iv := range lane.Intervals {
-		if iv.Status != "working" {
+		if !isActiveStatus(iv.Status) {
 			continue
 		}
 		s, e, ok := SpanNanos(iv.Start, iv.End)

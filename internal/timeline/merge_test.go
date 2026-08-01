@@ -133,6 +133,73 @@ func TestMerge_shouldOverrideWindowLabelWhenOptionSet(t *testing.T) {
 	}
 }
 
+// oneLane wraps a single lane as a single provider's envelope.
+func oneLane(lane Lane) []Sourced {
+	return []Sourced{{Provider: "claude", Timeline: &Timeline{
+		Lanes:   []Lane{lane},
+		Summary: Summary{ByStatus: map[string]int64{}},
+	}}}
+}
+
+func TestMerge_shouldCountDelegatingIntervalsAsActiveLikeTheProducer(t *testing.T) {
+	// "delegating" is the legacy spelling of a parent handing off to a subagent,
+	// superseded by "dormant" but still present in older history. The producer's
+	// isActive counts it, so a merged day that skipped it would report 1h where
+	// the same day single-provider reports 3h.
+	lane := Lane{
+		SessionID: "legacy",
+		Start:     "2026-07-22T06:00:00Z",
+		End:       "2026-07-22T09:00:00Z",
+		Intervals: []Interval{
+			{Status: "working", Start: "2026-07-22T06:00:00Z", End: "2026-07-22T07:00:00Z"},
+			{Status: "delegating", Start: "2026-07-22T07:00:00Z", End: "2026-07-22T09:00:00Z"},
+		},
+	}
+	out := Merge(oneLane(lane), MergeOptions{})
+	if want := int64(3 * 3600 * 1e9); out.Summary.AttentionUnion != want {
+		t.Errorf("attention_union = %d, want %d (working + delegating)", out.Summary.AttentionUnion, want)
+	}
+}
+
+func TestMerge_shouldNotDoubleCountDelegatingTimeItsSubagentSpanAlreadyCovers(t *testing.T) {
+	// The union is what protects us here: a legacy lane can carry BOTH the
+	// delegating interval and the subagent span it was waiting on, and the
+	// overlapping wall-clock must be credited once.
+	lane := Lane{
+		SessionID: "legacy",
+		Start:     "2026-07-22T06:00:00Z",
+		End:       "2026-07-22T09:00:00Z",
+		Intervals: []Interval{
+			{Status: "working", Start: "2026-07-22T06:00:00Z", End: "2026-07-22T07:00:00Z"},
+			{Status: "delegating", Start: "2026-07-22T07:00:00Z", End: "2026-07-22T09:00:00Z"},
+		},
+		Subagents: []Subagent{{AgentType: "Explore", Start: "2026-07-22T07:00:00Z", End: "2026-07-22T09:00:00Z"}},
+	}
+	out := Merge(oneLane(lane), MergeOptions{})
+	if want := int64(3 * 3600 * 1e9); out.Summary.AttentionUnion != want {
+		t.Errorf("attention_union = %d, want %d (the delegated hours counted once)", out.Summary.AttentionUnion, want)
+	}
+}
+
+func TestMerge_shouldNotCountADormantIntervalAsActiveOnItsOwn(t *testing.T) {
+	// dormant is the modern status for the same waiting, and the producer does NOT
+	// count it: the subagent span is what carries the compute. Widening the active
+	// set to delegating must not have swept dormant in with it.
+	lane := Lane{
+		SessionID: "modern",
+		Start:     "2026-07-22T06:00:00Z",
+		End:       "2026-07-22T09:00:00Z",
+		Intervals: []Interval{
+			{Status: "working", Start: "2026-07-22T06:00:00Z", End: "2026-07-22T07:00:00Z"},
+			{Status: "dormant", Start: "2026-07-22T07:00:00Z", End: "2026-07-22T09:00:00Z"},
+		},
+	}
+	out := Merge(oneLane(lane), MergeOptions{})
+	if want := int64(3600 * 1e9); out.Summary.AttentionUnion != want {
+		t.Errorf("attention_union = %d, want %d (the working hour only)", out.Summary.AttentionUnion, want)
+	}
+}
+
 func keysOf(m map[string]Lane) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
