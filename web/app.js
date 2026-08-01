@@ -291,10 +291,18 @@ let planTimer = null;
 // agent-time-per-project ranking). Persisted so the choice survives reloads.
 const VIEW_KEY = "sb-view";
 
+// Seeded from the PERSISTED choice only — ?view= is applied later, by
+// applyUrlParams, and deliberately never written back (the URL wins for the
+// load, but does not become sticky). Upgrading a stored legacy "bars" in place
+// here is what lets normalizeView's shim be deleted in a later release.
 let currentView = (function () {
   try {
-    const v = normalizeView(localStorage.getItem(VIEW_KEY));
-    if (v) return v;
+    const stored = localStorage.getItem(VIEW_KEY);
+    const v = normalizeView(stored);
+    if (v) {
+      if (v !== stored) localStorage.setItem(VIEW_KEY, v);
+      return v;
+    }
   } catch (e) {}
   return "sessions";
 })();
