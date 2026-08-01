@@ -179,16 +179,8 @@ func parseTasks(raw json.RawMessage) []string {
 	if len(raw) == 0 {
 		return nil
 	}
-	var entries []string
-	if err := json.Unmarshal(raw, &entries); err != nil {
-		var single string
-		if json.Unmarshal(raw, &single) != nil {
-			return nil
-		}
-		entries = strings.Split(single, "\n")
-	}
 	var tasks []string
-	for _, entry := range entries {
+	for _, entry := range taskEntries(raw) {
 		task := strings.TrimSpace(taskMarker.ReplaceAllString(strings.TrimSpace(entry), ""))
 		if task == "" {
 			continue
@@ -199,6 +191,30 @@ func parseTasks(raw json.RawMessage) []string {
 		}
 	}
 	return tasks
+}
+
+// taskEntries splits the raw tasks field into unnormalized entries. A JSON
+// array keeps only the elements that are themselves strings, so the common
+// "model emitted one object among six strings" reply costs that one bullet
+// instead of the whole list; a lone string is split on newlines; anything else
+// yields none.
+func taskEntries(raw json.RawMessage) []string {
+	var elements []json.RawMessage
+	if err := json.Unmarshal(raw, &elements); err != nil {
+		var single string
+		if json.Unmarshal(raw, &single) != nil {
+			return nil
+		}
+		return strings.Split(single, "\n")
+	}
+	var entries []string
+	for _, element := range elements {
+		var entry string
+		if json.Unmarshal(element, &entry) == nil {
+			entries = append(entries, entry)
+		}
+	}
+	return entries
 }
 
 // NeedsCondense reports whether a record's summary has to be generated: it is

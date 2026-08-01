@@ -121,6 +121,28 @@ func TestParseSummaryShouldSplitAndStripMarkersWhenTasksIsOneBulletString(t *tes
 	}
 }
 
+func TestParseSummaryShouldKeepTheStringEntriesWhenTheTaskArrayIsMixed(t *testing.T) {
+	// a model that slips one object (or number) into an otherwise fine list
+	// costs that entry alone, not the whole session's bullets.
+	s, err := ParseSummary(`{"name":"n","description":"d","summary":"s","tasks":["Fixed the lookup",42,{"task":"Added the endpoint"},"Wrote the docs"]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"Fixed the lookup", "Wrote the docs"}
+	if !reflect.DeepEqual(s.Tasks, want) {
+		t.Errorf("Tasks = %#v, want %#v", s.Tasks, want)
+	}
+
+	// an array with no string entries at all still yields none.
+	s, err = ParseSummary(`{"name":"n","description":"d","summary":"s","tasks":[{"task":"a"},{"task":"b"}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Tasks) != 0 {
+		t.Errorf("Tasks = %#v, want none for an all-object array", s.Tasks)
+	}
+}
+
 func TestParseSummaryShouldKeepLeadingCharactersWhenATaskOpensLikeAMarker(t *testing.T) {
 	// marker stripping only fires on a marker followed by whitespace, so a
 	// decimal or a flag at the head of a task survives intact.
