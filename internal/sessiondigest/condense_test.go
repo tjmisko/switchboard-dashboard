@@ -1,6 +1,7 @@
 package sessiondigest
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
@@ -115,6 +116,33 @@ func TestParseSummaryShouldSplitAndStripMarkersWhenTasksIsOneBulletString(t *tes
 		t.Fatal(err)
 	}
 	want := []string{"Fixed the lookup", "Added the endpoint", "Wrote the docs"}
+	if !reflect.DeepEqual(s.Tasks, want) {
+		t.Errorf("Tasks = %#v, want %#v", s.Tasks, want)
+	}
+}
+
+func TestParseSummaryShouldKeepLeadingCharactersWhenATaskOpensLikeAMarker(t *testing.T) {
+	// marker stripping only fires on a marker followed by whitespace, so a
+	// decimal or a flag at the head of a task survives intact.
+	want := []string{
+		"3.5x faster parse on the hot path",
+		"2.0 migration finished",
+		"-force now rebuilds digests",
+		"*args unpacking fixed",
+	}
+	var entries []string
+	for _, task := range want {
+		raw, err := json.Marshal(task)
+		if err != nil {
+			t.Fatal(err)
+		}
+		entries = append(entries, string(raw))
+	}
+	out := fmt.Sprintf(`{"name":"n","description":"d","summary":"s","tasks":[%s]}`, strings.Join(entries, ","))
+	s, err := ParseSummary(out)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !reflect.DeepEqual(s.Tasks, want) {
 		t.Errorf("Tasks = %#v, want %#v", s.Tasks, want)
 	}

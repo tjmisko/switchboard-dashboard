@@ -165,9 +165,10 @@ func ParseSummary(out string) (Summary, error) {
 }
 
 // taskMarker matches a list marker the model sometimes leaves on an entry
-// ("- ", "* ", "1. "). A bullet character must be followed by whitespace so a
-// task that opens with a flag ("-force also rebuilds digests") keeps its text.
-var taskMarker = regexp.MustCompile(`^(?:[-*•]\s+|\d+[.)]\s*)`)
+// ("- ", "* ", "1. "). Every marker must be followed by whitespace: that is
+// what keeps a task opening with a flag ("-force also rebuilds digests") or a
+// decimal ("3.5x faster parse") from losing its leading characters.
+var taskMarker = regexp.MustCompile(`^(?:[-*•]|\d+[.)])\s+`)
 
 // parseTasks normalizes the model's tasks field: absent, null, a JSON array of
 // strings, or a single string holding newline-delimited bullets. Entries are
