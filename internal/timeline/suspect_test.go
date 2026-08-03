@@ -5,7 +5,10 @@ import "testing"
 const hourNs = int64(3600) * 1e9
 
 // suspectLane is a six-hour lane whose last four hours are synthesized: the
-// producer flagged it and dated the evidence at 11:00.
+// producer flagged it and dated the evidence at 11:00. The reason is quoted as
+// the switchboard daemon actually emits it — status clause and all — so these
+// merge tests exercise the string an operator will really see rather than a
+// paraphrase of it.
 func suspectLane() Lane {
 	return Lane{
 		SessionID:     "ghost",
@@ -15,7 +18,7 @@ func suspectLane() Lane {
 		End:           "2026-07-22T16:00:00Z",
 		Intervals:     []Interval{{Status: "working", Start: "2026-07-22T10:00:00Z", End: "2026-07-22T16:00:00Z"}},
 		Suspect:       true,
-		SuspectReason: "unclosed lane stretched to now: final \"working\" interval 5h0m0s >= 4h0m0s cap",
+		SuspectReason: "unclosed lane stretched to now: silent 5h0m0s >= 4h0m0s cap; last status \"working\"",
 		SuspectSince:  "2026-07-22T11:00:00Z",
 	}
 }
