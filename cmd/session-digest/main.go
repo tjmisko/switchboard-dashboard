@@ -6,8 +6,9 @@
 //
 // Records land in -out as <slug>/<session-id>.json and are updated
 // incrementally: a digest is rebuilt when its transcript is newer than the
-// record, and a summary is generated when it is missing or was written by an
-// older output schema (or with -force). Subagent descriptions are harvested
+// record, and a summary is generated when it is missing, was written by an
+// older output schema, or no longer matches the digest a resumed session
+// rebuilt under it (or with -force). Subagent descriptions are harvested
 // verbatim — the parent model authored them at spawn time — and are never
 // re-summarized.
 package main
@@ -33,7 +34,7 @@ func main() {
 	out := flag.String("out", filepath.Join(home, ".local", "share", "switchboard", "summaries"), "output dir for per-session records")
 	project := flag.String("project", "", "only process sessions under this project slug")
 	session := flag.String("session", "", "only process this session id (also bypasses -min-idle)")
-	condense := flag.Bool("condense", false, "generate name/description/tasks/summary via `claude -p` for records lacking one or written by an older schema")
+	condense := flag.Bool("condense", false, "generate name/description/tasks/summary via `claude -p` for records lacking one, written by an older schema, or describing a stale digest")
 	model := flag.String("model", "haiku", "model passed to `claude -p`")
 	minIdle := flag.Duration("min-idle", 10*time.Minute, "skip transcripts modified more recently than this (likely still live)")
 	force := flag.Bool("force", false, "rebuild digests and regenerate summaries even when up to date")

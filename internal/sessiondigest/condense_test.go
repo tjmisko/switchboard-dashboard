@@ -244,6 +244,130 @@ func TestNeedsCondenseShouldLeaveARecordWrittenByANewerSchemaAlone(t *testing.T)
 	}
 }
 
+func TestNeedsCondenseShouldFollowTheStampedDigestHash(t *testing.T) {
+	ended := Digest{
+		Title:       "Wire projects view",
+		UserPrompts: []string{"add a projects tab"},
+		FilesEdited: []string{"web/app.js"},
+	}
+	// the same session resumed and ended again: same record, fatter digest.
+	resumed := Digest{
+		Title:       "Wire projects view",
+		UserPrompts: []string{"add a projects tab", "now add the totals row"},
+		FilesEdited: []string{"web/app.js", "web/model.js"},
+	}
+	// a rebuild that read the same transcript: byte-identical content, fresh
+	// slices, so the hash has to compare content and not identity.
+	rebuilt := Digest{
+		Title:       "Wire projects view",
+		UserPrompts: []string{"add a projects tab"},
+		FilesEdited: []string{"web/app.js"},
+	}
+	current := func(d Digest, hash string) Record {
+		return Record{
+			Digest:         d,
+			Summary:        &Summary{Description: "Added a stacked hours tab"},
+			SummaryVersion: CurrentSummaryVersion,
+			DigestHash:     hash,
+		}
+	}
+
+	for _, tc := range []struct {
+		name   string
+		record Record
+		force  bool
+		want   bool
+	}{
+		{
+			name:   "rebuilt digest with new content re-condenses",
+			record: current(resumed, HashDigest(ended)),
+			want:   true,
+		},
+		{
+			name:   "rebuilt digest with identical content does not",
+			record: current(rebuilt, HashDigest(ended)),
+			want:   false,
+		},
+		{
+			name:   "record from before the hash existed does not",
+			record: current(resumed, ""),
+			want:   false,
+		},
+		{
+			name: "older schema version re-condenses whatever the hash says",
+			record: Record{
+				Digest:         ended,
+				Summary:        &Summary{Description: "d"},
+				SummaryVersion: CurrentSummaryVersion - 1,
+				DigestHash:     HashDigest(ended),
+			},
+			want: true,
+		},
+		{
+			name:   "missing summary re-condenses",
+			record: Record{Digest: ended, DigestHash: HashDigest(ended)},
+			want:   true,
+		},
+		{
+			name:   "force re-condenses a matching hash",
+			record: current(rebuilt, HashDigest(ended)),
+			force:  true,
+			want:   true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := NeedsCondense(tc.record, tc.force); got != tc.want {
+				t.Errorf("NeedsCondense = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestHashDigestShouldMatchWhenTwoDigestsCarryEqualPromptContent(t *testing.T) {
+	build := func() Digest {
+		return Digest{
+			Title:              "Wire projects view",
+			AgentName:          "projects-agent",
+			ProjectDir:         "/home/u/Projects/switchboard",
+			GitBranch:          "feat/projects-tab",
+			StartedAt:          "2026-07-31T20:00:00Z",
+			EndedAt:            "2026-07-31T22:00:00Z",
+			UserPrompts:        []string{"add a projects tab", "now the totals row"},
+			CommitSubjects:     []string{"feat: add the projects tab"},
+			FilesEdited:        []string{"web/app.js", "web/model.js"},
+			BashDescriptions:   []string{"Run the go tests"},
+			Subagents:          []Subagent{{Name: "model-agent", Description: "Add projectHoursMs"}},
+			FinalAssistantText: "Done — the tab renders.",
+		}
+	}
+	if HashDigest(build()) != HashDigest(build()) {
+		t.Error("want one hash for two separately built but equal digests")
+	}
+	changed := build()
+	changed.UserPrompts = append(changed.UserPrompts, "and a legend")
+	if HashDigest(changed) == HashDigest(build()) {
+		t.Error("want a different hash once a prompt-visible field changes")
+	}
+}
+
+func TestHashDigestShouldIgnoreFieldsThePromptNeverShows(t *testing.T) {
+	// re-condensing costs a real `claude -p` call, so a change the summary
+	// could not possibly have reflected must not trigger one.
+	base := Digest{
+		Title:       "Wire projects view",
+		UserPrompts: []string{"add a projects tab"},
+		Subagents:   []Subagent{{Name: "model-agent", Description: "Add projectHoursMs"}},
+	}
+	invisible := base
+	invisible.SessionID = "9f1c-2b7e"
+	invisible.ProjectSlug = "-home-u-Projects-switchboard"
+	invisible.ToolCounts = map[string]int{"Edit": 12, "Bash": 4}
+	invisible.Subagents = []Subagent{{Name: "model-agent", Description: "Add projectHoursMs", Model: "opus"}}
+	if HashDigest(invisible) != HashDigest(base) {
+		t.Error("want the same hash when only fields outside the prompt differ")
+	}
+}
+
 func TestCondenseShouldFeedDigestPromptToRunnerAndParseItsReply(t *testing.T) {
 	d := Digest{Title: "Wire projects view", UserPrompts: []string{"add a projects tab"}}
 	var seen string
@@ -289,6 +413,15 @@ func TestCondenseRecordShouldStampTheSchemaVersionWhenTheRunnerSucceeds(t *testi
 	if record.GeneratedAt != "2026-07-31T22:00:00Z" {
 		t.Errorf("GeneratedAt = %q, want the run time in RFC3339 UTC", record.GeneratedAt)
 	}
+	if record.DigestHash != HashDigest(record.Digest) {
+		t.Errorf("DigestHash = %q, want the hash of the digest it summarized", record.DigestHash)
+	}
+	// and that stamp is what catches the resume the version stamp cannot: same
+	// record, digest rebuilt from a longer transcript.
+	record.Digest.UserPrompts = append(record.Digest.UserPrompts, "now add the totals row")
+	if !NeedsCondense(record, false) {
+		t.Error("want a re-condense once the stamped digest is rebuilt with new content")
+	}
 }
 
 func TestCondenseRecordShouldLeaveTheRecordStaleWhenTheRunnerFails(t *testing.T) {
@@ -302,7 +435,7 @@ func TestCondenseRecordShouldLeaveTheRecordStaleWhenTheRunnerFails(t *testing.T)
 		if err := CondenseRecord(&record, run, "haiku", time.Now()); err == nil {
 			t.Fatal("want an error from a failed condense")
 		}
-		if record.Summary != nil || record.SummaryVersion != 0 || record.GeneratedAt != "" {
+		if record.Summary != nil || record.SummaryVersion != 0 || record.GeneratedAt != "" || record.DigestHash != "" {
 			t.Errorf("record = %#v, want it untouched by a failed condense", record)
 		}
 		if !NeedsCondense(record, false) {
