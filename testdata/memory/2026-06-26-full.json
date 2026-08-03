@@ -1,0 +1,79 @@
+{
+  "window": "2026-06-26",
+  "sessions": [
+    {
+      "session_id": "ce13c0f2-1111-4aaa-8bbb-000000000001",
+      "pid": 4821,
+      "agent": "claude",
+      "project": "switchboard",
+      "peak_agent_bytes": 612368384,
+      "avg_agent_bytes": 498073600,
+      "peak_tree_bytes": 3221225472,
+      "avg_tree_bytes": 1503238553,
+      "mem": [
+        { "ts": "2026-06-26T13:00:00Z", "agent": 402653184, "tree": 402653184 },
+        { "ts": "2026-06-26T13:12:00Z", "agent": 486539264, "tree": 486539264 },
+        { "ts": "2026-06-26T13:20:00Z", "agent": 528482304, "tree": 2415919104 },
+        { "ts": "2026-06-26T13:44:00Z", "agent": 561152000, "tree": 1610612736 },
+        { "ts": "2026-06-26T14:05:00Z", "agent": 612368384, "tree": 3221225472 },
+        { "ts": "2026-06-26T14:40:00Z", "agent": 536870912, "tree": 536870912 }
+      ]
+    },
+    {
+      "session_id": "a7f4d201-2222-4ccc-9ddd-000000000002",
+      "pid": 5102,
+      "agent": "claude",
+      "project": "switchboard-dashboard",
+      "peak_agent_bytes": 448790528,
+      "avg_agent_bytes": 391118848,
+      "peak_tree_bytes": 1073741824,
+      "avg_tree_bytes": 624951296,
+      "mem": [
+        { "ts": "2026-06-26T13:03:00Z", "agent": 335544320, "tree": 335544320 },
+        { "ts": "2026-06-26T13:34:00Z", "agent": 402653184, "tree": 402653184 },
+        { "ts": "2026-06-26T13:42:00Z", "agent": 419430400, "tree": 1073741824 },
+        { "ts": "2026-06-26T14:30:00Z", "agent": 448790528, "tree": 448790528 }
+      ]
+    },
+    {
+      "session_id": "b3e9c7f0-3333-4eee-8fff-000000000003",
+      "pid": 5500,
+      "agent": "codex",
+      "project": "dots",
+      "peak_agent_bytes": 268435456,
+      "avg_agent_bytes": 231735296,
+      "peak_tree_bytes": 268435456,
+      "avg_tree_bytes": 231735296,
+      "mem": [
+        { "ts": "2026-06-26T13:40:00Z", "agent": 201326592, "tree": 201326592 },
+        { "ts": "2026-06-26T13:58:00Z", "agent": 243269632, "tree": 243269632 },
+        { "ts": "2026-06-26T14:18:00Z", "agent": 268435456, "tree": 268435456 }
+      ]
+    },
+    {
+      "session_id": "c4d2e8a9-4444-4fff-9000-000000000004",
+      "pid": 6010,
+      "agent": "claude",
+      "project": "research",
+      "peak_agent_bytes": 578813952,
+      "avg_agent_bytes": 494927872,
+      "peak_tree_bytes": 4831838208,
+      "avg_tree_bytes": 2684354560,
+      "mem": [
+        { "ts": "2026-06-26T13:30:00Z", "agent": 411041792, "tree": 411041792 },
+        { "ts": "2026-06-26T13:36:00Z", "agent": 469762048, "tree": 1610612736 },
+        { "ts": "2026-06-26T14:00:00Z", "agent": 511705088, "tree": 4831838208 },
+        { "ts": "2026-06-26T14:25:00Z", "agent": 578813952, "tree": 2147483648 },
+        { "ts": "2026-06-26T14:35:00Z", "agent": 494927872, "tree": 494927872 }
+      ]
+    }
+  ],
+  "pressure": [
+    { "ts": "2026-06-26T13:00:00Z", "avail_bytes": 21474836480, "psi_avg10": 0.0, "psi_stall_us": 0 },
+    { "ts": "2026-06-26T13:20:00Z", "avail_bytes": 17179869184, "psi_avg10": 0.4, "psi_stall_us": 18000 },
+    { "ts": "2026-06-26T13:40:00Z", "avail_bytes": 12884901888, "psi_avg10": 2.1, "psi_stall_us": 96000 },
+    { "ts": "2026-06-26T14:00:00Z", "avail_bytes": 8589934592, "psi_avg10": 7.8, "psi_stall_us": 412000 },
+    { "ts": "2026-06-26T14:20:00Z", "avail_bytes": 10737418240, "psi_avg10": 3.2, "psi_stall_us": 141000 },
+    { "ts": "2026-06-26T14:40:00Z", "avail_bytes": 19327352832, "psi_avg10": 0.2, "psi_stall_us": 9000 }
+  ]
+}
