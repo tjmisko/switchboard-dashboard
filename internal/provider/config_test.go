@@ -18,7 +18,7 @@ func writeConfig(t *testing.T, body string) string {
 
 func TestLoadConfig_shouldBuildOrderedProvidersFromValidFile(t *testing.T) {
 	p := writeConfig(t, `{"providers":[
-		{"id":"claude","label":"Claude","exec":["switchboard-ctl","timeline","--json","--plan-window"],"capabilities":{"plan":true}},
+		{"id":"claude","label":"Claude","exec":["switchboard-ctl","timeline","--json","--plan-window"],"capabilities":{"plan":true,"memory":true}},
 		{"id":"arachne","exec":["arachne-ctl","timeline","--json"],"dir":"/hist","capabilities":{"plan":false}}
 	]}`)
 	cfg, err := LoadConfig(p)
@@ -40,6 +40,15 @@ func TestLoadConfig_shouldBuildOrderedProvidersFromValidFile(t *testing.T) {
 	}
 	if provs[1].Capabilities().Plan {
 		t.Fatalf("arachne should not advertise plan capability")
+	}
+	if !provs[0].Capabilities().Memory {
+		t.Fatalf("claude should advertise memory capability")
+	}
+	// Omitted capabilities default to false; the dashboard still calls the memory
+	// subcommand and degrades on the result, since the declaration is contract
+	// documentation rather than a runtime gate.
+	if provs[1].Capabilities().Memory {
+		t.Fatalf("omitted memory capability should default to false")
 	}
 	// label defaults to id when omitted.
 	if provs[1].Label() != "arachne" {
