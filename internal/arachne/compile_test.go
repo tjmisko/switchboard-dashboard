@@ -242,3 +242,31 @@ func TestCompile_shouldNotFlagAShortUnpairedSubagentSpan(t *testing.T) {
 		t.Fatal("a 30m unpaired span is ordinary work, not a phantom")
 	}
 }
+
+// The reason strings are a cross-repo contract, not decoration. The switchboard
+// daemon's internal/history/suspect.go flags the same two conditions over its
+// own lanes, and a merged day puts both producers' sentences in one hover list;
+// if the wording drifts, one condition starts reading as two. The daemon is free
+// to append clauses arachne has no equivalent for (it names the last status,
+// which for a single synthesized "working" interval would be a constant), so
+// what is pinned here is the shared prefix through "cap", byte for byte. A
+// rewording on either side should fail a build rather than an operator's eyes.
+func TestCompile_shouldEmitTheSuspectReasonWordingSharedWithTheDaemon(t *testing.T) {
+	events := []Event{
+		{Type: EventSessionStart, TS: "2026-07-22T06:00:00Z", SessionID: "ghost", StartedAt: "2026-07-22T06:00:00Z"},
+		{Type: EventSubagentSpawn, TS: "2026-07-22T06:30:00Z", SessionID: "ghost", ToolUseID: "s1", AgentType: "Explore"},
+	}
+	tl := Compile(events, CompileOptions{Now: mustTime(t, "2026-07-22T11:30:00Z")})
+	l := tl.Lanes[0]
+
+	// Silent from 06:30 to the 11:30 bound: five hours past a four-hour cap.
+	const wantLane = "unclosed lane stretched to now: silent 5h0m0s >= 4h0m0s cap"
+	if l.SuspectReason != wantLane {
+		t.Errorf("lane suspect_reason =\n\t%q\nwant\n\t%q", l.SuspectReason, wantLane)
+	}
+	// The same span seen as an unpaired subagent: 06:30–11:30 against a 2h cap.
+	const wantSub = "unpaired subagent stretched to now: span 5h0m0s >= 2h0m0s cap"
+	if got := l.Subagents[0].SuspectReason; got != wantSub {
+		t.Errorf("subagent suspect_reason =\n\t%q\nwant\n\t%q", got, wantSub)
+	}
+}

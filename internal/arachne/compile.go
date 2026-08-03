@@ -125,7 +125,17 @@ func Compile(events []Event, opts CompileOptions) *timeline.Timeline {
 			if es, ee, ok := timeline.SpanNanos(evidenceTS, endRFC); ok && ee-es >= int64(timeline.DefaultSuspectTrailingCap) {
 				lane.Suspect = true
 				lane.SuspectSince = evidenceTS
-				lane.SuspectReason = fmt.Sprintf("unclosed lane stretched to now: %s since the last event >= %s cap",
+				// Everything up to and including "cap" is a contract with the
+				// daemon's internal/history/suspect.go, which words the same
+				// condition for its own lanes: in a merged day the two sentences sit
+				// in one list, and an operator must not be able to tell which
+				// provider wrote which. Leading with the cap comparison and trailing
+				// with the status is what makes that possible on the daemon's side —
+				// its status clause then has a noun slot to sit in and no "a
+				// unknown-status lane" to disagree with. Arachne appends no such
+				// clause: its lane is one synthesized "working" interval (see
+				// Intervals above), so a status is a constant and carries nothing.
+				lane.SuspectReason = fmt.Sprintf("unclosed lane stretched to now: silent %s >= %s cap",
 					roundSec(time.Duration(ee-es)), roundSec(timeline.DefaultSuspectTrailingCap))
 				trustedNs, clip = es, true
 				out.Summary.SuspectLanes++
