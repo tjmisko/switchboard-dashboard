@@ -1895,9 +1895,9 @@ function nameSegTipHTML(lane, seg) {
 // archival identity (name, one-liner, task bullets, narrative) from
 // session-digest, plus the lane's own identity footer. The body — bullets over
 // prose, or prose alone — comes from model.js so the node suite can cover it.
-// Empty when there is no summary, and equally empty for a summary with nothing
-// in it (summaryCardHasContent, also in model.js): a record with no tasks, no
-// prose and no description would put only the id footer on screen over what the
+// Empty when there is no summary, and equally empty for a summary with no body
+// (summaryCardHasContent, also in model.js): a record with no tasks and no prose
+// would put only the archival name and the id footer on screen over what the
 // tooltip already showed, so the caller drops the click instead of pinning it.
 function sessionPopoutHTML(lane) {
   const sum = sessionSummary(lane);
