@@ -186,6 +186,13 @@ interaction subagent sub-bars already have.
   distinct work items the pinned card renders as bullets; it is absent for
   single-task sessions and for records generated before the field existed.
   Always `200`; a missing store yields an empty set.
+- **`GET /api/memory`** — returns `{sessions: {<session_id>: {peak_agent_bytes,
+  avg_agent_bytes, peak_tree_bytes, avg_tree_bytes, mem}}, pressure}` for the
+  same window, from each provider's `memory --json`. Bytes throughout; `mem` is
+  an optional `{ts, agent, tree}` series and `pressure` an optional machine-wide
+  `{ts, avail_bytes, psi_avg10, psi_stall_us}` series. Always `200`; a provider
+  that fails or does not implement the subcommand contributes nothing rather than
+  erroring, so hovers simply go unenriched.
 - **`GET /api/plan`** — returns a normalized, read-only view of the cached
   plan-usage file for the cost gauge:
   `{available, mtime, age_seconds, stale, five_hour, seven_day, seven_day_opus}`.
@@ -207,6 +214,28 @@ The JSON shape and units are owned by Switchboard (`docs/history-schema.md`):
 The summary exposes three attention figures: **union** (wall-clock with at least
 one session active), **per-session** (the sum of per-session active time), and
 **fanout** (active time weighted by subagents, approximating total agent compute).
+
+### Memory
+
+Memory rides a **separate surface** (`/api/memory`, from each provider's
+`memory --json`), deliberately not the timeline envelope. Two reasons, and both
+are load-bearing rather than stylistic:
+
+- A live sample series changes the timeline response bytes on every poll, which
+  would defeat the unchanged→no-repaint check. Memory instead follows the
+  session-summaries pattern — its own endpoint, its own slow cadence, read lazily
+  when a tooltip opens, so it costs no repaints at all.
+- On the producer side, memory samples are kept out of lane routing entirely so
+  they cannot disturb the suspect-lane post-check. A sample fires every tick
+  whether or not the session is doing anything, so counting it as evidence of
+  life would mask exactly the lost-session-death case that check exists to catch.
+
+Per session: `peak_*`/`avg_*` for the agent process alone and for its whole
+process tree, in bytes (`Pss + SwapPss`). `tree − agent` is what spawned work
+cost — subagents have no PIDs, so the tree is the only unit that captures them.
+Averages are time-weighted. Container providers (arachne) report a tree figure
+only, with no agent split, since a container total has no meaningful inner
+boundary.
 
 ### Suspect lanes
 
