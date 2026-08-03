@@ -11,7 +11,7 @@ const {
   laneIdentity, rawSessionId, leadLabel, nameSegments, buildBars, spanInefficiency, switchArrivals, packLanes,
   workIntervalsMs, concurrencyProfile, projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs,
   suspectTailMs, normalizeView,
-  fmtBytes, spawnedBytes, laneMemory, pressureWindow,
+  fmtBytes, spawnedBytes, laneMemory, memoryWindow, pressureWindow,
   summaryTasks, summaryBodyHTML, summaryHintText,
 } = require("./model.js");
 
@@ -1065,6 +1065,31 @@ function pressureSeries() {
     { ts: at(60), avail_bytes: 5 * GB, psi_avg10: 3, psi_stall_us: 400 },
   ];
 }
+
+test("memoryWindow should re-derive over only the samples inside the interval", () => {
+  const win = memoryWindow(ghostLane(), ghostLaneMemory(), ms(0), ms(30));
+  assert.equal(win.samples.length, 2);
+  assert.equal(win.peakAgentBytes, 200 * MB);
+  assert.equal(win.peakTreeBytes, 500 * MB);
+  assert.equal(win.peakSpawnedBytes, 300 * MB);
+});
+
+test("memoryWindow should return nothing when no sample falls in the interval", () => {
+  // Silence, not the session-wide figure: borrowing it would attribute a later
+  // balloon to an earlier interval, which is the misreading this view prevents.
+  assert.equal(memoryWindow(ghostLane(), ghostLaneMemory(), ms(200), ms(220)), null);
+});
+
+test("memoryWindow should stop at the evidence bound when the interval runs into a synthesized tail", () => {
+  const win = memoryWindow(ghostLane(), ghostLaneMemory(), ms(0), ms(300));
+  assert.equal(win.clipped, true);
+  assert.equal(win.samples.length, 3, "the sample at suspect_since is itself evidence");
+  assert.equal(win.peakAgentBytes, 200 * MB, "the tail's 900 MB spike is not evidence");
+});
+
+test("memoryWindow should return nothing when the whole interval sits past the evidence bound", () => {
+  assert.equal(memoryWindow(ghostLane(), ghostLaneMemory(), ms(120), ms(300)), null);
+});
 
 test("pressureWindow should total the stall and report the tightest headroom in the window", () => {
   // psi_stall_us is a per-interval delta, so the deltas SUM into the window's

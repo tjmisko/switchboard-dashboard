@@ -554,6 +554,44 @@
     };
   }
 
+  // memoryWindow is laneMemory narrowed to [startMs, endMs] — what a lane's
+  // memory did during ONE interval, for the interval tooltip. Same result shape
+  // minus the scalars' provenance: everything here is re-derived from the
+  // samples, because the producer's scalars describe the whole session and
+  // there is nothing per-interval to fall back on.
+  //
+  // NULL when the session has no series covering the window. That is the common
+  // case for a short interval and it must stay silent rather than borrowing the
+  // session-wide figure, which would quietly attribute a later balloon to an
+  // earlier interval — precisely the misreading this view exists to prevent.
+  //
+  // The window is clipped to the lane's trusted span for the same reason
+  // laneMemory clips: samples inside a synthesized tail are not evidence.
+  function memoryWindow(lane, memory, startMs, endMs) {
+    const record = memoryRecord(lane, memory);
+    if (!record || !(endMs >= startMs)) return null;
+    const cut = suspectSinceMs(lane);
+    const bound = cut != null && cut < endMs ? cut : endMs;
+    if (!(bound >= startMs)) return null;
+
+    const samples = memSamples(record).filter((s) => s.ts >= startMs && s.ts <= bound);
+    if (!samples.length) return null;
+    const agent = seriesStats(samples, "agent") || { peak: null, avg: null };
+    const tree = seriesStats(samples, "tree") || { peak: null, avg: null };
+    if (agent.peak == null && tree.peak == null) return null;
+
+    return {
+      peakAgentBytes: agent.peak,
+      avgAgentBytes: agent.avg,
+      peakTreeBytes: tree.peak,
+      avgTreeBytes: tree.avg,
+      peakSpawnedBytes: spawnedBytes(tree.peak, agent.peak),
+      avgSpawnedBytes: spawnedBytes(tree.avg, agent.avg),
+      samples,
+      clipped: bound !== endMs,
+    };
+  }
+
   // pressureWindow summarizes machine-wide memory pressure over [startMs,
   // endMs] (inclusive both ends) for an interval tooltip:
   //
@@ -677,7 +715,7 @@
     laneIdentity, rawSessionId, leadLabel, nameSegments, buildBar, buildBars,
     spanInefficiency, switchArrivals, packLanes, workIntervalsMs, concurrencyProfile,
     projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs, suspectTailMs,
-    fmtBytes, spawnedBytes, laneMemory, pressureWindow,
+    fmtBytes, spawnedBytes, laneMemory, memoryWindow, pressureWindow,
     summaryTasks, summaryBodyHTML, summaryHintText, normalizeView,
   };
 });
