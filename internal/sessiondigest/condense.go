@@ -2,6 +2,8 @@ package sessiondigest
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,6 +33,11 @@ type Record struct {
 	SummaryVersion int      `json:"summaryVersion,omitempty"`
 	Model          string   `json:"model,omitempty"`
 	GeneratedAt    string   `json:"generatedAt,omitempty"`
+	// DigestHash fingerprints the digest the summary was written from, so a
+	// session that ends, is resumed, and ends again — rebuilding its digest
+	// under an unchanged summary — is caught by NeedsCondense. Empty means
+	// "unknown", never "stale"; see NeedsCondense.
+	DigestHash string `json:"digestHash,omitempty"`
 }
 
 // CurrentSummaryVersion is the condenser's output-schema version. v2 added
@@ -132,6 +139,74 @@ Session digest:
 	return sb.String()
 }
 
+// promptFields mirrors the digest fields BuildPrompt renders, and only those.
+// A digest carries more than the prompt shows — session and project ids, tool
+// counts, a subagent's model — and a change confined to those is a change the
+// summary could not possibly have reflected, so it must not buy a re-condense.
+// JSON gives the hash its canonical form for free: encoding/json writes struct
+// fields in declaration order and sorts map keys, so equal inputs always
+// encode to identical bytes no matter how the digest was built. (Nothing here
+// is a map today — ToolCounts, the only one on Digest, is not in the prompt —
+// but a field added later inherits that guarantee.)
+type promptFields struct {
+	Title              string           `json:"title,omitempty"`
+	AgentName          string           `json:"agentName,omitempty"`
+	ProjectDir         string           `json:"projectDir,omitempty"`
+	GitBranch          string           `json:"gitBranch,omitempty"`
+	StartedAt          string           `json:"startedAt,omitempty"`
+	EndedAt            string           `json:"endedAt,omitempty"`
+	UserPrompts        []string         `json:"userPrompts,omitempty"`
+	CommitSubjects     []string         `json:"commitSubjects,omitempty"`
+	FilesEdited        []string         `json:"filesEdited,omitempty"`
+	BashDescriptions   []string         `json:"bashDescriptions,omitempty"`
+	Subagents          []promptSubagent `json:"subagents,omitempty"`
+	FinalAssistantText string           `json:"finalAssistantText,omitempty"`
+}
+
+// promptSubagent is the part of a Subagent the prompt shows: its label — Name,
+// or AgentType when the name is blank — and the authored description.
+type promptSubagent struct {
+	Name        string `json:"name,omitempty"`
+	AgentType   string `json:"agentType,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+// HashDigest fingerprints the prompt-visible half of a digest. Two digests
+// that would render the same prompt hash the same, which is what lets
+// NeedsCondense tell a rebuilt-and-changed digest from a rebuilt-and-identical
+// one without keeping the old digest around.
+func HashDigest(d Digest) string {
+	fields := promptFields{
+		Title:              d.Title,
+		AgentName:          d.AgentName,
+		ProjectDir:         d.ProjectDir,
+		GitBranch:          d.GitBranch,
+		StartedAt:          d.StartedAt,
+		EndedAt:            d.EndedAt,
+		UserPrompts:        d.UserPrompts,
+		CommitSubjects:     d.CommitSubjects,
+		FilesEdited:        d.FilesEdited,
+		BashDescriptions:   d.BashDescriptions,
+		FinalAssistantText: d.FinalAssistantText,
+	}
+	for _, sa := range d.Subagents {
+		fields.Subagents = append(fields.Subagents, promptSubagent{
+			Name:        sa.Name,
+			AgentType:   sa.AgentType,
+			Description: sa.Description,
+		})
+	}
+	// promptFields is strings and slices of them, so a failure here is a bug;
+	// hashing the empty encoding instead would silently freeze every record's
+	// hash and quietly disable the staleness check.
+	raw, err := json.Marshal(fields)
+	if err != nil {
+		panic("sessiondigest: hash prompt fields: " + err.Error())
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
 // ParseSummary extracts the condenser's JSON object from a model response,
 // tolerating code fences and surrounding prose. Only description is required:
 // a schema-confused reply that drops or mangles tasks still yields a usable
@@ -219,7 +294,9 @@ func taskEntries(raw json.RawMessage) []string {
 
 // NeedsCondense reports whether a record's summary has to be generated: it is
 // missing, it was written by an older output schema (so it lacks fields the
-// current one carries, such as Tasks), or the caller passed -force.
+// current one carries, such as Tasks), the digest it describes has since been
+// rebuilt with different content — a session that ended, was resumed, and
+// ended again — or the caller passed -force.
 func NeedsCondense(record Record, force bool) bool {
 	if force {
 		return true
@@ -227,7 +304,19 @@ func NeedsCondense(record Record, force bool) bool {
 	if record.Summary == nil {
 		return true
 	}
-	return record.SummaryVersion < CurrentSummaryVersion
+	if record.SummaryVersion < CurrentSummaryVersion {
+		return true
+	}
+	// An empty hash means "unknown", not "stale". Every record written before
+	// this field existed has one, and treating those as stale would re-condense
+	// the entire archive at one `claude -p` call apiece — the same bill -force
+	// runs up, which is exactly what the hash is here to avoid. Those records
+	// get stamped whenever something else re-condenses them, so the archive
+	// converges slowly and costs nothing today.
+	if record.DigestHash == "" {
+		return false
+	}
+	return record.DigestHash != HashDigest(record.Digest)
 }
 
 // Condense generates a Summary for the digest via run.
@@ -240,10 +329,11 @@ func Condense(d Digest, run Runner) (Summary, error) {
 }
 
 // CondenseRecord condenses the record's digest in place and stamps the schema
-// version that produced the summary, which is what makes the next run's
-// NeedsCondense skip it — without the stamp every plain -condense run would
-// re-summarize the whole archive. A failed run leaves the record untouched, so
-// the retry happens next time rather than marking a missing summary current.
+// version and the digest hash that produced the summary, which is what makes
+// the next run's NeedsCondense skip it — without the stamps every plain
+// -condense run would re-summarize the whole archive. A failed run leaves the
+// record untouched, so the retry happens next time rather than marking a
+// missing summary current.
 func CondenseRecord(record *Record, run Runner, model string, now time.Time) error {
 	summary, err := Condense(record.Digest, run)
 	if err != nil {
@@ -253,6 +343,7 @@ func CondenseRecord(record *Record, run Runner, model string, now time.Time) err
 	record.SummaryVersion = CurrentSummaryVersion
 	record.Model = model
 	record.GeneratedAt = now.UTC().Format(time.RFC3339)
+	record.DigestHash = HashDigest(record.Digest)
 	return nil
 }
 
