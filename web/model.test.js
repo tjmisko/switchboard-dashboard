@@ -11,7 +11,7 @@ const {
   laneIdentity, rawSessionId, leadLabel, nameSegments, buildBars, spanInefficiency, switchArrivals, packLanes,
   workIntervalsMs, concurrencyProfile, projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs,
   suspectTailMs, normalizeView,
-  summaryTasks, summaryBodyHTML, summaryHintText,
+  summaryTasks, summaryBodyHTML, summaryHintText, summaryCardHasContent,
 } = require("./model.js");
 
 // ms helper: a fixed base instant + offset minutes, as RFC3339 with offset.
@@ -574,7 +574,7 @@ function ghostLane() {
     end: at(360),
     intervals: [{ status: "working", start: at(0), end: at(360) }],
     suspect: true,
-    suspect_reason: "unclosed lane stretched to now: final \"working\" interval 5h0m0s >= 4h0m0s cap",
+    suspect_reason: "unclosed lane stretched to now: silent 5h0m0s >= 4h0m0s cap",
     suspect_since: at(60),
   };
 }
@@ -824,6 +824,80 @@ test("summaryHintText should be empty when the record has nothing behind the cli
   for (const sum of [{ description: "d" }, { description: "d", tasks: [] }, { description: "d", tasks: ["  "] }]) {
     assert.equal(summaryHintText(sum) === "", summaryBodyHTML(sum) === "",
       `hint and body disagree for ${JSON.stringify(sum)}`);
+  }
+});
+
+// summaryCardHasContent is the gate app.js's sessionPopoutHTML runs before it
+// builds the pinned card, and the click handler drops the click on an empty
+// return — so "pins nothing" below means exactly "the bar is not clickable".
+// app.js itself is DOM-bound and cannot be required here; keeping the decision
+// in model.js is what makes it assertable at all.
+
+test("summaryCardHasContent should pin nothing when the record has no tasks and no prose", () => {
+  // the empty record: the card could only restate the archival name and the id
+  // footer, so the bar advertises nothing AND buys nothing.
+  for (const sum of [
+    {},
+    { name: "amber-kite" },
+    { name: "amber-kite", description: "   ", tasks: ["  ", ""], summary: "" },
+  ]) {
+    assert.equal(summaryCardHasContent(sum), false, `pinned an empty card for ${JSON.stringify(sum)}`);
+    assert.equal(summaryHintText(sum), "", "and nothing advertised the click");
+  }
+  assert.equal(summaryCardHasContent(null), false, "a lane with no summary at all pins nothing");
+});
+
+test("summaryCardHasContent should pin nothing when a description is all the record carries", () => {
+  // The case tjmisko/switchboard-dashboard#7 item 2 describes, and the one the
+  // backend can actually serve — handler.go drops a record whose description is
+  // empty, so this is the empty record as the browser sees it. The tooltip
+  // already prints the description; all the card would add is the archival name
+  // and the id footer. Losing that name from the UI is the accepted cost of not
+  // having a bar that pins a card it never advertised.
+  const sum = { name: "amber-kite", description: "Reworked the summary gate" };
+  assert.equal(summaryCardHasContent(sum), false);
+  assert.equal(summaryBodyHTML(sum), "", "there is no body to show");
+  assert.equal(summaryHintText(sum), "", "and the tooltip promised nothing");
+});
+
+test("summaryCardHasContent should pin the card when a lone task is all the record carries", () => {
+  // the already-fixed case: one bullet is content the tooltip never showed, so
+  // it must keep both its hint and its card.
+  const sum = { description: "d", tasks: ["Fixed the lookup"] };
+  assert.equal(summaryCardHasContent(sum), true);
+  assert.notEqual(summaryBodyHTML(sum), "", "the card renders that bullet");
+  assert.equal(summaryHintText(sum), "click for the session summary");
+});
+
+test("summaryCardHasContent should pin the card for an ordinary multi-task session", () => {
+  const sum = {
+    name: "amber-kite",
+    description: "Did three jobs",
+    tasks: ["Fixed the lookup", "Added the endpoint", "Wrote the tests"],
+    summary: "A mixed session that landed on main.",
+  };
+  assert.equal(summaryCardHasContent(sum), true);
+  assert.equal(summaryHintText(sum), "click for 3 steps");
+});
+
+test("summaryCardHasContent should pin a card exactly when the tooltip advertised one", () => {
+  // The invariant the three helpers exist to keep: hint-empty, body-empty and
+  // card-empty are one condition. Both directions are load-bearing. Lose the
+  // forward one and the tooltip promises "click for 4 steps" over a bar whose
+  // click does nothing; lose the reverse and a bar that advertised nothing pins
+  // a card anyway, which is the bug #7 item 2 reported.
+  for (const sum of [
+    null, {}, { name: "amber-kite" }, { description: "d" },
+    { description: "d", tasks: [] }, { description: "d", tasks: ["  "] },
+    { description: "d", summary: "Prose." }, { tasks: ["only one"] },
+    { description: "d", tasks: ["a", "b"] }, { description: "", tasks: ["a", "b"], summary: "Prose." },
+    { description: "d", tasks: "a\nb", summary: "Prose." },
+  ]) {
+    const label = JSON.stringify(sum);
+    assert.equal(summaryHintText(sum) === "", summaryBodyHTML(sum) === "",
+      `hint and body disagree for ${label}`);
+    assert.equal(summaryCardHasContent(sum), summaryHintText(sum) !== "",
+      `card and hint disagree for ${label}`);
   }
 });
 

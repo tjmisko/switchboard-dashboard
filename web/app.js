@@ -1144,9 +1144,14 @@ function drawSession(lane, rowTop, x, haveActivity, activeGlobal) {
     });
     bg.setAttribute("data-session", laneIdentity(lane)); // bars are keyed by identity, not name
     attachTip(bg, () => nameSegTipHTML(lane, seg));
-    // click pins the archival summary card when session-digest has one; the
-    // handler reads lastSummaries at click time, so summaries arriving after
-    // render are picked up without a repaint.
+    // click pins the archival summary card when session-digest has one WITH
+    // something in it; the empty string is sessionPopoutHTML's way of saying the
+    // click buys nothing, and swallowing it here leaves the event to the
+    // background handler rather than pinning a card of footers. The handler
+    // reads lastSummaries at click time, so summaries arriving after render are
+    // picked up without a repaint — which is also why the pointer cursor on
+    // .name-seg cannot be conditioned on having a card: at draw time we do not
+    // yet know. The tooltip's hint is the affordance that is accurate on hover.
     bg.addEventListener("click", (ev) => {
       const html = sessionPopoutHTML(lane);
       if (html) { ev.stopPropagation(); pinPopout(html, ev); }
@@ -1890,10 +1895,13 @@ function nameSegTipHTML(lane, seg) {
 // archival identity (name, one-liner, task bullets, narrative) from
 // session-digest, plus the lane's own identity footer. The body — bullets over
 // prose, or prose alone — comes from model.js so the node suite can cover it.
-// Only wired when a summary exists for the lane.
+// Empty when there is no summary, and equally empty for a summary with no body
+// (summaryCardHasContent, also in model.js): a record with no tasks and no prose
+// would put only the archival name and the id footer on screen over what the
+// tooltip already showed, so the caller drops the click instead of pinning it.
 function sessionPopoutHTML(lane) {
   const sum = sessionSummary(lane);
-  if (!sum) return "";
+  if (!summaryCardHasContent(sum)) return "";
   const idBits = [];
   if (lane.provider) idBits.push(lane.provider);
   idBits.push(lane.agent || "?");

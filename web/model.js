@@ -466,6 +466,29 @@
     return "";
   }
 
+  // summaryCardHasContent gates the pinned card (app.js sessionPopoutHTML): the
+  // bar's click is a no-op unless the card would show something the hover did
+  // not. That is exactly summaryBodyHTML — the task bullets and the framing
+  // prose, both of which the tooltip withholds on purpose so that they stay the
+  // reason to click. A lone task counts: it renders a bullet the hover never
+  // showed.
+  //
+  // A record with neither adds only the digest's archival name and the id
+  // footer over what the tooltip already printed, so it pins nothing. That does
+  // cost something real — the archival name is not shown anywhere else, since
+  // the tooltip heads with the /name slug of the span under the cursor — and it
+  // is the accepted price. A bar that advertises nothing and then pins a card
+  // anyway is the worse failure, and the alternative (advertise the name, so the
+  // click is honest) buys a hint on records whose card is one line of text.
+  //
+  // Deliberately the same predicate as summaryHintText's: hint-empty,
+  // body-empty and card-empty are one condition, not three, so nothing is ever
+  // clickable with nothing behind it. model.test.js pins that as an invariant
+  // across every shape of record.
+  function summaryCardHasContent(summary) {
+    return Boolean(summary) && summaryBodyHTML(summary) !== "";
+  }
+
   // normalizeView validates a chart-view name, resolving "bars" — the sessions
   // view's pre-rename spelling — so persisted `sb-view` choices and old ?view=
   // links keep working. Returns null for anything that isn't a view, which both
@@ -480,6 +503,6 @@
     laneIdentity, rawSessionId, leadLabel, nameSegments, buildBar, buildBars,
     spanInefficiency, switchArrivals, packLanes, workIntervalsMs, concurrencyProfile,
     projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs, suspectTailMs,
-    summaryTasks, summaryBodyHTML, summaryHintText, normalizeView,
+    summaryTasks, summaryBodyHTML, summaryHintText, summaryCardHasContent, normalizeView,
   };
 });
