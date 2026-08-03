@@ -557,33 +557,52 @@
   // pressureWindow summarizes machine-wide memory pressure over [startMs,
   // endMs] (inclusive both ends) for an interval tooltip:
   //
-  //   {peakStallUs, minAvailBytes, peakPsiAvg10, samples}
+  //   {stallUs, stallFraction, minAvailBytes, peakPsiAvg10, samples}
   //
-  // NULL when no sample falls in the window — the series does not cover every
+  // psi_stall_us is a per-interval DELTA — microseconds the machine spent
+  // stalled since the previous sample — so the deltas are SUMMED into stallUs,
+  // the honest headline ("the machine stalled 3.2s here"). They are deliberately
+  // NOT maxed: raw deltas are only comparable when the sampling intervals are
+  // equal, and a daemon restart, a missed tick, or a future adaptive cadence
+  // each break that. stallFraction (stallUs over the window's wall clock) is the
+  // intensity figure that IS comparable across windows of any length.
+  // avail_bytes is a level rather than a delta, hence its MINIMUM: the tightest
+  // the headroom got. peakPsiAvg10 is likewise a level — the decaying average at
+  // its worst — kept only as the human-readable glance.
+  //
+  // NULL when no sample falls in the window: the series does not cover every
   // interval the timeline can show (it starts when sampling started, and older
-  // samples age out), and "no pressure recorded here" must not render as a
-  // reassuring 0. Peak, not sum: psi_stall_us is the stall attributable to a
-  // single sample's interval — the producer's delta of the monotonic
-  // /proc/pressure/memory total — so the worst tick is the meaningful figure,
-  // while avail_bytes is a level, hence its MINIMUM. Pressure is machine-wide
-  // and never clipped per lane: it belongs to the host, not to any session.
+  // samples age out). Absent stays absent inside the result too — a window whose
+  // samples carry no PSI reports stallUs null, never 0, because "not measured"
+  // and "never stalled" are different claims and the tooltip trades on the
+  // difference. Pressure is machine-wide and never clipped per lane: it belongs
+  // to the host, not to any one session.
   function pressureWindow(memory, startMs, endMs) {
     const rows = memory && memory.pressure;
     if (!Array.isArray(rows) || !(endMs >= startMs)) return null;
-    let peakStallUs = null, minAvailBytes = null, peakPsiAvg10 = null, samples = 0;
+    let stallUs = null, minAvailBytes = null, peakPsiAvg10 = null, samples = 0;
     for (const row of rows) {
       const ts = Date.parse(row && row.ts);
       if (!Number.isFinite(ts) || ts < startMs || ts > endMs) continue;
       samples++;
       const stall = finiteOrNull(row.psi_stall_us);
-      if (stall != null && (peakStallUs == null || stall > peakStallUs)) peakStallUs = stall;
+      if (stall != null) stallUs = (stallUs == null ? 0 : stallUs) + stall;
       const avail = finiteOrNull(row.avail_bytes);
       if (avail != null && (minAvailBytes == null || avail < minAvailBytes)) minAvailBytes = avail;
       const psi = finiteOrNull(row.psi_avg10);
       if (psi != null && (peakPsiAvg10 == null || psi > peakPsiAvg10)) peakPsiAvg10 = psi;
     }
     if (!samples) return null;
-    return { peakStallUs, minAvailBytes, peakPsiAvg10, samples };
+
+    // The delta on the window's first sample covers the gap reaching back
+    // BEFORE startMs, so a sum can slightly over-attribute at the leading edge.
+    // The machine cannot stall for longer than all of the time, so the fraction
+    // saturates at 1 instead of reporting an impossible 1.4.
+    const windowUs = (endMs - startMs) * 1000;
+    const stallFraction = stallUs != null && windowUs > 0
+      ? Math.min(1, stallUs / windowUs)
+      : null;
+    return { stallUs, stallFraction, minAvailBytes, peakPsiAvg10, samples };
   }
 
   // -------------------------------------------------------------------------

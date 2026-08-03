@@ -1066,24 +1066,69 @@ function pressureSeries() {
   ];
 }
 
-test("pressureWindow should report the worst stall and the tightest headroom in the window", () => {
-  // stall is per-tick, so the worst tick is the figure; avail is a level, so
-  // its MINIMUM is what the interval got squeezed to.
+test("pressureWindow should total the stall and report the tightest headroom in the window", () => {
+  // psi_stall_us is a per-interval delta, so the deltas SUM into the window's
+  // total stall. They are never maxed: raw deltas are only comparable when the
+  // sampling intervals are equal, which a restart or a missed tick breaks.
+  // avail_bytes is a level, so its MINIMUM is how tight the window got.
   const win = pressureWindow({ pressure: pressureSeries() }, ms(0), ms(60));
-  assert.equal(win.peakStallUs, 90000);
+  assert.equal(win.stallUs, 1200 + 90000 + 400);
   assert.equal(win.minAvailBytes, 2 * GB);
   assert.equal(win.peakPsiAvg10, 12.5);
   assert.equal(win.samples, 3);
+});
+
+test("pressureWindow should report the stalled fraction of the window's wall clock", () => {
+  // The intensity figure, comparable across windows of any length: 30s of
+  // stall spread over a 60s window is half that window spent stalled.
+  const win = pressureWindow({
+    pressure: [
+      { ts: at(0), psi_stall_us: 10e6 },
+      { ts: at(0.5), psi_stall_us: 10e6 },
+      { ts: at(1), psi_stall_us: 10e6 },
+    ],
+  }, ms(0), ms(1));
+  assert.equal(win.stallUs, 30e6);
+  assert.equal(win.stallFraction, 0.5);
+});
+
+test("pressureWindow should clamp the stalled fraction when a boundary delta overhangs", () => {
+  // The first sample's delta reaches back before startMs, so a sum can
+  // over-attribute at the leading edge. The machine cannot stall for longer
+  // than all of the time, so the fraction saturates rather than reading 2.
+  const win = pressureWindow({
+    pressure: [{ ts: at(0), psi_stall_us: 60e6 }, { ts: at(1), psi_stall_us: 60e6 }],
+  }, ms(0), ms(1));
+  assert.equal(win.stallUs, 120e6);
+  assert.equal(win.stallFraction, 1);
+});
+
+test("pressureWindow should keep an absent PSI reading absent rather than reading zero", () => {
+  // A missing series and a genuinely unstalled machine are different claims.
+  // Coercing to 0 here would render "never stalled" over a window nobody measured.
+  const win = pressureWindow({ pressure: [{ ts: at(0), avail_bytes: 8 * GB }] }, ms(0), ms(60));
+  assert.equal(win.stallUs, null);
+  assert.equal(win.stallFraction, null);
+  assert.equal(win.peakPsiAvg10, null);
+  assert.equal(win.minAvailBytes, 8 * GB, "the reading that IS present still lands");
+  // a real zero stall is data and must survive as 0, not collapse to absent.
+  const calm = pressureWindow({ pressure: [{ ts: at(0), psi_stall_us: 0 }] }, ms(0), ms(60));
+  assert.equal(calm.stallUs, 0);
+  assert.equal(calm.stallFraction, 0);
 });
 
 test("pressureWindow should include only the samples inside the bounds", () => {
   const mem = { pressure: pressureSeries() };
   const late = pressureWindow(mem, ms(45), ms(90));
   assert.equal(late.samples, 1);
-  assert.equal(late.peakStallUs, 400, "the earlier spike is outside this interval");
+  assert.equal(late.stallUs, 400, "the earlier spike is outside this interval");
   assert.equal(late.minAvailBytes, 5 * GB);
-  // both ends are inclusive, so a zero-width window still lands on its sample.
-  assert.equal(pressureWindow(mem, ms(30), ms(30)).samples, 1);
+  // both ends are inclusive, so a zero-width window still lands on its sample —
+  // but it has no wall clock to divide by, so the fraction is absent.
+  const instant = pressureWindow(mem, ms(30), ms(30));
+  assert.equal(instant.samples, 1);
+  assert.equal(instant.stallUs, 90000);
+  assert.equal(instant.stallFraction, null);
 });
 
 test("pressureWindow should return nothing when the series does not cover the window", () => {
