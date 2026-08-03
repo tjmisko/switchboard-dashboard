@@ -11,7 +11,7 @@ const {
   laneIdentity, rawSessionId, leadLabel, nameSegments, buildBars, spanInefficiency, switchArrivals, packLanes,
   workIntervalsMs, concurrencyProfile, projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs,
   suspectTailMs, normalizeView,
-  summaryTasks, summaryBodyHTML, summaryHintText,
+  summaryTasks, summaryBodyHTML, summaryHintText, summaryCardHasContent,
 } = require("./model.js");
 
 // ms helper: a fixed base instant + offset minutes, as RFC3339 with offset.
@@ -824,6 +824,78 @@ test("summaryHintText should be empty when the record has nothing behind the cli
   for (const sum of [{ description: "d" }, { description: "d", tasks: [] }, { description: "d", tasks: ["  "] }]) {
     assert.equal(summaryHintText(sum) === "", summaryBodyHTML(sum) === "",
       `hint and body disagree for ${JSON.stringify(sum)}`);
+  }
+});
+
+// summaryCardHasContent is the gate app.js's sessionPopoutHTML runs before it
+// builds the pinned card, and the click handler drops the click on an empty
+// return — so "pins nothing" below means exactly "the bar is not clickable".
+// app.js itself is DOM-bound and cannot be required here; keeping the decision
+// in model.js is what makes it assertable at all.
+
+test("summaryCardHasContent should pin nothing when the record has no tasks, no prose and no description", () => {
+  // the empty record: the card could only restate the id footer the tooltip
+  // already printed, so the bar advertises nothing AND buys nothing.
+  for (const sum of [
+    {},
+    { name: "amber-kite" },
+    { name: "amber-kite", description: "   ", tasks: ["  ", ""], summary: "" },
+  ]) {
+    assert.equal(summaryCardHasContent(sum), false, `pinned an empty card for ${JSON.stringify(sum)}`);
+    assert.equal(summaryHintText(sum), "", "and nothing advertised the click");
+  }
+  assert.equal(summaryCardHasContent(null), false, "a lane with no summary at all pins nothing");
+});
+
+test("summaryCardHasContent should still pin the card when a description is all the record carries", () => {
+  // Decided: the description alone keeps the card. The tooltip heads with the
+  // /name slug of the hovered span, the card with the digest's archival name,
+  // so the one-liner does arrive under a title the hover never showed. The hint
+  // stays empty on purpose — there is no new body copy to promise — which makes
+  // this card unadvertised but never a broken promise.
+  const sum = { name: "amber-kite", description: "Reworked the summary gate" };
+  assert.equal(summaryCardHasContent(sum), true);
+  assert.equal(summaryBodyHTML(sum), "", "there is still no body to show");
+  assert.equal(summaryHintText(sum), "", "so the tooltip promises nothing");
+});
+
+test("summaryCardHasContent should pin the card when a lone task is all the record carries", () => {
+  // the already-fixed case: one bullet is content the tooltip never showed, so
+  // it must keep both its hint and its card.
+  const sum = { description: "d", tasks: ["Fixed the lookup"] };
+  assert.equal(summaryCardHasContent(sum), true);
+  assert.notEqual(summaryBodyHTML(sum), "", "the card renders that bullet");
+  assert.equal(summaryHintText(sum), "click for the session summary");
+});
+
+test("summaryCardHasContent should pin the card for an ordinary multi-task session", () => {
+  const sum = {
+    name: "amber-kite",
+    description: "Did three jobs",
+    tasks: ["Fixed the lookup", "Added the endpoint", "Wrote the tests"],
+    summary: "A mixed session that landed on main.",
+  };
+  assert.equal(summaryCardHasContent(sum), true);
+  assert.equal(summaryHintText(sum), "click for 3 steps");
+});
+
+test("summaryCardHasContent should pin the card whenever there is a hint, across every shape of record", () => {
+  // The hint/body invariant, extended to the card: hint-empty still means
+  // body-empty, and anything that earns a hint must be reachable by clicking.
+  // Without this the tooltip can promise "click for 4 steps" over a bar whose
+  // click does nothing.
+  for (const sum of [
+    null, {}, { description: "d" }, { description: "d", tasks: [] }, { description: "d", tasks: ["  "] },
+    { description: "d", summary: "Prose." }, { tasks: ["only one"] },
+    { description: "d", tasks: ["a", "b"] }, { description: "", tasks: ["a", "b"], summary: "Prose." },
+    { description: "d", tasks: "a\nb", summary: "Prose." },
+  ]) {
+    const label = JSON.stringify(sum);
+    assert.equal(summaryHintText(sum) === "", summaryBodyHTML(sum) === "",
+      `hint and body disagree for ${label}`);
+    if (summaryHintText(sum) !== "") {
+      assert.equal(summaryCardHasContent(sum), true, `hint promises a card that never pins for ${label}`);
+    }
   }
 });
 

@@ -466,6 +466,26 @@
     return "";
   }
 
+  // summaryCardHasContent gates the pinned card (app.js sessionPopoutHTML): the
+  // bar's click is a no-op unless the card would show something the hover did
+  // not, so an empty record never pins a card that only repeats the tooltip.
+  // Bullets or prose always earn it — the tooltip withholds both on purpose. A
+  // record carrying only a description still earns it, because the card heads
+  // with the digest's ARCHIVAL name while the tooltip heads with the /name slug
+  // of the span under the cursor, so the description arrives under a title the
+  // hover never showed. Strip the description too and all the card adds is the
+  // id footer the tooltip already printed, which is not worth a click.
+  //
+  // Note the deliberate asymmetry with summaryHintText: a description-only
+  // record pins a card but advertises nothing, because the hint's promise is
+  // about NEW body copy and there is none. Unadvertised is the right failure —
+  // over-promising a card that turns out to be the tooltip again is worse.
+  function summaryCardHasContent(summary) {
+    if (!summary) return false;
+    if (summaryBodyHTML(summary)) return true;
+    return String(summary.description == null ? "" : summary.description).trim() !== "";
+  }
+
   // normalizeView validates a chart-view name, resolving "bars" — the sessions
   // view's pre-rename spelling — so persisted `sb-view` choices and old ?view=
   // links keep working. Returns null for anything that isn't a view, which both
@@ -480,6 +500,6 @@
     laneIdentity, rawSessionId, leadLabel, nameSegments, buildBar, buildBars,
     spanInefficiency, switchArrivals, packLanes, workIntervalsMs, concurrencyProfile,
     projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs, suspectTailMs,
-    summaryTasks, summaryBodyHTML, summaryHintText, normalizeView,
+    summaryTasks, summaryBodyHTML, summaryHintText, summaryCardHasContent, normalizeView,
   };
 });
