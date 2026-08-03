@@ -21,6 +21,9 @@ type Config struct {
 	HistoryPath string        // append-only history log
 	StatePath   string        // reconciliation snapshot (overwritten each tick)
 	Interval    time.Duration // poll cadence
+	// CgroupRoot is the cgroup v2 mount container memory is read from
+	// (defaults to DefaultCgroupRoot). Tests point it at a fixture tree.
+	CgroupRoot string
 	// Now injects the clock (defaults to time.Now). Tick timestamps use it.
 	Now func() time.Time
 }
@@ -36,8 +39,9 @@ type Recorder struct {
 	interval    time.Duration
 	now         func() time.Time
 
-	writer *Writer
-	live   map[string]*liveSession // keyed by session slug
+	writer  *Writer
+	cgroups *CgroupReader
+	live    map[string]*liveSession // keyed by session slug
 }
 
 type liveSession struct {
@@ -64,6 +68,7 @@ func NewRecorder(cfg Config) *Recorder {
 		statePath:   cfg.StatePath,
 		interval:    interval,
 		now:         now,
+		cgroups:     NewCgroupReader(cfg.CgroupRoot),
 		live:        map[string]*liveSession{},
 	}
 }
