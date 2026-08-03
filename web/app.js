@@ -1844,10 +1844,15 @@ function memoryRowsHTML(mem) {
 // and an absent reading (no PSI on this kernel) says nothing either, because
 // "not measured" must never render as "fine".
 function pressureRowHTML(p) {
-  if (!p || p.stallUs == null || p.stallUs <= 0) return "";
-  const pct = p.stallFraction != null ? ` <span class="dim">${(p.stallFraction * 100).toFixed(1)}% of the interval</span>` : "";
+  if (!p || p.totalStallUs == null || p.totalStallUs <= 0) return "";
+  // stallFraction is uncorrected at the leading edge (the window's first delta
+  // reaches back before it started), so it can exceed 1 on a short interval.
+  // The model reports that honestly; capping belongs here, at display time.
+  const pct = p.stallFraction != null
+    ? ` <span class="dim">${(Math.min(1, p.stallFraction) * 100).toFixed(1)}% of the interval</span>`
+    : "";
   const head = p.minAvailBytes != null ? ` <span class="dim">· ${fmtBytes(p.minAvailBytes)} free at worst</span>` : "";
-  return `<div class="t-row">machine stalled <b>${humanDurationMs(p.stallUs / 1000)}</b>${pct}${head}</div>`;
+  return `<div class="t-row">machine stalled <b>${humanDurationMs(p.totalStallUs / 1000)}</b>${pct}${head}</div>`;
 }
 
 function intervalTipHTML(lane, iv) {

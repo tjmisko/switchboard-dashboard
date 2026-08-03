@@ -595,36 +595,48 @@
   // pressureWindow summarizes machine-wide memory pressure over [startMs,
   // endMs] (inclusive both ends) for an interval tooltip:
   //
-  //   {stallUs, stallFraction, minAvailBytes, peakPsiAvg10, samples}
+  //   {totalStallUs, stallFraction, minAvailBytes, peakPsiAvg10, samples, windowMs}
   //
-  // psi_stall_us is a per-interval DELTA — microseconds the machine spent
-  // stalled since the previous sample — so the deltas are SUMMED into stallUs,
-  // the honest headline ("the machine stalled 3.2s here"). They are deliberately
-  // NOT maxed: raw deltas are only comparable when the sampling intervals are
-  // equal, and a daemon restart, a missed tick, or a future adaptive cadence
-  // each break that. stallFraction (stallUs over the window's wall clock) is the
-  // intensity figure that IS comparable across windows of any length.
-  // avail_bytes is a level rather than a delta, hence its MINIMUM: the tightest
-  // the headroom got. peakPsiAvg10 is likewise a level — the decaying average at
-  // its worst — kept only as the human-readable glance.
+  // psi_stall_us is a DELTA over ONE SAMPLE'S INTERVAL — microseconds the
+  // machine spent stalled since the previous sample. The deltas TILE the
+  // window, so the fold is a SUM, never a peak. A peak of raw deltas is only
+  // comparable while every interval is the same length: a 30-second gap's delta
+  // dwarfs a 5-second tick's because it covers six times the wall clock, not
+  // because the machine was worse. And cadence goes irregular exactly when the
+  // daemon is starved, restarted, or the box is thrashing — the OOM
+  // neighbourhood this surface exists to explain — so a peak would spike on a
+  // MISSED TICK and read as "the machine stalled hard here" when the truth is
+  // "we stopped looking here". That is the one lie this surface must not tell.
+  //
+  // stallFraction (totalStallUs over the window's wall clock) is the share of
+  // the window spent stalled, comparable across windows of any length, and the
+  // figure to lead with. avail_bytes is a level rather than a delta, hence its
+  // MINIMUM: the tightest the headroom got. peakPsiAvg10 is likewise a level —
+  // the decaying average at its worst — kept as the human-readable glance.
+  //
+  // Known, accepted edge: the delta on the window's FIRST sample partially
+  // covers time before startMs, so a short window can over-attribute slightly
+  // (and stallFraction can exceed 1). Deliberately not corrected for — clamping
+  // would hide the tiling rather than fix it, and a renderer showing a percent
+  // can cap it at display time.
   //
   // NULL when no sample falls in the window: the series does not cover every
   // interval the timeline can show (it starts when sampling started, and older
   // samples age out). Absent stays absent inside the result too — a window whose
-  // samples carry no PSI reports stallUs null, never 0, because "not measured"
-  // and "never stalled" are different claims and the tooltip trades on the
-  // difference. Pressure is machine-wide and never clipped per lane: it belongs
-  // to the host, not to any one session.
+  // samples carry no PSI reports totalStallUs null, never 0, because "not
+  // measured" and "never stalled" are different claims and the tooltip trades on
+  // the difference. Pressure is machine-wide and never clipped per lane: it
+  // belongs to the host, not to any one session.
   function pressureWindow(memory, startMs, endMs) {
     const rows = memory && memory.pressure;
     if (!Array.isArray(rows) || !(endMs >= startMs)) return null;
-    let stallUs = null, minAvailBytes = null, peakPsiAvg10 = null, samples = 0;
+    let totalStallUs = null, minAvailBytes = null, peakPsiAvg10 = null, samples = 0;
     for (const row of rows) {
       const ts = Date.parse(row && row.ts);
       if (!Number.isFinite(ts) || ts < startMs || ts > endMs) continue;
       samples++;
       const stall = finiteOrNull(row.psi_stall_us);
-      if (stall != null) stallUs = (stallUs == null ? 0 : stallUs) + stall;
+      if (stall != null) totalStallUs = (totalStallUs == null ? 0 : totalStallUs) + stall;
       const avail = finiteOrNull(row.avail_bytes);
       if (avail != null && (minAvailBytes == null || avail < minAvailBytes)) minAvailBytes = avail;
       const psi = finiteOrNull(row.psi_avg10);
@@ -632,15 +644,11 @@
     }
     if (!samples) return null;
 
-    // The delta on the window's first sample covers the gap reaching back
-    // BEFORE startMs, so a sum can slightly over-attribute at the leading edge.
-    // The machine cannot stall for longer than all of the time, so the fraction
-    // saturates at 1 instead of reporting an impossible 1.4.
-    const windowUs = (endMs - startMs) * 1000;
-    const stallFraction = stallUs != null && windowUs > 0
-      ? Math.min(1, stallUs / windowUs)
+    const windowMs = endMs - startMs;
+    const stallFraction = totalStallUs != null && windowMs > 0
+      ? totalStallUs / (windowMs * 1000)
       : null;
-    return { stallUs, stallFraction, minAvailBytes, peakPsiAvg10, samples };
+    return { totalStallUs, stallFraction, minAvailBytes, peakPsiAvg10, samples, windowMs };
   }
 
   // -------------------------------------------------------------------------
