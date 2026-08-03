@@ -1058,6 +1058,23 @@ test("laneMemory should join a namespaced lane id and fall back to the bare one"
   assert.equal(laneMemory(lane, { sessions: { ghost: { peak_tree_bytes: 7 * MB } } }).peakTreeBytes, 7 * MB);
 });
 
+test("laneMemory should join an unidentified lane to its pid-keyed memory", () => {
+  // A session emits memory samples from discovery but only gets its id at its
+  // first agent hook, so the producer keys that stretch "pid:<n>" — and an
+  // unidentified lane is keyed the same way. Without the fallback the two
+  // halves of one session never meet, which is the state a freshly started or
+  // long-idle session sits in, and exactly when its memory is worth seeing.
+  const lane = { pid: 4821, start: at(0), end: at(60), intervals: [] };
+  const mem = { sessions: { "pid:4821": { peak_agent_bytes: 500 * MB, peak_tree_bytes: 900 * MB } } };
+  assert.equal(laneMemory(lane, mem).peakTreeBytes, 900 * MB);
+  assert.equal(laneMemory(lane, mem).peakSpawnedBytes, 400 * MB);
+});
+
+test("laneMemory should not join an unidentified lane to an unrelated pid", () => {
+  const lane = { pid: 4821, start: at(0), end: at(60), intervals: [] };
+  assert.equal(laneMemory(lane, { sessions: { "pid:9999": { peak_tree_bytes: 900 * MB } } }), null);
+});
+
 function pressureSeries() {
   return [
     { ts: at(0), avail_bytes: 8 * GB, psi_avg10: 0.4, psi_stall_us: 1200 },

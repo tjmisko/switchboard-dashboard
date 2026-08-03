@@ -463,12 +463,22 @@
   // namespaces session keys by provider exactly as lane.session_id is, so the
   // lane's own id is the primary key; rawSessionId is tried as a fallback for a
   // single-provider payload that was never namespaced. Null when there is none.
+  //
+  // The last fallback is laneIdentity's "pid:<n>". A session emits memory
+  // samples from the moment its process is discovered but only receives its id
+  // at its first agent hook, so the producer keys that pre-identification
+  // stretch by pid — and a lane that has not been identified either is keyed the
+  // same way. Without this the two halves of one unidentified session would
+  // never meet, which is the state a freshly started or long-idle session sits
+  // in, and exactly when its memory is worth looking at.
   function memoryRecord(lane, memory) {
     const sessions = memory && memory.sessions;
     if (!lane || !sessions) return null;
     if (lane.session_id && sessions[lane.session_id]) return sessions[lane.session_id];
     const raw = rawSessionId(lane);
     if (raw && sessions[raw]) return sessions[raw];
+    const byPid = laneIdentity(lane);
+    if (byPid && sessions[byPid]) return sessions[byPid];
     return null;
   }
 
