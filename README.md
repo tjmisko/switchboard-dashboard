@@ -230,7 +230,9 @@ flags that shape instead of hiding it:
 
 The consequence for consumers: any "active" figure re-derived client-side by
 summing interval durations must clip each suspect lane at `suspect_since`, or it
-will disagree with the summary. `web/model.js` exposes `laneActiveMs` for that.
+will disagree with the summary. `web/model.js` exposes `clipSpanMs` for that: the
+single clip every re-derivation in the UI goes through. `laneActiveMs` is the
+ready-made helper for the common case, summing one lane's own intervals.
 Providers this repo compiles itself (arachne) run the same check with the caps in
 `internal/timeline/suspect.go`; a provider that omits the fields entirely is
 merged exactly as before, never silently clipped.
