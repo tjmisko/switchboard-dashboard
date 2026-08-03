@@ -215,6 +215,17 @@
   // never double-counted. A parent that keeps working WHILE a background subagent
   // runs counts as BOTH — correctly, since they are two independent work streams.
   // This is the force-multiplier numerator, measured instantaneously.
+  //
+  // Measuring it instantaneously is also why this series and the attention card
+  // can disagree. timeline.Merge counts working||delegating toward
+  // attention_union, matching the producer's isActive, and workIntervalsMs was
+  // deliberately NOT widened to match: crediting a delegating parent alongside
+  // the subagent it waits on reads here as two agents aloft, while a union is
+  // free to count both because it cannot double-count. The residual is real —
+  // for a LEGACY stream carrying delegating time that no subagent span covers,
+  // the chart's activeMs reads LOWER than the card's attention_union — but it
+  // is legacy-only, since modern producers emit dormant. Revisit only if the
+  // two figures visibly disagree on a real day.
   // -------------------------------------------------------------------------
 
   // workIntervalsMs collects the aloft spans as epoch-ms [start, end] pairs:

@@ -530,9 +530,9 @@ function render(data) {
 
 // renderChartArea draws whichever chart the view switcher selects into the plot
 // area. The sessions and line views share the horizontal scale (zoom) and the
-// scroll wrap, so toggling between them keeps the time axis put; the projects view is
-// time-less (a ranking, not a timeline). Called from render() and from every
-// repaint trigger (zoom, resize, theme, view/toggle change).
+// scroll wrap, so toggling between them keeps the time axis put; the projects
+// view is time-less (a ranking, not a timeline). Called from render() and from
+// every repaint trigger (zoom, resize, theme, view/toggle change).
 function renderChartArea(data) {
   if (currentView === "line") renderConcurrencyChart(data);
   else if (currentView === "projects") renderProjectsChart(data);

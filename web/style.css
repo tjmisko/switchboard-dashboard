@@ -746,7 +746,11 @@ main { padding: 16px 18px 36px; }
   background: var(--bg-elev-2); border: none; color: var(--fg-dim);
 }
 .popout .po-close:hover { color: var(--fg); }
-.popout .po-head { font-weight: 700; font-family: var(--mono); padding-right: 20px; }
+/* no padding-right to clear that button: a sticky float still sits in flow, so
+   .po-close already takes its own width plus 6px out of the head's line box.
+   Padding would also be the wrong tool — it shortens EVERY line of a head that
+   wraps, where the float shortens only the lines it actually intersects */
+.popout .po-head { font-weight: 700; font-family: var(--mono); }
 .popout .po-desc { color: var(--fg); margin-top: 8px; line-height: 1.4; }
 .popout .po-row { color: var(--fg-muted); margin-top: 6px; font-family: var(--mono); font-size: 12px; }
 .popout .po-row b { color: var(--fg); }
