@@ -117,20 +117,14 @@ func Compile(events []Event, opts CompileOptions) *timeline.Timeline {
 		// way timeline.trustedEndNanos does.
 		var trustedNs int64
 		clip := false
-		if unclosed {
-			evidenceTS := s.lastTS
-			if evidenceTS == "" {
-				evidenceTS = startRFC
-			}
-			if es, ee, ok := timeline.SpanNanos(evidenceTS, endRFC); ok && ee-es >= int64(timeline.DefaultSuspectTrailingCap) {
-				lane.Suspect = true
-				lane.SuspectSince = evidenceTS
-				lane.SuspectReason = fmt.Sprintf("unclosed lane stretched to now: %s since the last event >= %s cap",
-					roundSec(time.Duration(ee-es)), roundSec(timeline.DefaultSuspectTrailingCap))
-				trustedNs, clip = es, true
-				out.Summary.SuspectLanes++
-				out.Summary.SuspectDuration += ee - es
-			}
+		if sus, ok := suspectTrailing(s, startRFC, endRFC, unclosed); ok {
+			lane.Suspect = true
+			lane.SuspectSince = sus.evidenceTS
+			lane.SuspectReason = fmt.Sprintf("unclosed lane stretched to now: %s since the last event >= %s cap",
+				roundSec(time.Duration(sus.stretchNs)), roundSec(timeline.DefaultSuspectTrailingCap))
+			trustedNs, clip = sus.trustedNs, true
+			out.Summary.SuspectLanes++
+			out.Summary.SuspectDuration += sus.stretchNs
 		}
 		out.Lanes = append(out.Lanes, lane)
 
@@ -241,8 +235,15 @@ func aggregate(events []Event) []*sess {
 			continue
 		}
 		s := get(e.SessionID)
-		if ns, ok := timeline.ParseNanos(e.TS); ok && ns > s.lastNs {
-			s.lastTS, s.lastNs = e.TS, ns
+		// Memory events are emitted on a timer, not in response to anything the
+		// agent did, so they are not evidence of life and must never advance the
+		// trusted bound the suspect check reads below. Letting them would mean a
+		// container that died without a session_end still looked alive right up to
+		// the bound — masking exactly the case the check exists to catch.
+		if !IsMemoryEvent(e.Type) {
+			if ns, ok := timeline.ParseNanos(e.TS); ok && ns > s.lastNs {
+				s.lastTS, s.lastNs = e.TS, ns
+			}
 		}
 		switch e.Type {
 		case EventSessionStart:
@@ -280,6 +281,36 @@ func aggregate(events []Event) []*sess {
 		}
 	}
 	return out
+}
+
+// suspect is the outcome of the trailing-interval plausibility check.
+type suspect struct {
+	evidenceTS string // last instant backed by evidence
+	trustedNs  int64  // its parsed form; meaningful only when the check fired
+	stretchNs  int64  // how far past it the session was stretched
+}
+
+// suspectTrailing runs the trailing-interval check for a session nothing ever
+// closed: a lane stretched to the bound whose silence since its last real event
+// is longer than a session plausibly sits quiet. Both halves matter — a session
+// emitting events all along is long, not suspect, however long it runs.
+//
+// Compile and CompileMemory both call it so the timeline and the memory series
+// are clipped at exactly the same instant. A session that has one bound in the
+// envelope and another in its memory record would be worse than either alone.
+func suspectTrailing(s *sess, startRFC, endRFC string, unclosed bool) (suspect, bool) {
+	if !unclosed {
+		return suspect{}, false
+	}
+	evidenceTS := s.lastTS
+	if evidenceTS == "" {
+		evidenceTS = startRFC
+	}
+	es, ee, ok := timeline.SpanNanos(evidenceTS, endRFC)
+	if !ok || ee-es < int64(timeline.DefaultSuspectTrailingCap) {
+		return suspect{}, false
+	}
+	return suspect{evidenceTS: evidenceTS, trustedNs: es, stretchNs: ee - es}, true
 }
 
 // roundSec keeps the suspect reason strings readable (and identical in shape to

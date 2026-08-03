@@ -41,7 +41,35 @@ type Recorder struct {
 
 	writer  *Writer
 	cgroups *CgroupReader
-	live    map[string]*liveSession // keyed by session slug
+	// memSampleEvery is how many polls separate two memory_sample events. See
+	// MemorySampleInterval for why the two cadences differ.
+	memSampleEvery int
+	live           map[string]*liveSession // keyed by session slug
+}
+
+// MemorySampleInterval is the wall-clock cadence for memory_sample events.
+//
+// It is deliberately much slower than the poll interval. Every history line is
+// fsync'd (Writer.Append), and Arachne pools up to six containers, so sampling
+// on every 5s poll would append ~17k fsync'd events per container per day to a
+// log that has taken about 2,500 lines since it started. Thirty seconds keeps
+// the series legible at roughly a two-thousandth of that cost.
+//
+// The resolution given up is smaller than it looks, because the figure that
+// matters most does not depend on the cadence at all: memory.peak is a
+// kernel-maintained high-water mark, so the peak is exact no matter how sparsely
+// we sample. The series is only ever needed for shape and a time-weighted mean.
+const MemorySampleInterval = 30 * time.Second
+
+// memorySampleEvery is the sample divisor: how many interval-length polls fit
+// into MemorySampleInterval, at least one. At the default 5s interval it is 6.
+// Deriving it from the interval rather than hard-coding 6 keeps the wall-clock
+// cadence stable when the interval is configured differently.
+func memorySampleEvery(interval time.Duration) int {
+	if interval <= 0 || interval >= MemorySampleInterval {
+		return 1
+	}
+	return int((MemorySampleInterval + interval - 1) / interval) // ceil
 }
 
 type liveSession struct {
@@ -50,6 +78,17 @@ type liveSession struct {
 	logOffset int64
 	openSubs  map[string]SubagentSpawn // tool_use_id -> Task spawn still running
 	usage     Usage
+
+	memTicks   int         // polls since this session's last emitted memory sample
+	memPending *memReading // last cgroup reading not yet written to history
+	oomKills   int64       // last observed memory.events oom_kill counter
+}
+
+// memReading is one cgroup reading held between the poll that took it and the
+// tick that writes it out.
+type memReading struct {
+	mem ContainerMemory
+	ts  string
 }
 
 // NewRecorder builds a Recorder from Config.
@@ -63,13 +102,14 @@ func NewRecorder(cfg Config) *Recorder {
 		interval = 5 * time.Second
 	}
 	return &Recorder{
-		docker:      cfg.Docker,
-		historyPath: cfg.HistoryPath,
-		statePath:   cfg.StatePath,
-		interval:    interval,
-		now:         now,
-		cgroups:     NewCgroupReader(cfg.CgroupRoot),
-		live:        map[string]*liveSession{},
+		docker:         cfg.Docker,
+		historyPath:    cfg.HistoryPath,
+		statePath:      cfg.StatePath,
+		interval:       interval,
+		now:            now,
+		cgroups:        NewCgroupReader(cfg.CgroupRoot),
+		memSampleEvery: memorySampleEvery(interval),
+		live:           map[string]*liveSession{},
 	}
 }
 
@@ -166,6 +206,16 @@ func (r *Recorder) reconcile(ctx context.Context) error {
 		for id, ev := range os_.OpenSubagents {
 			ls.openSubs[id] = SubagentSpawn{ToolUseID: id, AgentType: ev.AgentType, Description: ev.Description, TS: ev.TS}
 		}
+		// Prime the OOM counter without emitting anything. memory.events is
+		// cumulative over the container's life and does not reset when we restart,
+		// so a kill that happened while we were down is already in it; emitting on
+		// the first poll would date that old kill to now. There is no honest
+		// timestamp to give it, and the same discipline the session-end
+		// reconciliation follows applies — observe the gap, do not synthesize
+		// through it.
+		if m, err := r.cgroups.Read(c); err == nil {
+			ls.oomKills = m.OOMKills
+		}
 		// Resume the log at the persisted offset; without one, skip the backlog
 		// to avoid re-emitting subagents we already recorded before the crash.
 		if state != nil {
@@ -233,6 +283,12 @@ func (r *Recorder) tick(ctx context.Context) error {
 		if end == "" {
 			end = nowTS
 		}
+		// The cgroup went with the container, so the reading held from the last
+		// poll is the final one there will ever be. Flushing it keeps the tail of
+		// the series — and the high-water mark it carries — from being lost in the
+		// gap between the last emitted sample and the exit.
+		r.flushMemorySample(slug, ls)
+		r.cgroups.Forget(ls.container.ID)
 		for id := range ls.openSubs {
 			_ = r.writer.Append(Event{Type: EventSubagentStop, TS: nowTS, SessionID: slug, ToolUseID: id, End: end})
 		}
@@ -247,6 +303,7 @@ func (r *Recorder) tick(ctx context.Context) error {
 		}
 		ls.lastSeen = nowTS
 		r.advanceLog(slug, ls, nowTS)
+		r.sampleMemory(slug, ls, nowTS)
 	}
 
 	r.writeState(nowTS)
@@ -301,6 +358,56 @@ func (r *Recorder) advanceLog(slug string, ls *liveSession, nowTS string) {
 			CostUSD: ls.usage.CostUSD,
 		})
 	}
+}
+
+// sampleMemory reads the container's cgroup and records what it found.
+//
+// The read happens on every poll but the sample is written only every
+// memSampleEvery polls. The two cadences are deliberately different because
+// their costs are: a read is six small files under /sys/fs/cgroup, while every
+// history line is fsync'd.
+//
+// Reading on every poll is what makes an OOM kill catchable at all. The counter
+// is checked at the poll interval rather than the sample interval, so a
+// container whose cage fires and then dies still leaves the event behind — at
+// the sample interval the container would usually be gone, and its cgroup with
+// it, before anyone looked.
+func (r *Recorder) sampleMemory(slug string, ls *liveSession, nowTS string) {
+	m, err := r.cgroups.Read(ls.container)
+	if err != nil {
+		return // exited, or a layout we could not resolve; never fatal to a tick
+	}
+	if m.OOMKills > ls.oomKills {
+		// Its own event, not a field on a sample: the cage firing is a discrete
+		// fact the timeline should be able to mark, and today it surfaces only as
+		// an unexplained session_end. The memory figures ride along as the
+		// diagnostic context for why it fired.
+		_ = r.writer.Append(Event{
+			Type: EventOOMKill, TS: nowTS, SessionID: slug,
+			OOMKills: m.OOMKills, OOMKillDelta: m.OOMKills - ls.oomKills,
+			MemTreeBytes: m.Current, MemPeakBytes: m.Peak, MemMaxBytes: m.Max,
+		})
+		ls.oomKills = m.OOMKills
+	}
+	ls.memPending = &memReading{mem: m, ts: nowTS}
+	if ls.memTicks%r.memSampleEvery == 0 {
+		r.flushMemorySample(slug, ls) // a new session samples on its first poll
+	}
+	ls.memTicks++
+}
+
+// flushMemorySample writes the held reading, if there is one, and clears it.
+func (r *Recorder) flushMemorySample(slug string, ls *liveSession) {
+	p := ls.memPending
+	if p == nil {
+		return
+	}
+	_ = r.writer.Append(Event{
+		Type: EventMemorySample, TS: p.ts, SessionID: slug,
+		MemTreeBytes: p.mem.Current, MemPeakBytes: p.mem.Peak, MemMaxBytes: p.mem.Max,
+		MemSwapBytes: p.mem.Swap, MemInactiveFileBytes: p.mem.InactiveFile,
+	})
+	ls.memPending = nil
 }
 
 func (r *Recorder) nowTS() string { return r.now().UTC().Format(time.RFC3339) }

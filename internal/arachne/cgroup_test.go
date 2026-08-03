@@ -26,7 +26,11 @@ func writeCgroupFixture(t *testing.T, dir string, files map[string]string) {
 		t.Fatalf("mkdir %s: %v", dir, err)
 	}
 	for name, body := range files {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o444); err != nil {
+		path := filepath.Join(dir, name)
+		// The real files are 0444, so rewriting one to move the numbers over the
+		// course of a test means replacing it rather than opening it for writing.
+		_ = os.Remove(path)
+		if err := os.WriteFile(path, []byte(body), 0o444); err != nil {
 			t.Fatalf("write %s: %v", name, err)
 		}
 	}
