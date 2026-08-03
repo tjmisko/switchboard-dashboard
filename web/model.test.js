@@ -938,20 +938,66 @@ test("laneMemory should return nothing when the session has no memory data", () 
   assert.equal(laneMemory(lane, { sessions: {} }), null);
   assert.equal(laneMemory(lane, { sessions: { other: { peak_tree_bytes: 900 * MB } } }), null);
   assert.equal(laneMemory(lane, { sessions: { ghost: {} } }), null, "an empty record is no data");
+  assert.equal(laneMemory(lane, {
+    // the endpoint sends the scalars as explicit null rather than omitting them
+    sessions: { ghost: { peak_agent_bytes: null, avg_agent_bytes: null, peak_tree_bytes: null, avg_tree_bytes: null } },
+  }), null, "a record of explicit nulls is no data");
   assert.equal(laneMemory(null, memoryPayload()), null);
+});
+
+test("laneMemory should keep a real zero apart from a missing figure", () => {
+  // 0 is a legal reading and must survive as 0 — `!= null`, never truthiness,
+  // or a genuinely idle tree renders as "—" (not measured).
+  const lane = ghostLane();
+  lane.suspect = false;
+  const mem = laneMemory(lane, {
+    sessions: { ghost: { peak_agent_bytes: 0, avg_agent_bytes: 0, peak_tree_bytes: 0, avg_tree_bytes: 0 } },
+  });
+  assert.equal(mem.peakTreeBytes, 0, "a zero record is data, not absence");
+  assert.equal(mem.peakSpawnedBytes, 0);
+  assert.equal(fmtBytes(mem.peakTreeBytes), "0 MB");
 });
 
 test("laneMemory should keep the tree alone when the provider reports no agent split", () => {
   // arachne measures a container total, which has no meaningful inner boundary.
+  // The endpoint emits the agent side as explicit null, never as an absent key.
   const lane = ghostLane();
   lane.suspect = false;
   const mem = laneMemory(lane, {
-    sessions: { ghost: { peak_tree_bytes: 2 * GB, avg_tree_bytes: 1 * GB } },
+    sessions: {
+      ghost: {
+        peak_agent_bytes: null, avg_agent_bytes: null,
+        peak_tree_bytes: 2 * GB, avg_tree_bytes: 1 * GB,
+        mem: [{ ts: at(0), agent: null, tree: 2 * GB }],
+      },
+    },
   });
   assert.equal(mem.peakTreeBytes, 2 * GB);
   assert.equal(mem.peakAgentBytes, null, "absent, not zero");
   assert.equal(mem.peakSpawnedBytes, null, "no split to report");
   assert.equal(fmtBytes(mem.peakAgentBytes), "—");
+});
+
+test("laneMemory should re-derive the tree alone when a suspect container lane has no agent side", () => {
+  // The clip path has to survive a null agent series too: arachne's samples
+  // carry an explicit null agent, so seriesStats finds nothing on that key.
+  const mem = laneMemory(ghostLane(), {
+    sessions: {
+      ghost: {
+        peak_agent_bytes: null, avg_agent_bytes: null,
+        peak_tree_bytes: 4 * GB, avg_tree_bytes: 3 * GB,
+        mem: [
+          { ts: at(0), agent: null, tree: 1 * GB },
+          { ts: at(60), agent: null, tree: 2 * GB },
+          { ts: at(300), agent: null, tree: 4 * GB }, // synthesized tail
+        ],
+      },
+    },
+  });
+  assert.equal(mem.clipped, true);
+  assert.equal(mem.peakTreeBytes, 2 * GB, "the tail's 4 GB is not evidence");
+  assert.equal(mem.peakAgentBytes, null);
+  assert.equal(mem.peakSpawnedBytes, null);
 });
 
 // A suspect lane's samples run past the evidence bound because the sampler
