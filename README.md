@@ -88,6 +88,11 @@ with its provider (accent spine + legend chip). A provider that fails is recorde
 in the envelope's `provider_errors` rather than blanking the dashboard; only an
 all-providers-failed request is a `502`. See `examples/providers.json`.
 
+**Writing your own provider:** [`docs/provider-contract.md`](docs/provider-contract.md)
+is the full spec — the process contract, the envelope field by field with units,
+a minimum viable envelope to copy, what each optional field buys you in the UI,
+the suspect/ghost rules, and what the merge does to your output.
+
 ### Arachne provider (docker long-running sessions)
 
 `arachne-switchboard-recorder` + `arachne-switchboard-ctl` add
@@ -204,7 +209,9 @@ interaction subagent sub-bars already have.
 
 ## Data contract
 
-The JSON shape and units are owned by Switchboard (`docs/history-schema.md`):
+The JSON shape and units are owned by Switchboard (`docs/history-schema.md`);
+[`docs/provider-contract.md`](docs/provider-contract.md) restates it as an
+implementer's spec for anyone writing a provider:
 
 - **Durations are nanoseconds**, **token fields are raw counts**, and **`cost_usd`
   is a float in dollars** recomputed by the producer from tokens × per-model price.
