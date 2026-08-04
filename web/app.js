@@ -545,6 +545,12 @@ function render(data) {
 // scroll wrap, so toggling between them keeps the time axis put; the projects
 // view is time-less (a ranking, not a timeline). Called from render() and from
 // every repaint trigger (zoom, resize, theme, view/toggle change).
+//
+// The scroll position is deliberately left alone. Zoomed in far enough that the
+// plot outgrows its wrap, the trailing edge — and with it the live-tail readout
+// — sits off-screen until you scroll to it, exactly like the newest bars in the
+// sessions view. Parking the scroll at "now" instead would take the y-axis and
+// the lane labels off the other side, which is a worse trade.
 function renderChartArea(data) {
   if (currentView === "line") renderConcurrencyChart(data);
   else if (currentView === "projects") renderProjectsChart(data);
@@ -1427,7 +1433,13 @@ function axisTicks(t0, t1, plotW) {
 
 const MONO = 'ui-monospace, "SFMono-Regular", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace';
 const SMOOTH_WINDOW_MS = 30 * 60 * 1000; // centered rolling-average window
-const CGEO = { LEFT: 54, RIGHT: 18, TOP: 18, BOTTOM: 30, HEIGHT: 340 };
+// RIGHT_LIVE is the wider right gutter a live window reserves for the live-tail
+// readout — the count over a stacked "agents / aloft", hanging off the end of
+// the line rather than sitting on top of it. Sized to the widest line at its
+// font ("agents" at 9px mono), and reserved for the whole live day rather than
+// only while a tail exists, so the plot doesn't jump width when the last agent
+// lands.
+const CGEO = { LEFT: 54, RIGHT: 18, RIGHT_LIVE: 56, TOP: 18, BOTTOM: 30, HEIGHT: 340 };
 
 // chartHover carries the just-rendered chart's paint closure + scales so the
 // canvas mousemove handler (wired once) can redraw the crosshair and read out
@@ -1479,11 +1491,12 @@ function renderConcurrencyChart(data) {
   // window + horizontal scale (reuse the zoom density + scroll like the bars)
   const { t0, t1 } = windowBounds(data, lanes);
   const span = t1 - t0;
+  const rightPad = isLiveWindow() ? CGEO.RIGHT_LIVE : CGEO.RIGHT;
   const containerW = Math.max(620, el.wrap.clientWidth);
-  const fitPlotW = Math.max(160, containerW - CGEO.LEFT - CGEO.RIGHT);
+  const fitPlotW = Math.max(160, containerW - CGEO.LEFT - rightPad);
   const minPlotW = (span / 3600e3) * pxPerHour;
   const plotW = Math.max(fitPlotW, minPlotW);
-  const W = CGEO.LEFT + plotW + CGEO.RIGHT;
+  const W = CGEO.LEFT + plotW + rightPad;
   const H = CGEO.HEIGHT;
   const plotTop = CGEO.TOP, plotBottom = H - CGEO.BOTTOM, plotH = plotBottom - plotTop;
   // the axis has to hold whichever profile peaks higher: squaring off the tail
@@ -1620,9 +1633,10 @@ function renderConcurrencyChart(data) {
     stepPath();
     ctx.strokeStyle = C.inst; ctx.lineWidth = 1.4; ctx.lineJoin = "round"; ctx.stroke();
 
-    // live tail cap: a dot at the current level with the count beside it. The
-    // dot carries a background-colored ring so it reads as a terminator rather
-    // than a kink in the step, and the count is nudged to stay on-canvas.
+    // live tail cap: a dot terminating the line, with the count hanging off to
+    // its right in the reserved gutter — out over the margin rather than on top
+    // of the plot, so it never sits on the data. The dot carries a
+    // background-colored ring so it reads as a terminator, not a kink.
     if (live) {
       const lx = X(live.t), ly = Y(live.n);
       ctx.beginPath();
@@ -1630,14 +1644,21 @@ function renderConcurrencyChart(data) {
       ctx.fillStyle = C.inst; ctx.fill();
       ctx.strokeStyle = C.bg; ctx.lineWidth = 1.5; ctx.stroke();
 
-      const label = String(live.n);
-      ctx.font = "700 13px " + MONO;
-      const halfW = ctx.measureText(label).width / 2;
-      const above = ly - 10 >= plotTop + 12; // no room above at the peak → sit below
+      // count, then its label stacked under it in the same green — two short
+      // lines keep the gutter narrow. Held clear of the plot edges so a tail at
+      // 0 or at the peak still reads.
+      const labelX = CGEO.LEFT + plotW + 8;
+      const labelY = Math.min(Math.max(ly, plotTop + 10), plotBottom - 22);
+      ctx.textAlign = "left";
+      ctx.textBaseline = "alphabetic";
       ctx.fillStyle = C.inst;
-      ctx.textAlign = "center";
-      ctx.textBaseline = above ? "bottom" : "top";
-      ctx.fillText(label, Math.min(Math.max(lx, CGEO.LEFT + halfW + 2), W - halfW - 2), above ? ly - 9 : ly + 9);
+      ctx.font = "700 13px " + MONO;
+      ctx.fillText(String(live.n), labelX, labelY);
+      ctx.globalAlpha = 0.75; // the label qualifies the number, it doesn't compete
+      ctx.font = "9px " + MONO;
+      ctx.fillText(live.n === 1 ? "agent" : "agents", labelX, labelY + 10);
+      ctx.fillText("aloft", labelX, labelY + 19);
+      ctx.globalAlpha = 1;
     }
 
     // smoothed 30-min rolling average (sampled per pixel)
