@@ -23,16 +23,25 @@ const PLAN_POLL_MS = 15000; // /api/plan poll cadence (changes slowly)
 const SUMMARIES_POLL_MS = 120000; // /api/summaries cadence (grows on session end)
 
 // Operator lane colors: green marks "free" time (≥1 agent running while you were
-// neither typing into an agent nor recovering from a context switch — you're a
-// "free agent"); dark red marks "occupied" time. A context switch occupies you
-// for OP_SWITCH_RECOVERY_MS going forward — clustered switches merge, so thrash
-// extends the cost without double-counting. Mirrors the effective-added-time
-// accounting (the topline "effective day" figure).
+// neither attending an agent window nor recovering from a context switch —
+// you're a "free agent"); dark red marks "occupied" time. A context switch
+// occupies you for OP.switchRecoveryMs going forward — clustered switches merge,
+// so thrash extends the cost without double-counting. Occupied is also what the
+// topline's net agent hours nets off, so the two always agree.
 const OP_FREE_COLOR = "#3fb950";      // green — free time ("free agent")
-const OP_OCCUPIED_COLOR = "#8c4a4c";  // muted dusty red — occupied (typing or switching)
-const OP_SWITCH_RECOVERY_MS = 90000;  // 90s of occupied time after each switch
-const OP_SWITCH_FLICKER_MS = 500;     // a focus arrival is a real context switch only if you dwelt ≥0.5s — drops sub-second focus flicker (notifications, focus-follows-mouse), nothing more
-const OP_MIN_ENGAGE_MS = 15000;       // TYPING gate only: a focus span under 15s isn't real editing (switch detection uses OP_SWITCH_FLICKER_MS instead)
+const OP_OCCUPIED_COLOR = "#8c4a4c";  // muted dusty red — occupied (attending or switching)
+
+// OP: the operator-model tunables. These are judgement calls about how YOU work,
+// not facts about the data, so they are served by /api/settings from a file you
+// own (see settings.go and the README's Settings section) and merged over these
+// fallbacks at boot. The literals here MUST match Go's DefaultSettings(), so a
+// dashboard whose settings fetch fails behaves exactly like an unconfigured one.
+const OP = {
+  awayAfterMs: 5 * 60 * 1000, // focused but untouched this long ⇒ you're away
+  switchRecoveryMs: 90000,    // occupied time charged forward from each switch
+  switchFlickerMs: 500,       // shorter focus arrivals are flicker, not switches
+  minEngageMs: 15000,         // shorter focus spans aren't time spent working
+};
 
 // Status -> color. working solid green; delegating faded green; idle yellow;
 // permission red; suspended grey; "" (unknown) dim. Mirrors style.css vars.
@@ -349,6 +358,30 @@ async function loadTimeline() {
   }
 }
 
+// loadSettings pulls the operator-model tunables over OP's fallbacks. Fetched
+// once, before the first poll, because every operator figure on the page depends
+// on them; a failed or partial fetch leaves the built-in defaults in place, which
+// are the same numbers the server serves when unconfigured. Keys are snake_case
+// on the wire (they are the file's keys, which a human edits) and camelCase here.
+const OP_SETTING_KEYS = {
+  away_after_ms: "awayAfterMs",
+  switch_recovery_ms: "switchRecoveryMs",
+  switch_flicker_ms: "switchFlickerMs",
+  min_engage_ms: "minEngageMs",
+};
+
+async function loadSettings() {
+  try {
+    const res = await fetch("/api/settings", { cache: "no-store" });
+    if (!res.ok) return;
+    const j = await res.json();
+    for (const [wire, key] of Object.entries(OP_SETTING_KEYS)) {
+      const v = j[wire];
+      if (typeof v === "number" && isFinite(v) && v > 0) OP[key] = v;
+    }
+  } catch (_) { /* keep the built-in defaults */ }
+}
+
 async function loadPlan() {
   try {
     const res = await fetch("/api/plan", { cache: "no-store" });
@@ -424,16 +457,22 @@ function isLiveWindow() {
 // computeOperatorTime partitions the running window into the operator's
 // "occupied" vs "free" intervals:
 //   running   = union over lanes of running-status intervals (≥1 agent working)
-//   typing    = focus ∩ activity-active (you were at the keyboard on an agent)
-//   ctxRecov  = ⋃ [switch, switch + 90s] over every context switch (switch
-//               arrivals after the first) — clustered switches merge
-//   occupied  = (typing ∪ ctxRecov) ∩ running
-//   free      = running MINUS (typing ∪ ctxRecov)
+//   present   = ⋃ [activity-active start, end + OP.awayAfterMs] — you don't stop
+//               being at the machine the instant you stop typing, but an agent
+//               window focused and untouched for awayAfterMs means you walked
+//               away and left it up
+//   attending = focus ∩ present (at an agent window AND actually there)
+//   ctxRecov  = ⋃ [switch, switch + OP.switchRecoveryMs] over every context
+//               switch (switch arrivals after the first) — clustered switches
+//               merge, so a burst costs one recovery, not one apiece
+//   occupied  = (attending ∪ ctxRecov) ∩ running
+//   free      = running MINUS (attending ∪ ctxRecov)
 // "free time" is the headline: time you actually had while the agents ran and
-// you were neither typing nor recovering from a switch. Degrades when focus or
-// activity are absent (no activity → any focus counts as typing).
+// you were neither attending one nor recovering from a switch. Degrades when
+// focus or activity are absent (no activity stream → any focus counts as
+// attending, since there is no evidence you left).
 //
-// A context switch = a focus arrival with dwell ≥ OP_SWITCH_FLICKER_MS (see
+// A context switch = a focus arrival with dwell ≥ OP.switchFlickerMs (see
 // model.switchArrivals). The COUNT, the overlay, and the recovery-time
 // subtraction all draw from this ONE set, so every switch shown is charged
 // against free time. (Previously the count/overlay used EVERY arrival while
@@ -477,29 +516,36 @@ function computeOperatorTime(data) {
     for (const f of lane.focus || []) {
       const s = Date.parse(f.start), e = Date.parse(f.end);
       if (!(isFinite(s) && isFinite(e) && e > s)) continue;
-      focusSpans.push(f); // raw; switchArrivals() applies OP_SWITCH_FLICKER_MS
-      // typing gate is stricter: only ≥15s focus is real editing (≠ a switch).
-      if (e - s >= OP_MIN_ENGAGE_MS) focusPairs.push([s, e]);
+      focusSpans.push(f); // raw; switchArrivals() applies OP.switchFlickerMs
+      // attending gate is stricter: a sub-15s look-in isn't time spent working
+      // in that window (≠ a switch, which only needs the flicker floor).
+      if (e - s >= OP.minEngageMs) focusPairs.push([s, e]);
     }
   }
   const running = unionMs(runPairs);
   const engaged = unionMs(focusPairs);
 
-  // Context switches: focus arrivals you actually landed on (dwell ≥ 0.5s), the
-  // SAME set the count and overlay show. Every switch after the first occupies you
-  // OP_SWITCH_RECOVERY_MS forward; clustered switches merge via union, so thrash
+  // Context switches: focus arrivals you actually landed on (dwell ≥ the flicker
+  // floor), the SAME set the count and overlay show. Every switch after the first
+  // occupies you OP.switchRecoveryMs forward; clustered switches merge via union, so thrash
   // lengthens the interval without ever double-counting — and, crucially, every
   // switch you see is subtracted from free time (no sub-15s escape hatch).
-  const switchStarts = switchArrivals(focusSpans, OP_SWITCH_FLICKER_MS);
+  const switchStarts = switchArrivals(focusSpans, OP.switchFlickerMs);
   const recoveryStarts = switchStarts.slice(1);
-  const ctxRecovery = unionMs(recoveryStarts.map((t) => [t, t + OP_SWITCH_RECOVERY_MS]));
+  const ctxRecovery = unionMs(recoveryStarts.map((t) => [t, t + OP.switchRecoveryMs]));
 
-  // Active typing: focused on an agent while globally active (at the keyboard).
-  // Without an activity stream, treat any (≥15s) focus as typing.
-  const active = unionMs(spansToMs((data.activity || []).filter((a) => a.state === "active")));
-  const typing = active.length ? intersectMs(engaged, active) : engaged;
+  // Attending: focused on an agent window while you were actually there. The
+  // activity stream only marks keyboard/mouse activity, and reading a diff is
+  // not idleness, so each active span is extended forward by OP.awayAfterMs
+  // before the intersection — presence decays rather than blinking off. Past
+  // that, a focused-but-untouched window is you having walked away from it.
+  // Without an activity stream there is no evidence you left: any (≥15s) focus
+  // counts as attending.
+  const active = spansToMs((data.activity || []).filter((a) => a.state === "active"));
+  const present = unionMs(active.map(([s, e]) => [s, e + OP.awayAfterMs]));
+  const attending = present.length ? intersectMs(engaged, present) : engaged;
 
-  const occupiedAll = unionMs([...ctxRecovery, ...typing]);
+  const occupiedAll = unionMs([...ctxRecovery, ...attending]);
   const occupied = intersectMs(occupiedAll, running); // drawn only while agents run
   const free = subtractMs(running, occupiedAll);
 
@@ -1125,8 +1171,8 @@ function drawCollapsedGroup(g, x, W) {
 }
 
 // drawOperatorLane renders the top "operator" swimlane: gold = free time, dark
-// red = occupied (you were typing into an agent, or within 90s of a context
-// switch). The two partition the running window.
+// red = occupied (you were attending an agent window, or inside a switch's
+// recovery window). The two partition the running window.
 function drawOperatorLane(op, rowTop, x, W) {
   const barY = rowTop + Math.round((GEO.OP_LANE_H - GEO.OP_BAR_H) / 2);
 
@@ -1881,8 +1927,9 @@ function operatorTipHTML(op) {
     + `<div class="t-row">occupied ${humanDurationMs(op.occupiedMs)}</div>`
     + `<div class="t-row">agents running ${humanDurationMs(op.runningMs)}</div>`
     + `<div class="t-row">${op.switches} context switch${op.switches === 1 ? "" : "es"}</div>`
-    + `<div class="t-formula">free = running − (typing ∪ 90s-per-switch recovery)</div>`
-    + `<div class="t-why">Time you had free while agents ran and you were neither typing nor recovering from a context switch.</div>`;
+    + `<div class="t-formula">free = running − (attending ∪ recovery)`
+    + `<span class="t-subst">${humanDurationMs(op.runningMs)} − ${humanDurationMs(op.occupiedMs)}</span></div>`
+    + `<div class="t-why">Time you had free while agents ran and you were neither attending an agent window nor recovering from a context switch. Attending needs activity within ${humanDurationMs(OP.awayAfterMs)} — a focused window you haven't touched since then reads as you having walked away.</div>`;
 }
 
 // tipHead renders a segment tooltip's headline: the status label on the left with
@@ -1916,8 +1963,8 @@ function opSegTipHTML(kind, s, e) {
   return tipHead(free ? "free" : "occupied", free ? OP_FREE_COLOR : "#e5534b",
       `${fmtClock(new Date(s).toISOString())} – ${fmtClock(new Date(e).toISOString())}`, e - s)
     + `<div class="t-why">${free
-        ? "Agents were running but you weren't typing or recovering from a switch."
-        : "You were typing, or within 90s of a context switch, while agents ran."}</div>`;
+        ? "Agents were running but you weren't attending one or recovering from a switch."
+        : `You were attending an agent window, or within ${humanDurationMs(OP.switchRecoveryMs)} of a context switch, while agents ran.`}</div>`;
 }
 
 function intervalTipHTML(lane, iv) {
@@ -2105,20 +2152,20 @@ function renderAttentionCard(summary, op) {
     why: "How many times you moved your attention between sessions.",
     color: "var(--c-permission)",
   });
+  const recovStr = humanDurationMs(OP.switchRecoveryMs);
   const lostTip = tip({
     title: "operator time lost to AI",
-    formula: "⋃ 90s recovery per switch, merged, ∩ running",
-    // 90s × switches is the naive charge; the union and the ∩ are what cut it
-    // down. Both numbers are shown because the gap between them IS the point —
-    // a burst of switches inside one recovery window costs one recovery.
+    formula: `⋃ ${recovStr} recovery per switch, merged, ∩ running`,
+    // recovery × switches is the naive charge; the union and the ∩ are what cut
+    // it down. Both numbers are shown because the gap between them IS the point
+    // — a burst of switches inside one recovery window costs one recovery.
     substitution: !op ? null : (() => {
-      const raw = op.switches * OP_SWITCH_RECOVERY_MS;
-      const merged = humanDurationMs(op.lostMs);
-      const naive = `90s × ${op.switches} = ${humanDurationMs(raw)}`;
-      return op.lostMs < raw ? `${naive}\n− overlap → ${merged}` : naive;
+      const raw = op.switches * OP.switchRecoveryMs;
+      const naive = `${recovStr} × ${op.switches} = ${humanDurationMs(raw)}`;
+      return op.lostMs < raw ? `${naive}\n− overlap → ${humanDurationMs(op.lostMs)}` : naive;
     })(),
     result: op ? humanDurationMs(op.lostMs) : "—",
-    why: "Time absorbed re-acquiring context after switches while agents ran. Switch bursts merge into one recovery window rather than costing 90s apiece.",
+    why: `Time absorbed re-acquiring context after switches while agents ran. Switch bursts merge into one recovery window rather than costing ${recovStr} apiece.`,
     color: "var(--c-permission)",
   });
 
@@ -2503,8 +2550,10 @@ function init() {
     resizeTimer = setTimeout(() => { if (lastData) renderChartArea(lastData); }, 120);
   });
 
-  // live polling — no manual refresh controls
-  loadTimeline();
+  // live polling — no manual refresh controls. Settings land first: every
+  // operator figure depends on them, and re-rendering the page a beat later with
+  // different thresholds would be a visible flicker of the numbers.
+  loadSettings().then(loadTimeline);
   loadPlan();
   loadSummaries();
   timelineTimer = setInterval(loadTimeline, POLL_MS);

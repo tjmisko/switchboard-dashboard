@@ -45,6 +45,9 @@ type Server struct {
 	// Providers, when non-empty, replaces the default single-claude provider with
 	// an explicit adapter set whose envelopes are merged into one unified view.
 	Providers []provider.Provider
+	// Settings are the operator-model tunables served to the frontend. The zero
+	// value is not meaningful — main loads them (defaults when unconfigured).
+	Settings Settings
 }
 
 // providerList returns the configured providers, or a single default claude
@@ -71,6 +74,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/timeline", s.handleTimeline)
 	mux.HandleFunc("/api/plan", s.handlePlan)
 	mux.HandleFunc("/api/summaries", s.handleSummaries)
+	mux.HandleFunc("/api/settings", s.handleSettings)
 	mux.Handle("/", s.staticHandler())
 	return mux
 }
@@ -301,6 +305,18 @@ func readPlan(path string, now time.Time) planResponse {
 		SevenDay:     pf.SevenDay,
 		SevenDayOpus: pf.SevenDayOpus,
 	}
+}
+
+// handleSettings serves the operator-model tunables the frontend applies. Always
+// 200 JSON: an unconfigured dashboard serves the defaults, which are the same
+// numbers the frontend falls back to if this fetch fails.
+func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
+	out := s.Settings
+	if out.AwayAfterMs <= 0 { // zero value Server (tests, embedders) → ship defaults
+		out = DefaultSettings()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
 }
 
 // handlePlan serves the read-only plan-usage view. Always 200 JSON.

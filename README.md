@@ -71,6 +71,40 @@ go build -o switchboard-dashboard .
 | `--plan`      | `/tmp/claude-plan-usage.json` | Cached plan-usage file, read-only, for the gauge.                        |
 | `--summaries` | `~/.local/share/switchboard/summaries` | Session-summary records from `session-digest`; empty disables.  |
 | `--providers` | `""`                          | Providers config JSON; when set, merges the listed adapters (see below). |
+| `--settings`  | `~/.config/switchboard/dashboard.json` | Operator-model settings (see below); a missing file means defaults. |
+
+## Settings
+
+The operator model turns your focus and activity streams into "time this cost
+you" — the red half of the operator lane, the context-switch overhead, and the
+wall-clock the topline's **net agent hours** nets off. The thresholds it uses
+are judgement calls about how *you* work, not facts about the data, so they live
+in a file you own rather than in the frontend's source:
+
+```jsonc
+// ~/.config/switchboard/dashboard.json — every key optional, every value in ms
+{
+  "away_after_ms": 300000,      // 5m
+  "switch_recovery_ms": 90000,  // 90s
+  "switch_flicker_ms": 500,     // 0.5s
+  "min_engage_ms": 15000        // 15s
+}
+```
+
+| Key                  | Default | What it decides                                                                                                                                                                                              |
+| -------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `away_after_ms`      | `300000` (5m) | How long after your last keystroke or mouse move you still count as *at* a focused agent window. Reading a diff isn't idleness, so presence decays rather than blinking off — but a window left focused and untouched past this is you having **walked away**, and stops being charged as your time. Raise it if you read for long stretches; lower it if you leave sessions open when you go. |
+| `switch_recovery_ms` | `90000` (90s)  | How long re-acquiring context costs you after a context switch. Recovery windows are **unioned**, so a burst of switches inside one window costs one recovery, not one apiece.                        |
+| `switch_flicker_ms`  | `500` (0.5s)   | Minimum dwell for a focus arrival to count as a real switch at all. Below it, it's flicker (a notification, focus-follows-mouse) and is ignored by the count, the overlay, and the recovery charge alike. |
+| `min_engage_ms`      | `15000` (15s)  | Minimum focus dwell to count as attending. Separate from the flicker floor: passing through a window is a switch, but it isn't time spent working in it.                                              |
+
+Omitted keys keep their default and a missing file means "all defaults", so the
+file need only carry what you're changing. A non-positive value falls back to
+the default; a **malformed** file is a startup error rather than a silent
+default — a setting that didn't take should be loud. The values are served at
+`/api/settings` and fetched by the frontend before its first render; if that
+fetch fails the frontend uses the same built-in defaults, so an unreachable
+endpoint changes nothing.
 
 ## Data providers (adapters)
 
@@ -204,6 +238,10 @@ interaction subagent sub-bars already have.
   `{available, mtime, age_seconds, stale, five_hour, seven_day, seven_day_opus}`.
   It never calls the OAuth endpoint. A missing file returns `200 {available:false}`
   and the UI falls back to its own recomputed cost.
+- **`GET /api/settings`** — returns the operator-model tunables
+  (`away_after_ms`, `switch_recovery_ms`, `switch_flicker_ms`, `min_engage_ms`)
+  loaded from `--settings`. Always `200`; an unconfigured server serves the
+  documented defaults, which are also the frontend's fallbacks.
 - Static assets are served from `/`. The UI also reads `?day`, `?since`, and
   `?until` from its own URL, so a window is shareable.
 
