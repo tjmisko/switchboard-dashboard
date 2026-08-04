@@ -515,6 +515,10 @@ function computeOperatorTime(data) {
     running, occupied, free,
     runningMs, freeMs,
     occupiedMs: sum(occupied),
+    // hasAttention: did we observe the operator at all? Without a focus stream
+    // occupied is 0 for lack of evidence, not because you were never at the
+    // keyboard, and any figure that subtracts it must fall back instead.
+    hasAttention: focusSpans.length > 0,
     switches,
     switchTimes,
     lostMs: sum(intersectMs(ctxRecovery, running)),
@@ -527,11 +531,12 @@ function computeOperatorTime(data) {
 // ---------------------------------------------------------------------------
 
 function render(data) {
-  renderTopline(data.summary || {});
+  const op = computeOperatorTime(data);
+  renderTopline(data.summary || {}, op);
   renderStatusKey(data.summary || {});
   renderProviderKey(data.lanes || []);
   renderChartArea(data);
-  renderAttentionCard(data.summary || {}, computeOperatorTime(data));
+  renderAttentionCard(data.summary || {}, op);
   renderCostCard(data, lastPlan);
 }
 
@@ -619,13 +624,18 @@ function positionViewGlider() {
 //   agent hours (lead) = fanout — every hour an agent spent working on your
 //     behalf, parallelism counted. The gross figure, before any netting.
 //   additional hours = the EXTRA output-time AI bought you, where extra =
-//     fanout − the wall-clock you actually spent with ≥1 agent active (union).
-//     Netting off union is what charges you for the time delegating cost you.
-//     The subtitle frames it as an extended day — "as if a 27h day" (24h + extra).
+//     fanout − YOUR OWN time (op.occupiedMs: prompting ∪ post-switch recovery,
+//     intersected with the running window). What delegating costs you is the
+//     time it takes you, not every hour an agent happened to be up — you are
+//     free for most of the latter, which is the whole point. That subtrahend is
+//     a UNION, so a burst of context switches inside one 90s recovery window
+//     costs 90s, not 90s each. The subtitle frames the result as an extended
+//     day — "as if a 27h day" (24h + extra).
 //   force multiplier = fanout ÷ union — the average number of "you"s working
-//     during active time (≈3 agents in parallel → 3×), assuming you're equally
-//     effective with or without the AI.
-function renderTopline(summary) {
+//     during active time (≈3 agents in parallel → 3×). Deliberately still on
+//     union: it answers "how many at once while they ran", the same question
+//     the aloft chart's average answers, and the two must agree.
+function renderTopline(summary, op) {
   const fanout = summary.attention_fanout || 0; // agent-hours, parallelism counted (ns)
   const union = summary.attention_union || 0;   // wall-clock with ≥1 agent active (ns)
   const perSession = summary.attention_per_session || 0; // Σ each session's own active time
@@ -634,12 +644,21 @@ function renderTopline(summary) {
   // Clamped: a provider that reports fanout < per_session would otherwise
   // substitute a negative term into the formula box.
   const subagents = Math.max(0, fanout - perSession);
-  const extra = Math.max(0, fanout - union);
+  // your own time, in ns. Falls back to union when no focus stream was recorded
+  // — occupied is 0 there for lack of evidence, and crediting the whole fanout
+  // as free gain would be a fabrication.
+  const yours = op && op.hasAttention ? op.occupiedMs * 1e6 : union;
+  const yoursIsMeasured = !!(op && op.hasAttention);
+  const extra = Math.max(0, fanout - yours);
   const DAY = 24 * 3600 * 1e9;                   // ns in a 24h day
   const mult = union > 0 ? fanout / union : null;
   // headline figures read WITHOUT seconds (coarse) — second-level precision is noise here.
   const fanoutStr = humanDurationCoarse(fanout);
   const unionStr = humanDurationCoarse(union);
+  const yoursStr = humanDurationCoarse(yours);
+  // the key line names what was netted off, so it has to say WHICH quantity that
+  // was when the operator stream is missing and it falls back to the window.
+  const netPhrase = yoursIsMeasured ? `net of your ${yoursStr}` : `net of ${yoursStr} active`;
   const extraStr = humanDurationCoarse(extra);
   const dayStr = humanDurationCoarse(DAY + extra);
   const multStr = mult == null ? "—" : mult.toFixed(1) + "×";
@@ -653,12 +672,14 @@ function renderTopline(summary) {
   });
   const gainedTip = formulaTipHTML({
     title: "additional hours",
-    formula: "agent hours − active wall-clock",
+    formula: yoursIsMeasured ? "agent hours − your own time" : "agent hours − active wall-clock",
     // two lines: the netting itself, then the extended-day framing the key line
     // promises. .t-formula is pre-wrap, so the newline survives.
-    substitution: `${fanoutStr} − ${unionStr}\n24h + ${extraStr} = ${dayStr} day`,
+    substitution: `${fanoutStr} − ${yoursStr}\n24h + ${extraStr} = ${dayStr} day`,
     result: "+" + extraStr,
-    why: `Agent hours net of the wall-clock you spent delegating and supervising — as if your day ran ${dayStr} long.`,
+    why: yoursIsMeasured
+      ? `Agent hours net of the ${yoursStr} you actually spent prompting and recovering from context switches while agents ran — overlapping switches merge, so a burst of them costs one recovery, not one each. As if your day ran ${dayStr} long.`
+      : `Agent hours net of the wall-clock agents were running — no focus stream for this window, so your own time can't be measured. As if your day ran ${dayStr} long.`,
     color: "var(--c-working)",
   });
   const multTip = formulaTipHTML({
@@ -675,7 +696,7 @@ function renderTopline(summary) {
     </div>
     <div class="th-block has-tip" data-tip="${escapeHTML(gainedTip)}">
       <div class="th-val green">+${extraStr}</div>
-      <div class="th-key">additional hours ~ ${dayStr} day</div>
+      <div class="th-key">additional hours · ${netPhrase}</div>
     </div>
     <div class="th-block has-tip" data-tip="${escapeHTML(multTip)}">
       <div class="th-val">${multStr}</div>
@@ -2065,17 +2086,18 @@ function renderAttentionCard(summary, op) {
   });
   const lostTip = tip({
     title: "operator time lost to AI",
-    formula: "Σ 90s recovery per switch (clustered merged) ∩ running",
-    // the raw 90s × switches is what the merge and the ∩ then cut down — showing
-    // it is what makes the smaller result legible rather than arbitrary. When
-    // nothing was cut, the arrow would just restate the raw figure, so drop it.
+    formula: "⋃ 90s recovery per switch, merged, ∩ running",
+    // 90s × switches is the naive charge; the union and the ∩ are what cut it
+    // down. Both numbers are shown because the gap between them IS the point —
+    // a burst of switches inside one recovery window costs one recovery.
     substitution: !op ? null : (() => {
-      const raw = op.switches * 90000;
-      const rawStr = `90s × ${op.switches} = ${humanDurationMs(raw)}`;
-      return op.lostMs < raw ? `${rawStr} → ${humanDurationMs(op.lostMs)} after overlap` : rawStr;
+      const raw = op.switches * OP_SWITCH_RECOVERY_MS;
+      const merged = humanDurationMs(op.lostMs);
+      const naive = `90s × ${op.switches} = ${humanDurationMs(raw)}`;
+      return op.lostMs < raw ? `${naive}\n− overlap → ${merged}` : naive;
     })(),
     result: op ? humanDurationMs(op.lostMs) : "—",
-    why: "Time absorbed re-acquiring context after switches while agents ran.",
+    why: "Time absorbed re-acquiring context after switches while agents ran. Switch bursts merge into one recovery window rather than costing 90s apiece.",
     color: "var(--c-permission)",
   });
 
