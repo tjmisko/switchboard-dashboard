@@ -571,7 +571,37 @@
     return null;
   }
 
+  // scaleGeometry resolves the footer's px/hour setting against the window on
+  // screen. The plot never draws narrower than its container — a short window
+  // would otherwise shrink into a corner and leave dead space — so the density
+  // actually drawn is the setting FLOORED at "the window exactly fills the
+  // width" (fit). The two are not the same number, and the gap is the whole
+  // reason this is a shared function: a 100-minute window in a 1100px plot fits
+  // at ~670 px/h, so every setting below that draws identically. Reporting or
+  // stepping the raw setting there moves a label while the chart holds still.
+  // Callers read `effective` for the readout, step off `effective`, and bound
+  // the buttons with canZoomIn/canZoomOut.
+  function scaleGeometry(spanMs, fitPlotW, pxPerHour, min, max) {
+    const hours = spanMs > 0 ? spanMs / 3600e3 : 0;
+    // a zero-length window has no density to speak of: no floor, draw to fit
+    const fit = hours > 0 ? fitPlotW / hours : 0;
+    const effective = Math.max(pxPerHour, fit);
+    return {
+      plotW: Math.max(fitPlotW, hours * pxPerHour),
+      fit,
+      effective,
+      // a step that lands under the floor redraws the same pixels, so the
+      // button that can only do that is spent — floor and ceiling both bound.
+      canZoomOut: effective > Math.max(min, fit) + 0.5,
+      canZoomIn: effective < max - 0.5,
+      // at the floor the chart is showing the whole window with nothing to
+      // scroll; the readout is fit's number, not the setting's.
+      atFit: fit > 0 && pxPerHour <= fit,
+    };
+  }
+
   return {
+    scaleGeometry,
     laneIdentity, rawSessionId, leadLabel, nameSegments, buildBar, buildBars,
     spanInefficiency, switchArrivals, packLanes, aloftSpans, workIntervalsMs, concurrencyProfile,
     alignLiveTail,
