@@ -601,6 +601,9 @@ function renderChartArea(data) {
   if (currentView === "line") renderConcurrencyChart(data);
   else if (currentView === "projects") renderProjectsChart(data);
   else renderTimeline(data);
+  // the fit floor moves with the window, the view and the container, so the
+  // scale readout is only true once the render that measured it has run.
+  updateZoomReadout();
 }
 
 // The projects view's grow-in is a CSS animation gated on .enter being present
@@ -854,6 +857,23 @@ let pxPerHour = (function () {
   return clampZoom(isFinite(v) && v > 0 ? v : GEO.PX_PER_HOUR);
 })();
 
+// scale: what the control REPORTS and steps from, which is not the stored
+// setting. scaleGeometry floors the setting at the density that fills the plot
+// width, so on a window short enough to fit, a range of settings all draw the
+// same chart. The last time-based render leaves its resolved geometry here for
+// the readout and the buttons; null means no time axis is on screen (empty
+// window, or the projects view), leaving the setting to speak for itself.
+let scaleGeo = null;
+const scaleNow = () => scaleGeo || scaleGeometry(0, 0, pxPerHour, ZOOM_MIN, ZOOM_MAX);
+
+// plotWidthFor resolves the setting against the window and remembers the result
+// for the readout. Both time views call it; they measure slightly different plot
+// areas, so the floor is whichever one is currently drawn.
+function plotWidthFor(span, fitPlotW) {
+  scaleGeo = scaleGeometry(span, fitPlotW, pxPerHour, ZOOM_MIN, ZOOM_MAX);
+  return scaleGeo.plotW;
+}
+
 // setZoom changes the horizontal density and repaints, holding the time point at
 // the viewport center steady so zooming feels anchored instead of snapping to 0.
 function setZoom(next) {
@@ -864,19 +884,29 @@ function setZoom(next) {
   const centerFrac = sw > cw ? (wrap.scrollLeft + cw / 2) / sw : 0.5;
   pxPerHour = next;
   try { localStorage.setItem(ZOOM_KEY, String(next)); } catch (e) {}
-  updateZoomReadout();
   if (lastData) {
-    renderChartArea(lastData);
+    renderChartArea(lastData); // resolves the new geometry — read the readout after
     const nsw = wrap.scrollWidth;
     if (nsw > wrap.clientWidth) wrap.scrollLeft = centerFrac * nsw - wrap.clientWidth / 2;
   }
+  updateZoomReadout();
 }
 
-// updateZoomReadout syncs the numeric label and greys out a button at its bound.
+// updateZoomReadout syncs the numeric label and greys out a button that would
+// not move the chart. Both speak in the EFFECTIVE density: the label reports
+// what the plot is actually drawn at, and a window already filling the width
+// greys out zoom-out rather than taking clicks that only change a number. The
+// grey is otherwise unexplained, so the button says why on hover.
 function updateZoomReadout() {
-  if (el.zoomVal) el.zoomVal.textContent = String(Math.round(pxPerHour));
-  if (el.zoomOut) el.zoomOut.disabled = pxPerHour <= ZOOM_MIN + 0.5;
-  if (el.zoomIn) el.zoomIn.disabled = pxPerHour >= ZOOM_MAX - 0.5;
+  const geo = scaleNow();
+  if (el.zoomVal) el.zoomVal.textContent = String(Math.round(geo.effective));
+  if (el.zoomIn) el.zoomIn.disabled = !geo.canZoomIn;
+  if (el.zoomOut) {
+    el.zoomOut.disabled = !geo.canZoomOut;
+    el.zoomOut.title = geo.atFit && !geo.canZoomOut
+      ? "already fits the width — nothing left to compress"
+      : "zoom out — compress time";
+  }
 }
 
 // Project groups fold to a one-line summary when they get too small to read; the
@@ -937,6 +967,7 @@ function renderTimeline(data) {
     el.empty.hidden = false;
     el.svg.setAttribute("height", 0);
     el.svg.style.height = "0px";
+    scaleGeo = null; // nothing drawn to fit: the setting stands on its own
     return;
   }
   el.empty.hidden = true;
@@ -949,8 +980,7 @@ function renderTimeline(data) {
   // overflow-x:auto), instead of squishing a whole day into the visible width.
   const containerW = Math.max(620, el.wrap.clientWidth);
   const fitPlotW = Math.max(160, containerW - GEO.GUTTER - GEO.RIGHT);
-  const minPlotW = (span / 3600e3) * pxPerHour;
-  const plotW = Math.max(fitPlotW, minPlotW);
+  const plotW = plotWidthFor(span, fitPlotW);
   const W = GEO.GUTTER + plotW + GEO.RIGHT;
   // unclamped ms→px width, for the collapse decision (needs pixel widths before x()).
   const msToPx = (ms) => (ms / span) * plotW;
@@ -1541,8 +1571,7 @@ function renderConcurrencyChart(data) {
   const rightPad = isLiveWindow() ? CGEO.RIGHT_LIVE : CGEO.RIGHT;
   const containerW = Math.max(620, el.wrap.clientWidth);
   const fitPlotW = Math.max(160, containerW - CGEO.LEFT - rightPad);
-  const minPlotW = (span / 3600e3) * pxPerHour;
-  const plotW = Math.max(fitPlotW, minPlotW);
+  const plotW = plotWidthFor(span, fitPlotW);
   const W = CGEO.LEFT + plotW + rightPad;
   const H = CGEO.HEIGHT;
   const plotTop = CGEO.TOP, plotBottom = H - CGEO.BOTTOM, plotH = plotBottom - plotTop;
@@ -1807,6 +1836,7 @@ function sameProjectRows(keys) {
 function renderProjectsChart(data) {
   const rows = projectHoursMs(renderableLanes(data.lanes));
   el.empty.hidden = true; // this view draws its own empty state
+  scaleGeo = null; // no time axis here, so no fit floor to carry out of the view
 
   if (!rows.length) {
     lastProjectKeys = null;
@@ -2519,9 +2549,12 @@ function init() {
   positionViewGlider();
   requestAnimationFrame(() => el.viewseg.classList.add("glider-ready"));
 
-  // horizontal-scale zoom: step the px/hour density, reset to the built-in default
-  el.zoomIn.addEventListener("click", () => setZoom(pxPerHour * ZOOM_FACTOR));
-  el.zoomOut.addEventListener("click", () => setZoom(pxPerHour / ZOOM_FACTOR));
+  // horizontal-scale zoom: step the px/hour density, reset to the built-in
+  // default. Steps run off the EFFECTIVE density so the first click always
+  // moves the chart — stepping the stored value would spend several clicks
+  // climbing back to a floor the plot is already drawn at.
+  el.zoomIn.addEventListener("click", () => setZoom(scaleNow().effective * ZOOM_FACTOR));
+  el.zoomOut.addEventListener("click", () => setZoom(scaleNow().effective / ZOOM_FACTOR));
   el.zoomReset.addEventListener("click", () => setZoom(GEO.PX_PER_HOUR));
   updateZoomReadout();
 

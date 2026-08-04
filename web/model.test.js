@@ -11,7 +11,7 @@ const {
   laneIdentity, rawSessionId, leadLabel, nameSegments, buildBars, spanInefficiency, switchArrivals, packLanes,
   aloftSpans, workIntervalsMs, concurrencyProfile, alignLiveTail,
   projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs,
-  suspectTailMs, normalizeView,
+  suspectTailMs, normalizeView, scaleGeometry,
   summaryTasks, summaryBodyHTML, summaryHintText, summaryCardHasContent,
 } = require("./model.js");
 
@@ -1012,4 +1012,96 @@ test("normalizeView should return null when the view is unknown or missing", () 
   assert.equal(normalizeView(undefined), null);
   assert.equal(normalizeView(""), null);
   assert.equal(normalizeView("foo"), null);
+});
+
+// ---------------------------------------------------------------------------
+// scaleGeometry — the footer's px/hour setting resolved against the window
+// ---------------------------------------------------------------------------
+
+const ZMIN = 60, ZMAX = 1200, ZSTEP = 1.25;
+const HOUR = 3600e3;
+// the shape the bug lived in: a 100-minute window in an 1110px plot fills the
+// width at 666 px/h, well above the 240 default.
+const SHORT = 100 * 60e3, PLOT = 1110;
+const geo = (span, fitPlotW, px) => scaleGeometry(span, fitPlotW, px, ZMIN, ZMAX);
+
+test("scaleGeometry should draw a long window at the requested density", () => {
+  // 8h at 240 px/h wants 1920px — wider than the plot, so the setting governs
+  // and the chart scrolls.
+  const g = geo(8 * HOUR, PLOT, 240);
+  assert.equal(g.plotW, 1920);
+  assert.equal(Math.round(g.effective), 240);
+  assert.equal(g.atFit, false);
+  assert.equal(g.canZoomOut, true);
+});
+
+test("scaleGeometry should report the fit density, not the setting, when the window already fits", () => {
+  // The regression: the setting said 240, the chart was drawn at 666, and the
+  // readout showed 240 — so four zoom-in clicks moved the label and nothing else.
+  const g = geo(SHORT, PLOT, 240);
+  assert.equal(g.plotW, PLOT, "a fitting window draws to the plot width");
+  assert.equal(Math.round(g.fit), 666);
+  assert.equal(Math.round(g.effective), 666, "the readout must show what is drawn");
+  assert.equal(g.atFit, true);
+});
+
+test("scaleGeometry should draw every setting under the fit density identically", () => {
+  // The dead zone itself: the whole zoom-out half of the range is one chart.
+  const widths = [60, 120, 192, 240, 400, 600].map((px) => geo(SHORT, PLOT, px).plotW);
+  assert.deepEqual(widths, new Array(6).fill(PLOT));
+});
+
+test("scaleGeometry should refuse to zoom out when the window already fits the width", () => {
+  // Nothing is left to compress: a step down redraws the same pixels, so the
+  // button is spent and must grey out instead of taking dead clicks.
+  assert.equal(geo(SHORT, PLOT, 240).canZoomOut, false);
+  assert.equal(geo(SHORT, PLOT, ZMIN).canZoomOut, false);
+});
+
+test("scaleGeometry should let one zoom-in step off the fit density widen the plot", () => {
+  // Stepping the stored 240 would give 300 — still under the 666 floor, so the
+  // chart would hold still. Stepping the effective density always moves it.
+  const before = geo(SHORT, PLOT, 240);
+  const after = geo(SHORT, PLOT, before.effective * ZSTEP);
+  assert.ok(after.plotW > before.plotW, "the first click must widen the plot");
+  assert.equal(Math.round(after.effective), Math.round(before.effective * ZSTEP));
+});
+
+test("scaleGeometry should hand a zoom-out step back to the floor and stop", () => {
+  // Down from one step above fit: lands at the floor, and there it's spent.
+  const raised = geo(SHORT, PLOT, geo(SHORT, PLOT, 240).effective * ZSTEP);
+  const dropped = geo(SHORT, PLOT, raised.effective / ZSTEP);
+  assert.equal(dropped.plotW, PLOT);
+  assert.equal(dropped.canZoomOut, false);
+});
+
+test("scaleGeometry should stay zoomable-out above the floor even below the default", () => {
+  // A day-long window at 154 px/h is still wider than the plot: the floor is
+  // about the window, not about the default, and must not grey the button early.
+  const g = geo(24 * HOUR, PLOT, 154);
+  assert.equal(g.canZoomOut, true);
+  assert.equal(g.atFit, false);
+});
+
+test("scaleGeometry should bound zoom-in at the maximum density", () => {
+  assert.equal(geo(8 * HOUR, PLOT, ZMAX).canZoomIn, false);
+  assert.equal(geo(8 * HOUR, PLOT, ZMAX / ZSTEP).canZoomIn, true);
+});
+
+test("scaleGeometry should freeze both directions when fit alone exceeds the maximum", () => {
+  // A 10-minute window fills 1110px at 6660 px/h — past ZMAX and already
+  // floored, so neither button can move it and both must say so.
+  const g = geo(10 * 60e3, PLOT, 240);
+  assert.equal(Math.round(g.fit), 6660);
+  assert.equal(g.canZoomIn, false);
+  assert.equal(g.canZoomOut, false);
+});
+
+test("scaleGeometry should fall back to the plot width for an empty window", () => {
+  // A zero-length span has no density: no floor, no divide-by-zero, draw to fit.
+  const g = geo(0, PLOT, 240);
+  assert.equal(g.plotW, PLOT);
+  assert.equal(g.fit, 0);
+  assert.equal(g.effective, 240, "with no window, the setting speaks for itself");
+  assert.equal(g.atFit, false);
 });
