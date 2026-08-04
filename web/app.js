@@ -709,8 +709,9 @@ function renderTopline(summary, op) {
   const unionStr = humanDurationCoarse(union);
   const yoursStr = humanDurationCoarse(yours);
   // the key line names what was netted off, so it has to say WHICH quantity that
-  // was when the operator stream is missing and it falls back to the window.
-  const netPhrase = yoursIsMeasured ? `after your ${yoursStr}` : `after ${yoursStr} active`;
+  // was when the operator stream is missing and it falls back to the window —
+  // agents running is not the same claim as you babysitting them.
+  const netPhrase = yoursIsMeasured ? `${yoursStr} babysitting` : `${yoursStr} active`;
   const extraStr = humanDurationCoarse(extra);
   const dayStr = humanDurationCoarse(DAY + extra);
   const multStr = mult == null ? "—" : mult.toFixed(1) + "×";
@@ -748,7 +749,7 @@ function renderTopline(summary, op) {
     </div>
     <div class="th-block has-tip" data-tip="${escapeHTML(gainedTip)}">
       <div class="th-val green">+${extraStr}</div>
-      <div class="th-key">net agent hours · ${netPhrase}</div>
+      <div class="th-key">agent hours net ${netPhrase}</div>
     </div>
     <div class="th-block has-tip" data-tip="${escapeHTML(multTip)}">
       <div class="th-val">${multStr}</div>
