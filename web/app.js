@@ -629,7 +629,7 @@ function positionViewGlider() {
 // renderTopline: three dominant figures framing AI's payoff, gross → net → rate.
 //   agent hours (lead) = fanout — every hour an agent spent working on your
 //     behalf, parallelism counted. The gross figure, before any netting.
-//   additional hours = the EXTRA output-time AI bought you, where extra =
+//   net agent hours = the EXTRA output-time AI bought you, where extra =
 //     fanout − YOUR OWN time (op.occupiedMs: prompting ∪ post-switch recovery,
 //     intersected with the running window). What delegating costs you is the
 //     time it takes you, not every hour an agent happened to be up — you are
@@ -664,12 +664,12 @@ function renderTopline(summary, op) {
   const yoursStr = humanDurationCoarse(yours);
   // the key line names what was netted off, so it has to say WHICH quantity that
   // was when the operator stream is missing and it falls back to the window.
-  const netPhrase = yoursIsMeasured ? `net of your ${yoursStr}` : `net of ${yoursStr} active`;
+  const netPhrase = yoursIsMeasured ? `after your ${yoursStr}` : `after ${yoursStr} active`;
   const extraStr = humanDurationCoarse(extra);
   const dayStr = humanDurationCoarse(DAY + extra);
   const multStr = mult == null ? "—" : mult.toFixed(1) + "×";
   const hoursTip = formulaTipHTML({
-    title: "agent hours",
+    title: "agent hours worked",
     formula: "Σ session active time + Σ subagent spans",
     substitution: `${humanDurationCoarse(perSession)} + ${humanDurationCoarse(subagents)}`,
     result: fanoutStr,
@@ -677,7 +677,7 @@ function renderTopline(summary, op) {
     color: "var(--c-working)",
   });
   const gainedTip = formulaTipHTML({
-    title: "additional hours",
+    title: "net agent hours",
     formula: yoursIsMeasured ? "agent hours − your own time" : "agent hours − active wall-clock",
     // two lines: the netting itself, then the extended-day framing the key line
     // promises. .t-formula is pre-wrap, so the newline survives.
@@ -698,11 +698,11 @@ function renderTopline(summary, op) {
   el.topline.innerHTML = `
     <div class="th-block has-tip" data-tip="${escapeHTML(hoursTip)}">
       <div class="th-val green">${fanoutStr}</div>
-      <div class="th-key">agent hours worked for you</div>
+      <div class="th-key">agent hours worked</div>
     </div>
     <div class="th-block has-tip" data-tip="${escapeHTML(gainedTip)}">
       <div class="th-val green">+${extraStr}</div>
-      <div class="th-key">additional hours · ${netPhrase}</div>
+      <div class="th-key">net agent hours · ${netPhrase}</div>
     </div>
     <div class="th-block has-tip" data-tip="${escapeHTML(multTip)}">
       <div class="th-val">${multStr}</div>
