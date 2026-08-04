@@ -104,6 +104,83 @@ func TestCompile_shouldEndOpenSubagentAtNow(t *testing.T) {
 	}
 }
 
+// The dashboard polls every 3s and repaints only when the payload changes, so a
+// compile of an unchanged history has to reproduce itself byte for byte inside
+// one quantum — RFC3339 seconds alone still moved under a 3s poll.
+func TestCompile_shouldCompileIdenticalBytesInsideOneQuantum(t *testing.T) {
+	events := []Event{
+		{Type: EventSessionStart, TS: "a", SessionID: "x", StartedAt: "2026-07-22T10:00:00Z"},
+		{Type: EventSubagentSpawn, TS: "2026-07-22T10:05:00Z", SessionID: "x", ToolUseID: "s1", AgentType: "Explore"},
+	}
+	compileAt := func(ts string) string {
+		t.Helper()
+		out, err := Compile(events, CompileOptions{Now: mustTime(t, ts)}).Marshal()
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return string(out)
+	}
+	// Both instants sit in the [10:20:00, 10:20:30) bucket.
+	first := compileAt("2026-07-22T10:20:01Z")
+	second := compileAt("2026-07-22T10:20:04Z") // one dashboard poll later
+	if first != second {
+		t.Fatalf("two compiles inside one quantum differ:\n%s\n%s", first, second)
+	}
+	// But the bound must still advance — quantized, not frozen.
+	later := compileAt("2026-07-22T10:20:31Z")
+	if later == second {
+		t.Fatalf("the payload did not move across a quantum boundary:\n%s", later)
+	}
+}
+
+// Truncating "now" can put the bound behind a session that started inside the
+// current bucket. Ending it before it began is a negative-width lane: SpanNanos
+// rejects the span, so the session would silently stop being credited at all.
+func TestCompile_shouldNotEndASessionBeforeItStarted(t *testing.T) {
+	events := []Event{
+		{Type: EventSessionStart, TS: "a", SessionID: "x", StartedAt: "2026-07-22T10:20:07Z"},
+	}
+	// Truncates to 10:20:00 — behind the session's own start.
+	tl := Compile(events, CompileOptions{Now: mustTime(t, "2026-07-22T10:20:29Z")})
+	if got := tl.Lanes[0].End; got != "2026-07-22T10:20:07Z" {
+		t.Fatalf("lane end = %q, want its own start 2026-07-22T10:20:07Z", got)
+	}
+	if tl.Lanes[0].End < tl.Lanes[0].Start {
+		t.Fatalf("lane closed before it opened: %q → %q", tl.Lanes[0].Start, tl.Lanes[0].End)
+	}
+}
+
+func TestCompile_shouldNotEndASubagentBeforeItSpawned(t *testing.T) {
+	events := []Event{
+		{Type: EventSessionStart, TS: "a", SessionID: "x", StartedAt: "2026-07-22T10:00:00Z"},
+		{Type: EventSubagentSpawn, TS: "2026-07-22T10:20:07Z", SessionID: "x", ToolUseID: "s1", AgentType: "Explore"},
+	}
+	tl := Compile(events, CompileOptions{Now: mustTime(t, "2026-07-22T10:20:29Z")})
+	if got := tl.Lanes[0].Subagents[0].End; got != "2026-07-22T10:20:07Z" {
+		t.Fatalf("subagent end = %q, want its own spawn 2026-07-22T10:20:07Z", got)
+	}
+}
+
+// notBefore compares parsed instants, not strings. The recorder writes
+// nanosecond precision and the bound is whole seconds, and '.' sorts before 'Z'
+// — so a string compare calls the later instant the earlier one, precisely in
+// the case the guard exists for.
+func TestNotBefore_shouldOrderMixedPrecisionTimestampsChronologically(t *testing.T) {
+	const (
+		whole = "2026-07-22T10:00:23Z"
+		frac  = "2026-07-22T10:00:23.784734236Z" // 0.78s LATER, but sorts earlier as a string
+	)
+	if got := notBefore(whole, frac); got != frac {
+		t.Errorf("notBefore(%q, %q) = %q, want the later %q", whole, frac, got, frac)
+	}
+	if got := notBefore(frac, whole); got != frac {
+		t.Errorf("a bound already past the floor must be left alone, got %q", got)
+	}
+	if got := notBefore(whole, "not-a-timestamp"); got != whole {
+		t.Errorf("an unparsable floor must leave the bound alone, got %q", got)
+	}
+}
+
 func TestCompile_shouldExcludeSessionsOutsideWindow(t *testing.T) {
 	events := []Event{
 		{Type: EventSessionStart, TS: "a", SessionID: "old", StartedAt: "2026-07-20T10:00:00Z"},

@@ -11,7 +11,8 @@ import (
 // CompileOptions windows and stamps the compiled envelope.
 type CompileOptions struct {
 	// Now is the clock used to close still-open sessions and subagents (their
-	// end is "now"). Required.
+	// end is "now"). Required. Compile truncates it onto timeline.LiveBoundQuantum
+	// before it reaches any field, so callers pass the raw wall clock.
 	Now time.Time
 	// Window is the display label for the envelope.
 	Window string
@@ -26,9 +27,14 @@ type CompileOptions struct {
 // lifetime — a running Arachne container is an agent aloft for its whole life
 // (unattended auto mode) — plus subagent sub-bars and cumulative token totals.
 // Still-open sessions/subagents are closed at opts.Now.
+//
+// That bound is truncated onto timeline.LiveBoundQuantum first, so two compiles
+// of an unchanged history inside the same bucket are byte-identical and the
+// dashboard's poll can short-circuit on the raw bytes. RFC3339 seconds alone are
+// not enough: a 1s grid still moves under a 3s poll, on nearly every poll.
 func Compile(events []Event, opts CompileOptions) *timeline.Timeline {
 	sessions := aggregate(events)
-	nowRFC := opts.Now.UTC().Format(time.RFC3339)
+	nowRFC := opts.Now.Truncate(timeline.LiveBoundQuantum).UTC().Format(time.RFC3339)
 
 	// Deterministic order: by start time, then id.
 	sort.Slice(sessions, func(i, j int) bool {
@@ -53,7 +59,7 @@ func Compile(events []Event, opts CompileOptions) *timeline.Timeline {
 		endRFC := s.endTS
 		unclosed := endRFC == ""
 		if unclosed {
-			endRFC = nowRFC // still running
+			endRFC = notBefore(nowRFC, startRFC) // still running
 		}
 		if !overlapsWindow(startRFC, endRFC, opts) {
 			continue
@@ -64,7 +70,7 @@ func Compile(events []Event, opts CompileOptions) *timeline.Timeline {
 			suEnd := su.endTS
 			unpaired := suEnd == ""
 			if unpaired {
-				suEnd = nowRFC
+				suEnd = notBefore(nowRFC, su.startTS)
 			}
 			sa := timeline.Subagent{
 				AgentType:   su.agentType,
@@ -295,6 +301,28 @@ func aggregate(events []Event) []*sess {
 // roundSec keeps the suspect reason strings readable (and identical in shape to
 // the daemon's, which the operator sees side by side in a merged view).
 func roundSec(d time.Duration) time.Duration { return d.Round(time.Second) }
+
+// notBefore returns the live bound `ts`, moved up to `floor` when it precedes
+// it. Truncating "now" onto a coarse grid can put it behind something that
+// started inside the current bucket, and a session or subagent that ends before
+// it began is a negative-width bar to everything downstream — SpanNanos rejects
+// it, so the lane would silently stop being credited at all.
+//
+// Both timestamps are parsed rather than compared as strings. The recorder
+// writes nanosecond precision ("…:23.784734236Z") while the bound is whole
+// seconds ("…:23Z"), and '.' sorts before 'Z', so a string compare would call
+// the later instant the earlier one — exactly inverted, exactly in the case this
+// guard exists for. An unparsable endpoint leaves the bound alone: no basis to
+// move it, and the surrounding code already treats what it cannot measure as
+// unclippable.
+func notBefore(ts, floor string) string {
+	t, tok := timeline.ParseNanos(ts)
+	f, fok := timeline.ParseNanos(floor)
+	if !tok || !fok || t >= f {
+		return ts
+	}
+	return floor
+}
 
 func sessStartTS(s *sess) string {
 	if s.start.StartedAt != "" {
