@@ -621,37 +621,49 @@ function positionViewGlider() {
 function renderTopline(summary) {
   const fanout = summary.attention_fanout || 0; // agent-hours, parallelism counted (ns)
   const union = summary.attention_union || 0;   // wall-clock with ≥1 agent active (ns)
+  const perSession = summary.attention_per_session || 0; // Σ each session's own active time
+  // fanout is per-session time weighted by concurrent subagents (provider
+  // contract), so the excess over per-session IS the subagent contribution.
+  // Clamped: a provider that reports fanout < per_session would otherwise
+  // substitute a negative term into the formula box.
+  const subagents = Math.max(0, fanout - perSession);
   const extra = Math.max(0, fanout - union);
   const DAY = 24 * 3600 * 1e9;                   // ns in a 24h day
   const mult = union > 0 ? fanout / union : null;
   // headline figures read WITHOUT seconds (coarse) — second-level precision is noise here.
   const fanoutStr = humanDurationCoarse(fanout);
+  const unionStr = humanDurationCoarse(union);
   const extraStr = humanDurationCoarse(extra);
   const dayStr = humanDurationCoarse(DAY + extra);
   const multStr = mult == null ? "—" : mult.toFixed(1) + "×";
   const hoursTip = formulaTipHTML({
     title: "agent hours",
-    formula: "Σ agent working time + subagent spans (fanout)",
+    formula: "Σ session active time + Σ subagent spans",
+    substitution: `${humanDurationCoarse(perSession)} + ${humanDurationCoarse(subagents)}`,
     result: fanoutStr,
     why: "Total time agents spent working on your behalf, counting parallel sessions and subagents separately. Gross — the cost of delegating is not netted off yet.",
     color: "var(--c-working)",
   });
   const gainedTip = formulaTipHTML({
     title: "additional hours",
-    formula: "agent-hours (fanout) − active wall-clock (union)",
+    formula: "agent hours − active wall-clock",
+    // two lines: the netting itself, then the extended-day framing the key line
+    // promises. .t-formula is pre-wrap, so the newline survives.
+    substitution: `${fanoutStr} − ${unionStr}\n24h + ${extraStr} = ${dayStr} day`,
     result: "+" + extraStr,
     why: `Agent hours net of the wall-clock you spent delegating and supervising — as if your day ran ${dayStr} long.`,
     color: "var(--c-working)",
   });
   const multTip = formulaTipHTML({
     title: "force multiplier",
-    formula: "fanout ÷ union",
+    formula: "agent hours ÷ active wall-clock",
+    substitution: `${fanoutStr} ÷ ${unionStr}`,
     result: multStr,
     why: "Average number of parallel sessions running during active time — how many 'you's were working at once.",
   });
   el.topline.innerHTML = `
     <div class="th-block has-tip" data-tip="${escapeHTML(hoursTip)}">
-      <div class="th-val lead green">${fanoutStr}</div>
+      <div class="th-val green">${fanoutStr}</div>
       <div class="th-key">agent hours worked for you</div>
     </div>
     <div class="th-block has-tip" data-tip="${escapeHTML(gainedTip)}">
@@ -1758,10 +1770,17 @@ function projectSegTipHTML(entry, part) {
 // Reuses the global tooltip styling (.t-status + .t-formula/.t-result/.t-why).
 // Any field may be omitted; `color` tints the title. Pass the returned string to
 // an element's data-tip attribute (escaped) and wire it with attachFormulaTips.
-function formulaTipHTML({ title, formula, result, why, color } = {}) {
+// `substitution` is the same formula with this window's numbers already plugged
+// in ("7h 37m − 1h 40m"). It rides inside the formula box, under the symbolic
+// form, so a reader can see the arithmetic instead of reconstructing it.
+function formulaTipHTML({ title, formula, substitution, result, why, color } = {}) {
   let html = "";
   if (title) html += `<div class="t-status"${color ? ` style="color:${color}"` : ""}>${escapeHTML(title)}</div>`;
-  if (formula) html += `<div class="t-formula">${escapeHTML(formula)}</div>`;
+  if (formula) {
+    html += `<div class="t-formula">${escapeHTML(formula)}`
+      + (substitution ? `<span class="t-subst">${escapeHTML(substitution)}</span>` : "")
+      + `</div>`;
+  }
   if (result != null && result !== "") html += `<div class="t-result">= <b>${escapeHTML(String(result))}</b></div>`;
   if (why) html += `<div class="t-why">${escapeHTML(why)}</div>`;
   return html;
@@ -1986,6 +2005,8 @@ function renderAttentionCard(summary, op) {
   const effTip = tip({
     title: "delegation effectiveness",
     formula: "delegated ÷ (delegated + attended + prompt)",
+    substitution: da == null && aa == null && pa == null ? null
+      : `${humanDuration(da || 0)} ÷ (${humanDuration(da || 0)} + ${humanDuration(aa || 0)} + ${humanDuration(pa || 0)})`,
     result: effPct == null ? "—" : effPct + "%",
     why: "Share of your agent engagement that ran hands-off (delegated) vs. hands-on (supervising + prompting) — higher = more leverage.",
     color: effColor,
@@ -1993,6 +2014,7 @@ function renderAttentionCard(summary, op) {
   const ctxTip = tip({
     title: "context switches",
     formula: "focus arrivals − 1",
+    substitution: op ? `${op.switches + 1} − 1` : null,
     result: op ? String(op.switches) : "—",
     why: "How many times you moved your attention between sessions.",
     color: "var(--c-permission)",
@@ -2000,6 +2022,14 @@ function renderAttentionCard(summary, op) {
   const lostTip = tip({
     title: "operator time lost to AI",
     formula: "Σ 90s recovery per switch (clustered merged) ∩ running",
+    // the raw 90s × switches is what the merge and the ∩ then cut down — showing
+    // it is what makes the smaller result legible rather than arbitrary. When
+    // nothing was cut, the arrow would just restate the raw figure, so drop it.
+    substitution: !op ? null : (() => {
+      const raw = op.switches * 90000;
+      const rawStr = `90s × ${op.switches} = ${humanDurationMs(raw)}`;
+      return op.lostMs < raw ? `${rawStr} → ${humanDurationMs(op.lostMs)} after overlap` : rawStr;
+    })(),
     result: op ? humanDurationMs(op.lostMs) : "—",
     why: "Time absorbed re-acquiring context after switches while agents ran.",
     color: "var(--c-permission)",
@@ -2082,7 +2112,8 @@ function renderAttentionCard(summary, op) {
       })}
       ${row("agent-hours · parallel work", `${humanDuration(perSession)}${parallel ? ` <span class="dim">${parallel.toFixed(1)}×</span>` : ""}`, {
         title: "agent-hours",
-        formula: "Σ per-session active time",
+        formula: "Σ per-session active time · ×N = agent-hours ÷ active",
+        substitution: parallel ? `${humanDuration(perSession)} ÷ ${humanDuration(union)} = ${parallel.toFixed(1)}×` : null,
         result: humanDuration(perSession),
         why: "Total active agent-time counting parallel sessions separately; ×N is average parallelism (agent-hours ÷ active).",
       }, "deemph")}
