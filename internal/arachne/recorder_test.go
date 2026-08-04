@@ -10,27 +10,39 @@ import (
 )
 
 type fakeDocker struct {
-	names      [][]string // result per successive ListRunningNames call
+	running    [][]Running // result per successive ListRunning call
 	call       int
 	inspect    map[string]Container
+	inspectSeq map[string][]Container // successive Inspect results per name
 	inspectErr error
 }
 
-func (f *fakeDocker) ListRunningNames(ctx context.Context) ([]string, error) {
+func (f *fakeDocker) ListRunning(ctx context.Context) ([]Running, error) {
 	i := f.call
 	f.call++
-	if i < len(f.names) {
-		return f.names[i], nil
+	if i < len(f.running) {
+		return f.running[i], nil
 	}
-	if len(f.names) > 0 {
-		return f.names[len(f.names)-1], nil
+	if len(f.running) > 0 {
+		return f.running[len(f.running)-1], nil
 	}
 	return nil, nil
 }
 
+// up is one running container for the fake's ListRunning script.
+func up(name, id string) Running { return Running{Name: name, ID: id} }
+
 func (f *fakeDocker) Inspect(ctx context.Context, name string) (Container, error) {
 	if f.inspectErr != nil {
 		return Container{}, f.inspectErr
+	}
+	// A name outlives the container wearing it, so inspecting the same name
+	// twice may legitimately describe two different containers.
+	if seq := f.inspectSeq[name]; len(seq) > 0 {
+		if len(seq) > 1 {
+			f.inspectSeq[name] = seq[1:]
+		}
+		return seq[0], nil
 	}
 	c, ok := f.inspect[name]
 	if !ok {
@@ -47,7 +59,7 @@ func TestRecorder_shouldRecordLifecycleSubagentsAndExit(t *testing.T) {
 	logPath := filepath.Join(ws, ".arachne-agent.log")
 
 	fd := &fakeDocker{
-		names: [][]string{{"arachne-agent-feat-f71"}, {"arachne-agent-feat-f71"}, {}},
+		running: [][]Running{{up("arachne-agent-feat-f71", "c1")}, {up("arachne-agent-feat-f71", "c1")}, {}},
 		inspect: map[string]Container{
 			"arachne-agent-feat-f71": {
 				Name: "arachne-agent-feat-f71", Slug: "feat-f71",
@@ -147,7 +159,7 @@ func TestRecorder_reconcile_shouldInferEndForSessionGoneWhileDown(t *testing.T) 
 		t.Fatalf("write state: %v", err)
 	}
 
-	fd := &fakeDocker{names: [][]string{{}}} // nothing running now
+	fd := &fakeDocker{running: [][]Running{{}}} // nothing running now
 	cur := time.Date(2026, 7, 22, 4, 0, 0, 0, time.UTC)
 	r := NewRecorder(Config{Docker: fd, HistoryPath: historyPath, StatePath: statePath, Now: func() time.Time { return cur }})
 	w2, err := OpenWriter(historyPath)
@@ -170,5 +182,176 @@ func TestRecorder_reconcile_shouldInferEndForSessionGoneWhileDown(t *testing.T) 
 	}
 	if last.End != "2026-07-22T03:05:00Z" {
 		t.Fatalf("inferred end should be last-seen 03:05:00 from state, got %q", last.End)
+	}
+}
+
+// The pump restarts arachne-agent-<slug> for the next phase task, so the name
+// outlives the container. Watching names alone, this tick sees "still running":
+// the two runs fuse into one endless session, and the new container's freshly
+// truncated log gets read at the dead one's offset. The container id is the only
+// thing that says otherwise.
+func TestRecorder_shouldRecordARestartUnderTheSameNameAsTwoSessions(t *testing.T) {
+	dir := t.TempDir()
+	ws := t.TempDir()
+	historyPath := filepath.Join(dir, "history.jsonl")
+	statePath := filepath.Join(dir, "state.json")
+
+	fd := &fakeDocker{
+		running: [][]Running{
+			{up("arachne-agent-feat-f79", "c1")},
+			{up("arachne-agent-feat-f79", "c2")}, // same name, new container
+			{},
+		},
+		inspectSeq: map[string][]Container{
+			"arachne-agent-feat-f79": {
+				{Name: "arachne-agent-feat-f79", Slug: "feat-f79", StartedAt: "2026-08-04T16:21:31Z", TaskID: "F79.2", Agent: "opus", Workspace: ws, RepoRoot: "/home/x/Arachne"},
+				{Name: "arachne-agent-feat-f79", Slug: "feat-f79", StartedAt: "2026-08-04T18:00:43Z", TaskID: "F79.6", Agent: "opus", Workspace: ws, RepoRoot: "/home/x/Arachne"},
+			},
+		},
+	}
+	cur := mustTime(t, "2026-08-04T18:00:00Z")
+	r := NewRecorder(Config{Docker: fd, HistoryPath: historyPath, StatePath: statePath, Now: func() time.Time { return cur }})
+	w, err := OpenWriter(historyPath)
+	if err != nil {
+		t.Fatalf("open writer: %v", err)
+	}
+	r.writer = w
+
+	ctx := context.Background()
+	for _, tick := range []string{"first run", "restart", "gone"} {
+		if err := r.tick(ctx); err != nil {
+			t.Fatalf("tick (%s): %v", tick, err)
+		}
+		cur = cur.Add(5 * time.Second)
+	}
+	r.writer.Close()
+
+	events, err := LoadEvents(historyPath)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	var types []string
+	for _, e := range events {
+		types = append(types, e.Type)
+	}
+	want := []string{EventSessionStart, EventSessionEnd, EventSessionStart, EventSessionEnd}
+	if fmt.Sprint(types) != fmt.Sprint(want) {
+		t.Fatalf("event sequence = %v, want %v", types, want)
+	}
+	// The old run closes at the last tick that saw it alive, never at the new
+	// one's start: the seconds between belong to neither container.
+	if events[1].End != "2026-08-04T18:00:00Z" || events[1].Reason != ReasonExited {
+		t.Errorf("first run should close at its last-seen 18:00:00Z, got %+v", events[1])
+	}
+	if events[2].StartedAt != "2026-08-04T18:00:43Z" || events[2].TaskID != "F79.6" {
+		t.Errorf("second run should carry the NEW container's metadata, got %+v", events[2])
+	}
+
+	// And the compiler draws what the recorder wrote: two runs, not one.
+	tl := Compile(events, CompileOptions{Now: mustTime(t, "2026-08-04T18:30:00Z")})
+	if len(tl.Lanes) != 2 {
+		t.Fatalf("compiled lanes = %d, want 2: %+v", len(tl.Lanes), tl.Lanes)
+	}
+	if tl.Lanes[0].SessionID != "feat-f79" || tl.Lanes[1].SessionID != "feat-f79#2" {
+		t.Errorf("compiled ids = %q, %q; want the slug then #2", tl.Lanes[0].SessionID, tl.Lanes[1].SessionID)
+	}
+}
+
+// The same restart, across a recorder outage. History has the old run open,
+// docker has a container of that name running, and only the id in the state
+// snapshot says they are not the same container.
+func TestRecorder_reconcile_shouldCloseASessionWhoseContainerRestartedWhileDown(t *testing.T) {
+	dir := t.TempDir()
+	historyPath := filepath.Join(dir, "history.jsonl")
+	statePath := filepath.Join(dir, "state.json")
+
+	w, err := OpenWriter(historyPath)
+	if err != nil {
+		t.Fatalf("open writer: %v", err)
+	}
+	_ = w.Append(Event{Type: EventSessionStart, TS: "2026-08-04T16:21:32Z", SessionID: "feat-f79", StartedAt: "2026-08-04T16:21:31Z", Workspace: "/ws"})
+	w.Close()
+
+	stateJSON := `{"updated":"2026-08-04T17:59:00Z","sessions":{"feat-f79":{"last_seen":"2026-08-04T17:59:00Z","container_id":"c1","log_offset":42,"usage":{}}}}`
+	if err := os.WriteFile(statePath, []byte(stateJSON), 0o644); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+
+	fd := &fakeDocker{running: [][]Running{{up("arachne-agent-feat-f79", "c2")}}} // same name, new container
+	cur := mustTime(t, "2026-08-04T18:05:00Z")
+	r := NewRecorder(Config{Docker: fd, HistoryPath: historyPath, StatePath: statePath, Now: func() time.Time { return cur }})
+	w2, err := OpenWriter(historyPath)
+	if err != nil {
+		t.Fatalf("open writer 2: %v", err)
+	}
+	r.writer = w2
+	if err := r.reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	w2.Close()
+
+	events, err := LoadEvents(historyPath)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	last := events[len(events)-1]
+	if last.Type != EventSessionEnd || last.Reason != ReasonInferred || last.End != "2026-08-04T17:59:00Z" {
+		t.Fatalf("the run we had open should close at its last-seen, got %+v", last)
+	}
+	if _, resumed := r.live["feat-f79"]; resumed {
+		t.Error("the new container must be left to the first tick, not resumed onto the run we just closed")
+	}
+}
+
+// The guard against the opposite mistake: an unchanged container is the same
+// session it always was, and ending it would lose a live run for nothing.
+func TestRecorder_reconcile_shouldResumeASessionWhoseContainerIsUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	historyPath := filepath.Join(dir, "history.jsonl")
+	statePath := filepath.Join(dir, "state.json")
+
+	w, err := OpenWriter(historyPath)
+	if err != nil {
+		t.Fatalf("open writer: %v", err)
+	}
+	_ = w.Append(Event{Type: EventSessionStart, TS: "2026-08-04T16:21:32Z", SessionID: "feat-f79", StartedAt: "2026-08-04T16:21:31Z", Workspace: "/ws"})
+	w.Close()
+
+	stateJSON := `{"updated":"2026-08-04T17:59:00Z","sessions":{"feat-f79":{"last_seen":"2026-08-04T17:59:00Z","container_id":"c1","log_offset":42,"usage":{}}}}`
+	if err := os.WriteFile(statePath, []byte(stateJSON), 0o644); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+
+	fd := &fakeDocker{
+		running: [][]Running{{up("arachne-agent-feat-f79", "c1")}},
+		inspect: map[string]Container{
+			"arachne-agent-feat-f79": {Name: "arachne-agent-feat-f79", Slug: "feat-f79", StartedAt: "2026-08-04T16:21:31Z", Workspace: "/ws"},
+		},
+	}
+	cur := mustTime(t, "2026-08-04T18:05:00Z")
+	r := NewRecorder(Config{Docker: fd, HistoryPath: historyPath, StatePath: statePath, Now: func() time.Time { return cur }})
+	w2, err := OpenWriter(historyPath)
+	if err != nil {
+		t.Fatalf("open writer 2: %v", err)
+	}
+	r.writer = w2
+	if err := r.reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	w2.Close()
+
+	events, err := LoadEvents(historyPath)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("a resumed session should write no events, got %+v", events[1:])
+	}
+	ls, resumed := r.live["feat-f79"]
+	if !resumed {
+		t.Fatal("an unchanged container should be resumed, not dropped")
+	}
+	if ls.logOffset != 42 || ls.containerID != "c1" {
+		t.Errorf("resumed at offset %d id %q, want 42 and c1", ls.logOffset, ls.containerID)
 	}
 }
