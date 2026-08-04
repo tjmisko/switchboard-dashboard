@@ -27,16 +27,25 @@ const SUMMARIES_POLL_MS = 120000; // /api/summaries cadence (grows on session en
 const MEMORY_POLL_MS = 30000;
 
 // Operator lane colors: green marks "free" time (≥1 agent running while you were
-// neither typing into an agent nor recovering from a context switch — you're a
-// "free agent"); dark red marks "occupied" time. A context switch occupies you
-// for OP_SWITCH_RECOVERY_MS going forward — clustered switches merge, so thrash
-// extends the cost without double-counting. Mirrors the effective-added-time
-// accounting (the topline "effective day" figure).
+// neither attending an agent window nor recovering from a context switch —
+// you're a "free agent"); dark red marks "occupied" time. A context switch
+// occupies you for OP.switchRecoveryMs going forward — clustered switches merge,
+// so thrash extends the cost without double-counting. Occupied is also what the
+// topline's net agent hours nets off, so the two always agree.
 const OP_FREE_COLOR = "#3fb950";      // green — free time ("free agent")
-const OP_OCCUPIED_COLOR = "#8c4a4c";  // muted dusty red — occupied (typing or switching)
-const OP_SWITCH_RECOVERY_MS = 90000;  // 90s of occupied time after each switch
-const OP_SWITCH_FLICKER_MS = 500;     // a focus arrival is a real context switch only if you dwelt ≥0.5s — drops sub-second focus flicker (notifications, focus-follows-mouse), nothing more
-const OP_MIN_ENGAGE_MS = 15000;       // TYPING gate only: a focus span under 15s isn't real editing (switch detection uses OP_SWITCH_FLICKER_MS instead)
+const OP_OCCUPIED_COLOR = "#8c4a4c";  // muted dusty red — occupied (attending or switching)
+
+// OP: the operator-model tunables. These are judgement calls about how YOU work,
+// not facts about the data, so they are served by /api/settings from a file you
+// own (see settings.go and the README's Settings section) and merged over these
+// fallbacks at boot. The literals here MUST match Go's DefaultSettings(), so a
+// dashboard whose settings fetch fails behaves exactly like an unconfigured one.
+const OP = {
+  awayAfterMs: 5 * 60 * 1000, // focused but untouched this long ⇒ you're away
+  switchRecoveryMs: 90000,    // occupied time charged forward from each switch
+  switchFlickerMs: 500,       // shorter focus arrivals are flicker, not switches
+  minEngageMs: 15000,         // shorter focus spans aren't time spent working
+};
 
 // Status -> color. working solid green; delegating faded green; idle yellow;
 // permission red; suspended grey; "" (unknown) dim. Mirrors style.css vars.
@@ -354,6 +363,30 @@ async function loadTimeline() {
   }
 }
 
+// loadSettings pulls the operator-model tunables over OP's fallbacks. Fetched
+// once, before the first poll, because every operator figure on the page depends
+// on them; a failed or partial fetch leaves the built-in defaults in place, which
+// are the same numbers the server serves when unconfigured. Keys are snake_case
+// on the wire (they are the file's keys, which a human edits) and camelCase here.
+const OP_SETTING_KEYS = {
+  away_after_ms: "awayAfterMs",
+  switch_recovery_ms: "switchRecoveryMs",
+  switch_flicker_ms: "switchFlickerMs",
+  min_engage_ms: "minEngageMs",
+};
+
+async function loadSettings() {
+  try {
+    const res = await fetch("/api/settings", { cache: "no-store" });
+    if (!res.ok) return;
+    const j = await res.json();
+    for (const [wire, key] of Object.entries(OP_SETTING_KEYS)) {
+      const v = j[wire];
+      if (typeof v === "number" && isFinite(v) && v > 0) OP[key] = v;
+    }
+  } catch (_) { /* keep the built-in defaults */ }
+}
+
 async function loadPlan() {
   try {
     const res = await fetch("/api/plan", { cache: "no-store" });
@@ -432,6 +465,13 @@ function setDot(kind) {
   el.liveDot.className = "dot " + kind;
 }
 
+// isLiveWindow: is the day picker sitting on today? Only then can the timeline's
+// trailing edge be "now" — every other day is a closed window whose end really
+// is the end of the work.
+function isLiveWindow() {
+  return !el.day.value || el.day.value === todayLocal();
+}
+
 // ---------------------------------------------------------------------------
 // operator free-time (derived from focus / context switches)
 // ---------------------------------------------------------------------------
@@ -439,16 +479,22 @@ function setDot(kind) {
 // computeOperatorTime partitions the running window into the operator's
 // "occupied" vs "free" intervals:
 //   running   = union over lanes of running-status intervals (≥1 agent working)
-//   typing    = focus ∩ activity-active (you were at the keyboard on an agent)
-//   ctxRecov  = ⋃ [switch, switch + 90s] over every context switch (switch
-//               arrivals after the first) — clustered switches merge
-//   occupied  = (typing ∪ ctxRecov) ∩ running
-//   free      = running MINUS (typing ∪ ctxRecov)
+//   present   = ⋃ [activity-active start, end + OP.awayAfterMs] — you don't stop
+//               being at the machine the instant you stop typing, but an agent
+//               window focused and untouched for awayAfterMs means you walked
+//               away and left it up
+//   attending = focus ∩ present (at an agent window AND actually there)
+//   ctxRecov  = ⋃ [switch, switch + OP.switchRecoveryMs] over every context
+//               switch (switch arrivals after the first) — clustered switches
+//               merge, so a burst costs one recovery, not one apiece
+//   occupied  = (attending ∪ ctxRecov) ∩ running
+//   free      = running MINUS (attending ∪ ctxRecov)
 // "free time" is the headline: time you actually had while the agents ran and
-// you were neither typing nor recovering from a switch. Degrades when focus or
-// activity are absent (no activity → any focus counts as typing).
+// you were neither attending one nor recovering from a switch. Degrades when
+// focus or activity are absent (no activity stream → any focus counts as
+// attending, since there is no evidence you left).
 //
-// A context switch = a focus arrival with dwell ≥ OP_SWITCH_FLICKER_MS (see
+// A context switch = a focus arrival with dwell ≥ OP.switchFlickerMs (see
 // model.switchArrivals). The COUNT, the overlay, and the recovery-time
 // subtraction all draw from this ONE set, so every switch shown is charged
 // against free time. (Previously the count/overlay used EVERY arrival while
@@ -492,29 +538,36 @@ function computeOperatorTime(data) {
     for (const f of lane.focus || []) {
       const s = Date.parse(f.start), e = Date.parse(f.end);
       if (!(isFinite(s) && isFinite(e) && e > s)) continue;
-      focusSpans.push(f); // raw; switchArrivals() applies OP_SWITCH_FLICKER_MS
-      // typing gate is stricter: only ≥15s focus is real editing (≠ a switch).
-      if (e - s >= OP_MIN_ENGAGE_MS) focusPairs.push([s, e]);
+      focusSpans.push(f); // raw; switchArrivals() applies OP.switchFlickerMs
+      // attending gate is stricter: a sub-15s look-in isn't time spent working
+      // in that window (≠ a switch, which only needs the flicker floor).
+      if (e - s >= OP.minEngageMs) focusPairs.push([s, e]);
     }
   }
   const running = unionMs(runPairs);
   const engaged = unionMs(focusPairs);
 
-  // Context switches: focus arrivals you actually landed on (dwell ≥ 0.5s), the
-  // SAME set the count and overlay show. Every switch after the first occupies you
-  // OP_SWITCH_RECOVERY_MS forward; clustered switches merge via union, so thrash
+  // Context switches: focus arrivals you actually landed on (dwell ≥ the flicker
+  // floor), the SAME set the count and overlay show. Every switch after the first
+  // occupies you OP.switchRecoveryMs forward; clustered switches merge via union, so thrash
   // lengthens the interval without ever double-counting — and, crucially, every
   // switch you see is subtracted from free time (no sub-15s escape hatch).
-  const switchStarts = switchArrivals(focusSpans, OP_SWITCH_FLICKER_MS);
+  const switchStarts = switchArrivals(focusSpans, OP.switchFlickerMs);
   const recoveryStarts = switchStarts.slice(1);
-  const ctxRecovery = unionMs(recoveryStarts.map((t) => [t, t + OP_SWITCH_RECOVERY_MS]));
+  const ctxRecovery = unionMs(recoveryStarts.map((t) => [t, t + OP.switchRecoveryMs]));
 
-  // Active typing: focused on an agent while globally active (at the keyboard).
-  // Without an activity stream, treat any (≥15s) focus as typing.
-  const active = unionMs(spansToMs((data.activity || []).filter((a) => a.state === "active")));
-  const typing = active.length ? intersectMs(engaged, active) : engaged;
+  // Attending: focused on an agent window while you were actually there. The
+  // activity stream only marks keyboard/mouse activity, and reading a diff is
+  // not idleness, so each active span is extended forward by OP.awayAfterMs
+  // before the intersection — presence decays rather than blinking off. Past
+  // that, a focused-but-untouched window is you having walked away from it.
+  // Without an activity stream there is no evidence you left: any (≥15s) focus
+  // counts as attending.
+  const active = spansToMs((data.activity || []).filter((a) => a.state === "active"));
+  const present = unionMs(active.map(([s, e]) => [s, e + OP.awayAfterMs]));
+  const attending = present.length ? intersectMs(engaged, present) : engaged;
 
-  const occupiedAll = unionMs([...ctxRecovery, ...typing]);
+  const occupiedAll = unionMs([...ctxRecovery, ...attending]);
   const occupied = intersectMs(occupiedAll, running); // drawn only while agents run
   const free = subtractMs(running, occupiedAll);
 
@@ -530,6 +583,10 @@ function computeOperatorTime(data) {
     running, occupied, free,
     runningMs, freeMs,
     occupiedMs: sum(occupied),
+    // hasAttention: did we observe the operator at all? Without a focus stream
+    // occupied is 0 for lack of evidence, not because you were never at the
+    // keyboard, and any figure that subtracts it must fall back instead.
+    hasAttention: focusSpans.length > 0,
     switches,
     switchTimes,
     lostMs: sum(intersectMs(ctxRecovery, running)),
@@ -542,23 +599,33 @@ function computeOperatorTime(data) {
 // ---------------------------------------------------------------------------
 
 function render(data) {
-  renderTopline(data.summary || {});
+  const op = computeOperatorTime(data);
+  renderTopline(data.summary || {}, op);
   renderStatusKey(data.summary || {});
   renderProviderKey(data.lanes || []);
   renderChartArea(data);
-  renderAttentionCard(data.summary || {}, computeOperatorTime(data));
+  renderAttentionCard(data.summary || {}, op);
   renderCostCard(data, lastPlan);
 }
 
 // renderChartArea draws whichever chart the view switcher selects into the plot
 // area. The sessions and line views share the horizontal scale (zoom) and the
-// scroll wrap, so toggling between them keeps the time axis put; the projects view is
-// time-less (a ranking, not a timeline). Called from render() and from every
-// repaint trigger (zoom, resize, theme, view/toggle change).
+// scroll wrap, so toggling between them keeps the time axis put; the projects
+// view is time-less (a ranking, not a timeline). Called from render() and from
+// every repaint trigger (zoom, resize, theme, view/toggle change).
+//
+// The scroll position is deliberately left alone. Zoomed in far enough that the
+// plot outgrows its wrap, the trailing edge — and with it the live-tail readout
+// — sits off-screen until you scroll to it, exactly like the newest bars in the
+// sessions view. Parking the scroll at "now" instead would take the y-axis and
+// the lane labels off the other side, which is a worse trade.
 function renderChartArea(data) {
   if (currentView === "line") renderConcurrencyChart(data);
   else if (currentView === "projects") renderProjectsChart(data);
   else renderTimeline(data);
+  // the fit floor moves with the window, the view and the container, so the
+  // scale readout is only true once the render that measured it has run.
+  updateZoomReadout();
 }
 
 // The projects view's grow-in is a CSS animation gated on .enter being present
@@ -630,41 +697,84 @@ function positionViewGlider() {
   el.viewGlider.style.transform = "translateX(" + (btn.offsetLeft - el.viewseg.clientLeft) + "px)";
 }
 
-// renderTopline: two dominant figures framing AI's payoff.
-//   additional time (headline) = the EXTRA output-time AI bought you, where
-//     extra = agent-hours (fanout, parallelism counted) − the wall-clock you
-//     actually spent with ≥1 agent active (union). The subtitle frames it as an
-//     extended day — "as if a 27h day" (24h + extra).
+// renderTopline: three dominant figures framing AI's payoff, gross → net → rate.
+//   agent hours (lead) = fanout — every hour an agent spent working on your
+//     behalf, parallelism counted. The gross figure, before any netting.
+//   net agent hours = the EXTRA output-time AI bought you, where extra =
+//     fanout − YOUR OWN time (op.occupiedMs: prompting ∪ post-switch recovery,
+//     intersected with the running window). What delegating costs you is the
+//     time it takes you, not every hour an agent happened to be up — you are
+//     free for most of the latter, which is the whole point. That subtrahend is
+//     a UNION, so a burst of context switches inside one 90s recovery window
+//     costs 90s, not 90s each. The subtitle frames the result as an extended
+//     day — "as if a 27h day" (24h + extra).
 //   force multiplier = fanout ÷ union — the average number of "you"s working
-//     during active time (≈3 agents in parallel → 3×), assuming you're equally
-//     effective with or without the AI.
-function renderTopline(summary) {
+//     during active time (≈3 agents in parallel → 3×). Deliberately still on
+//     union: it answers "how many at once while they ran", the same question
+//     the aloft chart's average answers, and the two must agree.
+function renderTopline(summary, op) {
   const fanout = summary.attention_fanout || 0; // agent-hours, parallelism counted (ns)
   const union = summary.attention_union || 0;   // wall-clock with ≥1 agent active (ns)
-  const extra = Math.max(0, fanout - union);
+  const perSession = summary.attention_per_session || 0; // Σ each session's own active time
+  // fanout is per-session time weighted by concurrent subagents (provider
+  // contract), so the excess over per-session IS the subagent contribution.
+  // Clamped: a provider that reports fanout < per_session would otherwise
+  // substitute a negative term into the formula box.
+  const subagents = Math.max(0, fanout - perSession);
+  // your own time, in ns. Falls back to union when no focus stream was recorded
+  // — occupied is 0 there for lack of evidence, and crediting the whole fanout
+  // as free gain would be a fabrication.
+  const yours = op && op.hasAttention ? op.occupiedMs * 1e6 : union;
+  const yoursIsMeasured = !!(op && op.hasAttention);
+  const extra = Math.max(0, fanout - yours);
   const DAY = 24 * 3600 * 1e9;                   // ns in a 24h day
   const mult = union > 0 ? fanout / union : null;
   // headline figures read WITHOUT seconds (coarse) — second-level precision is noise here.
+  const fanoutStr = humanDurationCoarse(fanout);
+  const unionStr = humanDurationCoarse(union);
+  const yoursStr = humanDurationCoarse(yours);
+  // the key line names what was netted off, so it has to say WHICH quantity that
+  // was when the operator stream is missing and it falls back to the window —
+  // agents running is not the same claim as you babysitting them.
+  const netPhrase = yoursIsMeasured ? `${yoursStr} babysitting` : `${yoursStr} active`;
   const extraStr = humanDurationCoarse(extra);
   const dayStr = humanDurationCoarse(DAY + extra);
   const multStr = mult == null ? "—" : mult.toFixed(1) + "×";
+  const hoursTip = formulaTipHTML({
+    title: "agent hours worked",
+    formula: "Σ session active time + Σ subagent spans",
+    substitution: `${humanDurationCoarse(perSession)} + ${humanDurationCoarse(subagents)}`,
+    result: fanoutStr,
+    why: "Total time agents spent working on your behalf, counting parallel sessions and subagents separately. Gross — the cost of delegating is not netted off yet.",
+    color: "var(--c-working)",
+  });
   const gainedTip = formulaTipHTML({
-    title: "effective time gained",
-    formula: "agent-hours (fanout) − active wall-clock (union)",
+    title: "net agent hours",
+    formula: yoursIsMeasured ? "agent hours − your own time" : "agent hours − active wall-clock",
+    // two lines: the netting itself, then the extended-day framing the key line
+    // promises. .t-formula is pre-wrap, so the newline survives.
+    substitution: `${fanoutStr} − ${yoursStr}\n24h + ${extraStr} = ${dayStr} day`,
     result: "+" + extraStr,
-    why: `Extra output-time the agents bought you beyond the wall-clock you actually spent — as if your day ran ${dayStr} long.`,
+    why: yoursIsMeasured
+      ? `Agent hours net of the ${yoursStr} you actually spent prompting and recovering from context switches while agents ran — overlapping switches merge, so a burst of them costs one recovery, not one each. As if your day ran ${dayStr} long.`
+      : `Agent hours net of the wall-clock agents were running — no focus stream for this window, so your own time can't be measured. As if your day ran ${dayStr} long.`,
     color: "var(--c-working)",
   });
   const multTip = formulaTipHTML({
     title: "force multiplier",
-    formula: "fanout ÷ union",
+    formula: "agent hours ÷ active wall-clock",
+    substitution: `${fanoutStr} ÷ ${unionStr}`,
     result: multStr,
     why: "Average number of parallel sessions running during active time — how many 'you's were working at once.",
   });
   el.topline.innerHTML = `
+    <div class="th-block has-tip" data-tip="${escapeHTML(hoursTip)}">
+      <div class="th-val green">${fanoutStr}</div>
+      <div class="th-key">agent hours worked</div>
+    </div>
     <div class="th-block has-tip" data-tip="${escapeHTML(gainedTip)}">
       <div class="th-val green">+${extraStr}</div>
-      <div class="th-key">effective time gained ~ ${dayStr} day</div>
+      <div class="th-key">agent hours net ${netPhrase}</div>
     </div>
     <div class="th-block has-tip" data-tip="${escapeHTML(multTip)}">
       <div class="th-val">${multStr}</div>
@@ -769,6 +879,23 @@ let pxPerHour = (function () {
   return clampZoom(isFinite(v) && v > 0 ? v : GEO.PX_PER_HOUR);
 })();
 
+// scale: what the control REPORTS and steps from, which is not the stored
+// setting. scaleGeometry floors the setting at the density that fills the plot
+// width, so on a window short enough to fit, a range of settings all draw the
+// same chart. The last time-based render leaves its resolved geometry here for
+// the readout and the buttons; null means no time axis is on screen (empty
+// window, or the projects view), leaving the setting to speak for itself.
+let scaleGeo = null;
+const scaleNow = () => scaleGeo || scaleGeometry(0, 0, pxPerHour, ZOOM_MIN, ZOOM_MAX);
+
+// plotWidthFor resolves the setting against the window and remembers the result
+// for the readout. Both time views call it; they measure slightly different plot
+// areas, so the floor is whichever one is currently drawn.
+function plotWidthFor(span, fitPlotW) {
+  scaleGeo = scaleGeometry(span, fitPlotW, pxPerHour, ZOOM_MIN, ZOOM_MAX);
+  return scaleGeo.plotW;
+}
+
 // setZoom changes the horizontal density and repaints, holding the time point at
 // the viewport center steady so zooming feels anchored instead of snapping to 0.
 function setZoom(next) {
@@ -779,19 +906,29 @@ function setZoom(next) {
   const centerFrac = sw > cw ? (wrap.scrollLeft + cw / 2) / sw : 0.5;
   pxPerHour = next;
   try { localStorage.setItem(ZOOM_KEY, String(next)); } catch (e) {}
-  updateZoomReadout();
   if (lastData) {
-    renderChartArea(lastData);
+    renderChartArea(lastData); // resolves the new geometry — read the readout after
     const nsw = wrap.scrollWidth;
     if (nsw > wrap.clientWidth) wrap.scrollLeft = centerFrac * nsw - wrap.clientWidth / 2;
   }
+  updateZoomReadout();
 }
 
-// updateZoomReadout syncs the numeric label and greys out a button at its bound.
+// updateZoomReadout syncs the numeric label and greys out a button that would
+// not move the chart. Both speak in the EFFECTIVE density: the label reports
+// what the plot is actually drawn at, and a window already filling the width
+// greys out zoom-out rather than taking clicks that only change a number. The
+// grey is otherwise unexplained, so the button says why on hover.
 function updateZoomReadout() {
-  if (el.zoomVal) el.zoomVal.textContent = String(Math.round(pxPerHour));
-  if (el.zoomOut) el.zoomOut.disabled = pxPerHour <= ZOOM_MIN + 0.5;
-  if (el.zoomIn) el.zoomIn.disabled = pxPerHour >= ZOOM_MAX - 0.5;
+  const geo = scaleNow();
+  if (el.zoomVal) el.zoomVal.textContent = String(Math.round(geo.effective));
+  if (el.zoomIn) el.zoomIn.disabled = !geo.canZoomIn;
+  if (el.zoomOut) {
+    el.zoomOut.disabled = !geo.canZoomOut;
+    el.zoomOut.title = geo.atFit && !geo.canZoomOut
+      ? "already fits the width — nothing left to compress"
+      : "zoom out — compress time";
+  }
 }
 
 // Project groups fold to a one-line summary when they get too small to read; the
@@ -852,6 +989,7 @@ function renderTimeline(data) {
     el.empty.hidden = false;
     el.svg.setAttribute("height", 0);
     el.svg.style.height = "0px";
+    scaleGeo = null; // nothing drawn to fit: the setting stands on its own
     return;
   }
   el.empty.hidden = true;
@@ -864,8 +1002,7 @@ function renderTimeline(data) {
   // overflow-x:auto), instead of squishing a whole day into the visible width.
   const containerW = Math.max(620, el.wrap.clientWidth);
   const fitPlotW = Math.max(160, containerW - GEO.GUTTER - GEO.RIGHT);
-  const minPlotW = (span / 3600e3) * pxPerHour;
-  const plotW = Math.max(fitPlotW, minPlotW);
+  const plotW = plotWidthFor(span, fitPlotW);
   const W = GEO.GUTTER + plotW + GEO.RIGHT;
   // unclamped ms→px width, for the collapse decision (needs pixel widths before x()).
   const msToPx = (ms) => (ms / span) * plotW;
@@ -1087,8 +1224,8 @@ function drawCollapsedGroup(g, x, W) {
 }
 
 // drawOperatorLane renders the top "operator" swimlane: gold = free time, dark
-// red = occupied (you were typing into an agent, or within 90s of a context
-// switch). The two partition the running window.
+// red = occupied (you were attending an agent window, or inside a switch's
+// recovery window). The two partition the running window.
 function drawOperatorLane(op, rowTop, x, W) {
   const barY = rowTop + Math.round((GEO.OP_LANE_H - GEO.OP_BAR_H) / 2);
 
@@ -1166,9 +1303,14 @@ function drawSession(lane, rowTop, x, haveActivity, activeGlobal) {
     });
     bg.setAttribute("data-session", laneIdentity(lane)); // bars are keyed by identity, not name
     attachTip(bg, () => nameSegTipHTML(lane, seg));
-    // click pins the archival summary card when session-digest has one; the
-    // handler reads lastSummaries at click time, so summaries arriving after
-    // render are picked up without a repaint.
+    // click pins the archival summary card when session-digest has one WITH
+    // something in it; the empty string is sessionPopoutHTML's way of saying the
+    // click buys nothing, and swallowing it here leaves the event to the
+    // background handler rather than pinning a card of footers. The handler
+    // reads lastSummaries at click time, so summaries arriving after render are
+    // picked up without a repaint — which is also why the pointer cursor on
+    // .name-seg cannot be conditioned on having a card: at draw time we do not
+    // yet know. The tooltip's hint is the affordance that is accurate on hover.
     bg.addEventListener("click", (ev) => {
       const html = sessionPopoutHTML(lane);
       if (html) { ev.stopPropagation(); pinPopout(html, ev); }
@@ -1390,7 +1532,13 @@ function axisTicks(t0, t1, plotW) {
 
 const MONO = 'ui-monospace, "SFMono-Regular", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace';
 const SMOOTH_WINDOW_MS = 30 * 60 * 1000; // centered rolling-average window
-const CGEO = { LEFT: 54, RIGHT: 18, TOP: 18, BOTTOM: 30, HEIGHT: 340 };
+// RIGHT_LIVE is the wider right gutter a live window reserves for the live-tail
+// readout — the count over a stacked "agents / aloft", hanging off the end of
+// the line rather than sitting on top of it. Sized to the widest line at its
+// font ("agents" at 9px mono), and reserved for the whole live day rather than
+// only while a tail exists, so the plot doesn't jump width when the last agent
+// lands.
+const CGEO = { LEFT: 54, RIGHT: 18, RIGHT_LIVE: 56, TOP: 18, BOTTOM: 30, HEIGHT: 340 };
 
 // chartHover carries the just-rendered chart's paint closure + scales so the
 // canvas mousemove handler (wired once) can redraw the crosshair and read out
@@ -1417,8 +1565,17 @@ function renderConcurrencyChart(data) {
   const canvas = el.canvas;
   el.empty.hidden = true; // the canvas draws its own empty state
   const lanes = renderableLanes(data.lanes);
-  const prof = concurrencyProfile(workIntervalsMs(lanes));
-  const pts = prof.points;
+  const spans = aloftSpans(lanes);
+  // prof is the window's true accounting (peak / average / active time). The
+  // DRAWN profile may differ at the trailing edge: on a live window the spans
+  // still in flight are squared off to the newest sample (alignLiveTail), so the
+  // staggered per-provider sample times don't paint a landing that never
+  // happened. Stats stay on the unaligned figures.
+  const prof = concurrencyProfile(spans.map((x) => [x.s, x.e]));
+  const aligned = alignLiveTail(spans, Date.now(), isLiveWindow());
+  const live = aligned.tail;
+  const drawProf = live ? concurrencyProfile(aligned.intervals) : prof;
+  const pts = drawProf.points;
 
   const C = {
     inst: cssVar("--c-working", "#3fb950"),
@@ -1427,19 +1584,22 @@ function renderConcurrencyChart(data) {
     grid: cssVar("--border-soft", "#21262d"),
     axis: cssVar("--border", "#2b3240"),
     text: cssVar("--fg-dim", "#6e7681"),
+    bg: cssVar("--bg", "#0d1117"),
   };
 
   // window + horizontal scale (reuse the zoom density + scroll like the bars)
   const { t0, t1 } = windowBounds(data, lanes);
   const span = t1 - t0;
+  const rightPad = isLiveWindow() ? CGEO.RIGHT_LIVE : CGEO.RIGHT;
   const containerW = Math.max(620, el.wrap.clientWidth);
-  const fitPlotW = Math.max(160, containerW - CGEO.LEFT - CGEO.RIGHT);
-  const minPlotW = (span / 3600e3) * pxPerHour;
-  const plotW = Math.max(fitPlotW, minPlotW);
-  const W = CGEO.LEFT + plotW + CGEO.RIGHT;
+  const fitPlotW = Math.max(160, containerW - CGEO.LEFT - rightPad);
+  const plotW = plotWidthFor(span, fitPlotW);
+  const W = CGEO.LEFT + plotW + rightPad;
   const H = CGEO.HEIGHT;
   const plotTop = CGEO.TOP, plotBottom = H - CGEO.BOTTOM, plotH = plotBottom - plotTop;
-  const yTop = Math.max(1, prof.maxN);
+  // the axis has to hold whichever profile peaks higher: squaring off the tail
+  // can overlap spans that the raw samples showed one after another.
+  const yTop = Math.max(1, prof.maxN, drawProf.maxN);
 
   const X = (t) => CGEO.LEFT + ((t - t0) / span) * plotW;
   const Y = (n) => plotBottom - (n / yTop) * plotH;
@@ -1473,7 +1633,9 @@ function renderConcurrencyChart(data) {
     return lo;
   }
   function levelAt(t) {
-    if (t >= lastT) return 0; // after the final drop back to 0
+    // past the final breakpoint: 0, unless that breakpoint is a live tail — then
+    // those agents are still up, and the readout should say so.
+    if (t >= lastT) return live ? live.n : 0;
     const k = segAt(t);
     return k < 0 ? 0 : pts[k].n;
   }
@@ -1552,6 +1714,9 @@ function renderConcurrencyChart(data) {
       for (let k = 1; k < pts.length; k++) {
         const xx = X(pts[k].t);
         ctx.lineTo(xx, Y(pts[k - 1].n)); // hold previous level across the segment
+        // a live tail's final "step" is the sample ending, not a landing — the
+        // line runs out at its current level and the marker below caps it.
+        if (live && k === pts.length - 1) break;
         ctx.lineTo(xx, Y(pts[k].n));     // step to the new level
       }
     };
@@ -1565,6 +1730,34 @@ function renderConcurrencyChart(data) {
     ctx.beginPath();
     stepPath();
     ctx.strokeStyle = C.inst; ctx.lineWidth = 1.4; ctx.lineJoin = "round"; ctx.stroke();
+
+    // live tail cap: a dot terminating the line, with the count hanging off to
+    // its right in the reserved gutter — out over the margin rather than on top
+    // of the plot, so it never sits on the data. The dot carries a
+    // background-colored ring so it reads as a terminator, not a kink.
+    if (live) {
+      const lx = X(live.t), ly = Y(live.n);
+      ctx.beginPath();
+      ctx.arc(lx, ly, 4, 0, 2 * Math.PI);
+      ctx.fillStyle = C.inst; ctx.fill();
+      ctx.strokeStyle = C.bg; ctx.lineWidth = 1.5; ctx.stroke();
+
+      // count, then its label stacked under it in the same green — two short
+      // lines keep the gutter narrow. Held clear of the plot edges so a tail at
+      // 0 or at the peak still reads.
+      const labelX = CGEO.LEFT + plotW + 8;
+      const labelY = Math.min(Math.max(ly, plotTop + 10), plotBottom - 22);
+      ctx.textAlign = "left";
+      ctx.textBaseline = "alphabetic";
+      ctx.fillStyle = C.inst;
+      ctx.font = "700 13px " + MONO;
+      ctx.fillText(String(live.n), labelX, labelY);
+      ctx.globalAlpha = 0.75; // the label qualifies the number, it doesn't compete
+      ctx.font = "9px " + MONO;
+      ctx.fillText(live.n === 1 ? "agent" : "agents", labelX, labelY + 10);
+      ctx.fillText("aloft", labelX, labelY + 19);
+      ctx.globalAlpha = 1;
+    }
 
     // smoothed 30-min rolling average (sampled per pixel)
     if (smoothOn) {
@@ -1665,6 +1858,7 @@ function sameProjectRows(keys) {
 function renderProjectsChart(data) {
   const rows = projectHoursMs(renderableLanes(data.lanes));
   el.empty.hidden = true; // this view draws its own empty state
+  scaleGeo = null; // no time axis here, so no fit floor to carry out of the view
 
   if (!rows.length) {
     lastProjectKeys = null;
@@ -1761,10 +1955,17 @@ function projectSegTipHTML(entry, part) {
 // Reuses the global tooltip styling (.t-status + .t-formula/.t-result/.t-why).
 // Any field may be omitted; `color` tints the title. Pass the returned string to
 // an element's data-tip attribute (escaped) and wire it with attachFormulaTips.
-function formulaTipHTML({ title, formula, result, why, color } = {}) {
+// `substitution` is the same formula with this window's numbers already plugged
+// in ("7h 37m − 1h 40m"). It rides inside the formula box, under the symbolic
+// form, so a reader can see the arithmetic instead of reconstructing it.
+function formulaTipHTML({ title, formula, substitution, result, why, color } = {}) {
   let html = "";
   if (title) html += `<div class="t-status"${color ? ` style="color:${color}"` : ""}>${escapeHTML(title)}</div>`;
-  if (formula) html += `<div class="t-formula">${escapeHTML(formula)}</div>`;
+  if (formula) {
+    html += `<div class="t-formula">${escapeHTML(formula)}`
+      + (substitution ? `<span class="t-subst">${escapeHTML(substitution)}</span>` : "")
+      + `</div>`;
+  }
   if (result != null && result !== "") html += `<div class="t-result">= <b>${escapeHTML(String(result))}</b></div>`;
   if (why) html += `<div class="t-why">${escapeHTML(why)}</div>`;
   return html;
@@ -1779,8 +1980,9 @@ function operatorTipHTML(op) {
     + `<div class="t-row">occupied ${humanDurationMs(op.occupiedMs)}</div>`
     + `<div class="t-row">agents running ${humanDurationMs(op.runningMs)}</div>`
     + `<div class="t-row">${op.switches} context switch${op.switches === 1 ? "" : "es"}</div>`
-    + `<div class="t-formula">free = running − (typing ∪ 90s-per-switch recovery)</div>`
-    + `<div class="t-why">Time you had free while agents ran and you were neither typing nor recovering from a context switch.</div>`;
+    + `<div class="t-formula">free = running − (attending ∪ recovery)`
+    + `<span class="t-subst">${humanDurationMs(op.runningMs)} − ${humanDurationMs(op.occupiedMs)}</span></div>`
+    + `<div class="t-why">Time you had free while agents ran and you were neither attending an agent window nor recovering from a context switch. Attending needs activity within ${humanDurationMs(OP.awayAfterMs)} — a focused window you haven't touched since then reads as you having walked away.</div>`;
 }
 
 // tipHead renders a segment tooltip's headline: the status label on the left with
@@ -1814,8 +2016,8 @@ function opSegTipHTML(kind, s, e) {
   return tipHead(free ? "free" : "occupied", free ? OP_FREE_COLOR : "#e5534b",
       `${fmtClock(new Date(s).toISOString())} – ${fmtClock(new Date(e).toISOString())}`, e - s)
     + `<div class="t-why">${free
-        ? "Agents were running but you weren't typing or recovering from a switch."
-        : "You were typing, or within 90s of a context switch, while agents ran."}</div>`;
+        ? "Agents were running but you weren't attending one or recovering from a switch."
+        : `You were attending an agent window, or within ${humanDurationMs(OP.switchRecoveryMs)} of a context switch, while agents ran.`}</div>`;
 }
 
 // memoryRowsHTML renders a memory readout as tooltip rows. Peak leads because
@@ -1952,10 +2154,13 @@ function nameSegTipHTML(lane, seg) {
 // archival identity (name, one-liner, task bullets, narrative) from
 // session-digest, plus the lane's own identity footer. The body — bullets over
 // prose, or prose alone — comes from model.js so the node suite can cover it.
-// Only wired when a summary exists for the lane.
+// Empty when there is no summary, and equally empty for a summary with no body
+// (summaryCardHasContent, also in model.js): a record with no tasks and no prose
+// would put only the archival name and the id footer on screen over what the
+// tooltip already showed, so the caller drops the click instead of pinning it.
 function sessionPopoutHTML(lane) {
   const sum = sessionSummary(lane);
-  if (!sum) return "";
+  if (!summaryCardHasContent(sum)) return "";
   const idBits = [];
   if (lane.provider) idBits.push(lane.provider);
   idBits.push(lane.agent || "?");
@@ -2026,6 +2231,8 @@ function renderAttentionCard(summary, op) {
   const effTip = tip({
     title: "delegation effectiveness",
     formula: "delegated ÷ (delegated + attended + prompt)",
+    substitution: da == null && aa == null && pa == null ? null
+      : `${humanDuration(da || 0)} ÷ (${humanDuration(da || 0)} + ${humanDuration(aa || 0)} + ${humanDuration(pa || 0)})`,
     result: effPct == null ? "—" : effPct + "%",
     why: "Share of your agent engagement that ran hands-off (delegated) vs. hands-on (supervising + prompting) — higher = more leverage.",
     color: effColor,
@@ -2033,15 +2240,25 @@ function renderAttentionCard(summary, op) {
   const ctxTip = tip({
     title: "context switches",
     formula: "focus arrivals − 1",
+    substitution: op ? `${op.switches + 1} − 1` : null,
     result: op ? String(op.switches) : "—",
     why: "How many times you moved your attention between sessions.",
     color: "var(--c-permission)",
   });
+  const recovStr = humanDurationMs(OP.switchRecoveryMs);
   const lostTip = tip({
     title: "operator time lost to AI",
-    formula: "Σ 90s recovery per switch (clustered merged) ∩ running",
+    formula: `⋃ ${recovStr} recovery per switch, merged, ∩ running`,
+    // recovery × switches is the naive charge; the union and the ∩ are what cut
+    // it down. Both numbers are shown because the gap between them IS the point
+    // — a burst of switches inside one recovery window costs one recovery.
+    substitution: !op ? null : (() => {
+      const raw = op.switches * OP.switchRecoveryMs;
+      const naive = `${recovStr} × ${op.switches} = ${humanDurationMs(raw)}`;
+      return op.lostMs < raw ? `${naive}\n− overlap → ${humanDurationMs(op.lostMs)}` : naive;
+    })(),
     result: op ? humanDurationMs(op.lostMs) : "—",
-    why: "Time absorbed re-acquiring context after switches while agents ran.",
+    why: `Time absorbed re-acquiring context after switches while agents ran. Switch bursts merge into one recovery window rather than costing ${recovStr} apiece.`,
     color: "var(--c-permission)",
   });
 
@@ -2122,7 +2339,8 @@ function renderAttentionCard(summary, op) {
       })}
       ${row("agent-hours · parallel work", `${humanDuration(perSession)}${parallel ? ` <span class="dim">${parallel.toFixed(1)}×</span>` : ""}`, {
         title: "agent-hours",
-        formula: "Σ per-session active time",
+        formula: "Σ per-session active time · ×N = agent-hours ÷ active",
+        substitution: parallel ? `${humanDuration(perSession)} ÷ ${humanDuration(union)} = ${parallel.toFixed(1)}×` : null,
         result: humanDuration(perSession),
         why: "Total active agent-time counting parallel sessions separately; ×N is average parallelism (agent-hours ÷ active).",
       }, "deemph")}
@@ -2393,9 +2611,12 @@ function init() {
   positionViewGlider();
   requestAnimationFrame(() => el.viewseg.classList.add("glider-ready"));
 
-  // horizontal-scale zoom: step the px/hour density, reset to the built-in default
-  el.zoomIn.addEventListener("click", () => setZoom(pxPerHour * ZOOM_FACTOR));
-  el.zoomOut.addEventListener("click", () => setZoom(pxPerHour / ZOOM_FACTOR));
+  // horizontal-scale zoom: step the px/hour density, reset to the built-in
+  // default. Steps run off the EFFECTIVE density so the first click always
+  // moves the chart — stepping the stored value would spend several clicks
+  // climbing back to a floor the plot is already drawn at.
+  el.zoomIn.addEventListener("click", () => setZoom(scaleNow().effective * ZOOM_FACTOR));
+  el.zoomOut.addEventListener("click", () => setZoom(scaleNow().effective / ZOOM_FACTOR));
   el.zoomReset.addEventListener("click", () => setZoom(GEO.PX_PER_HOUR));
   updateZoomReadout();
 
@@ -2425,8 +2646,10 @@ function init() {
     resizeTimer = setTimeout(() => { if (lastData) renderChartArea(lastData); }, 120);
   });
 
-  // live polling — no manual refresh controls
-  loadTimeline();
+  // live polling — no manual refresh controls. Settings land first: every
+  // operator figure depends on them, and re-rendering the page a beat later with
+  // different thresholds would be a visible flicker of the numbers.
+  loadSettings().then(loadTimeline);
   loadPlan();
   loadSummaries();
   loadMemory();

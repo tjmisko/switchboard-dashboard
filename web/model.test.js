@@ -9,10 +9,11 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   laneIdentity, rawSessionId, leadLabel, nameSegments, buildBars, spanInefficiency, switchArrivals, packLanes,
-  workIntervalsMs, concurrencyProfile, projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs,
-  suspectTailMs, normalizeView,
+  aloftSpans, workIntervalsMs, concurrencyProfile, alignLiveTail,
+  projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs,
+  suspectTailMs, normalizeView, scaleGeometry,
   fmtBytes, spawnedBytes, laneMemory, memoryWindow, pressureWindow,
-  summaryTasks, summaryBodyHTML, summaryHintText,
+  summaryTasks, summaryBodyHTML, summaryHintText, summaryCardHasContent,
 } = require("./model.js");
 
 // ms helper: a fixed base instant + offset minutes, as RFC3339 with offset.
@@ -349,6 +350,93 @@ test("concurrencyProfile handles no intervals: empty points, null average", () =
   assert.equal(prof.avgActive, null);
 });
 
+// ---------------------------------------------------------------------------
+// live tail: which aloft spans are still in flight, and squaring them off
+// ---------------------------------------------------------------------------
+
+test("aloftSpans should mark a lane's last working interval open when nothing superseded it", () => {
+  const lanes = [{ intervals: [interval("idle", ms(0), ms(5)), interval("working", ms(5), ms(20))] }];
+  const spans = aloftSpans(lanes);
+  assert.equal(spans.length, 1);
+  assert.equal(spans[0].open, true, "the lane has reported nothing after it");
+});
+
+test("aloftSpans should mark a working interval closed once the lane reports a later status", () => {
+  const lanes = [{ intervals: [interval("working", ms(0), ms(10)), interval("idle", ms(10), ms(20))] }];
+  const spans = aloftSpans(lanes);
+  assert.equal(spans.length, 1);
+  assert.equal(spans[0].open, false, "going idle is the agent landing, not a stale sample");
+});
+
+test("aloftSpans should mark a subagent span open only when it runs to the lane's newest sample", () => {
+  const lanes = [{
+    intervals: [interval("delegating", ms(0), ms(20))],
+    subagents: [
+      { start: new Date(ms(0)).toISOString(), end: new Date(ms(12)).toISOString() },  // finished
+      { start: new Date(ms(5)).toISOString(), end: new Date(ms(20)).toISOString() },  // still running
+    ],
+  }];
+  const spans = aloftSpans(lanes);
+  assert.deepEqual(spans.map((x) => x.open), [false, true]);
+});
+
+test("alignLiveTail should extend every still-open span to the newest sample", () => {
+  // three streams, sampled 20s / 10s / 2s before now — all still running. The
+  // staggered ends would decay 3 -> 2 -> 1 -> 0 at the right edge.
+  const now = ms(60);
+  const spans = [
+    { s: ms(0), e: now - 20000, open: true },
+    { s: ms(10), e: now - 10000, open: true },
+    { s: ms(20), e: now - 2000, open: true },
+  ];
+  const { intervals, tail } = alignLiveTail(spans, now, true);
+  assert.deepEqual(tail, { t: now - 2000, n: 3 }, "all three are aloft at the newest sample");
+  assert.deepEqual(intervals.map((iv) => iv[1]), [now - 2000, now - 2000, now - 2000]);
+});
+
+test("alignLiveTail should leave closed spans where they ended", () => {
+  const now = ms(60);
+  const spans = [
+    { s: ms(0), e: ms(30), open: false },        // landed half an hour ago
+    { s: ms(40), e: now - 3000, open: true },    // still up
+  ];
+  const { intervals, tail } = alignLiveTail(spans, now, true);
+  assert.deepEqual(intervals[0], [ms(0), ms(30)], "a finished span is not resurrected");
+  assert.equal(tail.n, 1, "only the open stream counts as aloft");
+});
+
+test("alignLiveTail should return no tail for a historical window", () => {
+  const now = ms(60);
+  const spans = [{ s: ms(0), e: now - 3000, open: true }];
+  const { intervals, tail } = alignLiveTail(spans, now, false);
+  assert.equal(tail, null, "a closed day's drop to zero is real");
+  assert.deepEqual(intervals, [[ms(0), now - 3000]], "spans pass through untouched");
+});
+
+test("alignLiveTail should return no tail when the feed has gone stale", () => {
+  const now = ms(60);
+  const spans = [{ s: ms(0), e: now - 10 * 60000, open: true }];
+  assert.equal(alignLiveTail(spans, now, true).tail, null, "10-minute-old sample is not live");
+});
+
+test("alignLiveTail should return no tail when nothing is open", () => {
+  const now = ms(60);
+  const spans = [{ s: ms(0), e: now - 3000, open: false }];
+  assert.equal(alignLiveTail(spans, now, true).tail, null);
+  assert.equal(alignLiveTail([], now, true).tail, null);
+});
+
+test("alignLiveTail should count only the streams covering the newest sample", () => {
+  // one stream went stale 5 minutes ago (open, but its lane stopped reporting)
+  // while another is live: the marker reads 1, not 2.
+  const now = ms(60);
+  const spans = [
+    { s: ms(0), e: now - 5 * 60000, open: true },
+    { s: ms(50), e: now - 1000, open: true },
+  ];
+  assert.deepEqual(alignLiveTail(spans, now, true).tail, { t: now - 1000, n: 1 });
+});
+
 test("concurrencyProfile merges simultaneous starts into one point at the shared instant", () => {
   // three spans all opening at the same t -> a single breakpoint of level 3.
   const prof = concurrencyProfile([[ms(0), ms(10)], [ms(0), ms(20)], [ms(0), ms(30)]]);
@@ -575,7 +663,7 @@ function ghostLane() {
     end: at(360),
     intervals: [{ status: "working", start: at(0), end: at(360) }],
     suspect: true,
-    suspect_reason: "unclosed lane stretched to now: final \"working\" interval 5h0m0s >= 4h0m0s cap",
+    suspect_reason: "unclosed lane stretched to now: silent 5h0m0s >= 4h0m0s cap",
     suspect_since: at(60),
   };
 }
@@ -825,6 +913,80 @@ test("summaryHintText should be empty when the record has nothing behind the cli
   for (const sum of [{ description: "d" }, { description: "d", tasks: [] }, { description: "d", tasks: ["  "] }]) {
     assert.equal(summaryHintText(sum) === "", summaryBodyHTML(sum) === "",
       `hint and body disagree for ${JSON.stringify(sum)}`);
+  }
+});
+
+// summaryCardHasContent is the gate app.js's sessionPopoutHTML runs before it
+// builds the pinned card, and the click handler drops the click on an empty
+// return — so "pins nothing" below means exactly "the bar is not clickable".
+// app.js itself is DOM-bound and cannot be required here; keeping the decision
+// in model.js is what makes it assertable at all.
+
+test("summaryCardHasContent should pin nothing when the record has no tasks and no prose", () => {
+  // the empty record: the card could only restate the archival name and the id
+  // footer, so the bar advertises nothing AND buys nothing.
+  for (const sum of [
+    {},
+    { name: "amber-kite" },
+    { name: "amber-kite", description: "   ", tasks: ["  ", ""], summary: "" },
+  ]) {
+    assert.equal(summaryCardHasContent(sum), false, `pinned an empty card for ${JSON.stringify(sum)}`);
+    assert.equal(summaryHintText(sum), "", "and nothing advertised the click");
+  }
+  assert.equal(summaryCardHasContent(null), false, "a lane with no summary at all pins nothing");
+});
+
+test("summaryCardHasContent should pin nothing when a description is all the record carries", () => {
+  // The case tjmisko/switchboard-dashboard#7 item 2 describes, and the one the
+  // backend can actually serve — handler.go drops a record whose description is
+  // empty, so this is the empty record as the browser sees it. The tooltip
+  // already prints the description; all the card would add is the archival name
+  // and the id footer. Losing that name from the UI is the accepted cost of not
+  // having a bar that pins a card it never advertised.
+  const sum = { name: "amber-kite", description: "Reworked the summary gate" };
+  assert.equal(summaryCardHasContent(sum), false);
+  assert.equal(summaryBodyHTML(sum), "", "there is no body to show");
+  assert.equal(summaryHintText(sum), "", "and the tooltip promised nothing");
+});
+
+test("summaryCardHasContent should pin the card when a lone task is all the record carries", () => {
+  // the already-fixed case: one bullet is content the tooltip never showed, so
+  // it must keep both its hint and its card.
+  const sum = { description: "d", tasks: ["Fixed the lookup"] };
+  assert.equal(summaryCardHasContent(sum), true);
+  assert.notEqual(summaryBodyHTML(sum), "", "the card renders that bullet");
+  assert.equal(summaryHintText(sum), "click for the session summary");
+});
+
+test("summaryCardHasContent should pin the card for an ordinary multi-task session", () => {
+  const sum = {
+    name: "amber-kite",
+    description: "Did three jobs",
+    tasks: ["Fixed the lookup", "Added the endpoint", "Wrote the tests"],
+    summary: "A mixed session that landed on main.",
+  };
+  assert.equal(summaryCardHasContent(sum), true);
+  assert.equal(summaryHintText(sum), "click for 3 steps");
+});
+
+test("summaryCardHasContent should pin a card exactly when the tooltip advertised one", () => {
+  // The invariant the three helpers exist to keep: hint-empty, body-empty and
+  // card-empty are one condition. Both directions are load-bearing. Lose the
+  // forward one and the tooltip promises "click for 4 steps" over a bar whose
+  // click does nothing; lose the reverse and a bar that advertised nothing pins
+  // a card anyway, which is the bug #7 item 2 reported.
+  for (const sum of [
+    null, {}, { name: "amber-kite" }, { description: "d" },
+    { description: "d", tasks: [] }, { description: "d", tasks: ["  "] },
+    { description: "d", summary: "Prose." }, { tasks: ["only one"] },
+    { description: "d", tasks: ["a", "b"] }, { description: "", tasks: ["a", "b"], summary: "Prose." },
+    { description: "d", tasks: "a\nb", summary: "Prose." },
+  ]) {
+    const label = JSON.stringify(sum);
+    assert.equal(summaryHintText(sum) === "", summaryBodyHTML(sum) === "",
+      `hint and body disagree for ${label}`);
+    assert.equal(summaryCardHasContent(sum), summaryHintText(sum) !== "",
+      `card and hint disagree for ${label}`);
   }
 });
 
@@ -1202,4 +1364,96 @@ test("pressureWindow should return nothing when the series does not cover the wi
   assert.equal(pressureWindow({}, ms(0), ms(60)), null);
   assert.equal(pressureWindow(null, ms(0), ms(60)), null);
   assert.equal(pressureWindow(mem, ms(60), ms(0)), null, "an inverted window matches nothing");
+});
+
+// ---------------------------------------------------------------------------
+// scaleGeometry — the footer's px/hour setting resolved against the window
+// ---------------------------------------------------------------------------
+
+const ZMIN = 60, ZMAX = 1200, ZSTEP = 1.25;
+const HOUR = 3600e3;
+// the shape the bug lived in: a 100-minute window in an 1110px plot fills the
+// width at 666 px/h, well above the 240 default.
+const SHORT = 100 * 60e3, PLOT = 1110;
+const geo = (span, fitPlotW, px) => scaleGeometry(span, fitPlotW, px, ZMIN, ZMAX);
+
+test("scaleGeometry should draw a long window at the requested density", () => {
+  // 8h at 240 px/h wants 1920px — wider than the plot, so the setting governs
+  // and the chart scrolls.
+  const g = geo(8 * HOUR, PLOT, 240);
+  assert.equal(g.plotW, 1920);
+  assert.equal(Math.round(g.effective), 240);
+  assert.equal(g.atFit, false);
+  assert.equal(g.canZoomOut, true);
+});
+
+test("scaleGeometry should report the fit density, not the setting, when the window already fits", () => {
+  // The regression: the setting said 240, the chart was drawn at 666, and the
+  // readout showed 240 — so four zoom-in clicks moved the label and nothing else.
+  const g = geo(SHORT, PLOT, 240);
+  assert.equal(g.plotW, PLOT, "a fitting window draws to the plot width");
+  assert.equal(Math.round(g.fit), 666);
+  assert.equal(Math.round(g.effective), 666, "the readout must show what is drawn");
+  assert.equal(g.atFit, true);
+});
+
+test("scaleGeometry should draw every setting under the fit density identically", () => {
+  // The dead zone itself: the whole zoom-out half of the range is one chart.
+  const widths = [60, 120, 192, 240, 400, 600].map((px) => geo(SHORT, PLOT, px).plotW);
+  assert.deepEqual(widths, new Array(6).fill(PLOT));
+});
+
+test("scaleGeometry should refuse to zoom out when the window already fits the width", () => {
+  // Nothing is left to compress: a step down redraws the same pixels, so the
+  // button is spent and must grey out instead of taking dead clicks.
+  assert.equal(geo(SHORT, PLOT, 240).canZoomOut, false);
+  assert.equal(geo(SHORT, PLOT, ZMIN).canZoomOut, false);
+});
+
+test("scaleGeometry should let one zoom-in step off the fit density widen the plot", () => {
+  // Stepping the stored 240 would give 300 — still under the 666 floor, so the
+  // chart would hold still. Stepping the effective density always moves it.
+  const before = geo(SHORT, PLOT, 240);
+  const after = geo(SHORT, PLOT, before.effective * ZSTEP);
+  assert.ok(after.plotW > before.plotW, "the first click must widen the plot");
+  assert.equal(Math.round(after.effective), Math.round(before.effective * ZSTEP));
+});
+
+test("scaleGeometry should hand a zoom-out step back to the floor and stop", () => {
+  // Down from one step above fit: lands at the floor, and there it's spent.
+  const raised = geo(SHORT, PLOT, geo(SHORT, PLOT, 240).effective * ZSTEP);
+  const dropped = geo(SHORT, PLOT, raised.effective / ZSTEP);
+  assert.equal(dropped.plotW, PLOT);
+  assert.equal(dropped.canZoomOut, false);
+});
+
+test("scaleGeometry should stay zoomable-out above the floor even below the default", () => {
+  // A day-long window at 154 px/h is still wider than the plot: the floor is
+  // about the window, not about the default, and must not grey the button early.
+  const g = geo(24 * HOUR, PLOT, 154);
+  assert.equal(g.canZoomOut, true);
+  assert.equal(g.atFit, false);
+});
+
+test("scaleGeometry should bound zoom-in at the maximum density", () => {
+  assert.equal(geo(8 * HOUR, PLOT, ZMAX).canZoomIn, false);
+  assert.equal(geo(8 * HOUR, PLOT, ZMAX / ZSTEP).canZoomIn, true);
+});
+
+test("scaleGeometry should freeze both directions when fit alone exceeds the maximum", () => {
+  // A 10-minute window fills 1110px at 6660 px/h — past ZMAX and already
+  // floored, so neither button can move it and both must say so.
+  const g = geo(10 * 60e3, PLOT, 240);
+  assert.equal(Math.round(g.fit), 6660);
+  assert.equal(g.canZoomIn, false);
+  assert.equal(g.canZoomOut, false);
+});
+
+test("scaleGeometry should fall back to the plot width for an empty window", () => {
+  // A zero-length span has no density: no floor, no divide-by-zero, draw to fit.
+  const g = geo(0, PLOT, 240);
+  assert.equal(g.plotW, PLOT);
+  assert.equal(g.fit, 0);
+  assert.equal(g.effective, 240, "with no window, the setting speaks for itself");
+  assert.equal(g.atFit, false);
 });

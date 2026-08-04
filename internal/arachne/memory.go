@@ -16,8 +16,6 @@ package arachne
 import (
 	"sort"
 	"time"
-
-	"github.com/tjmisko/switchboard-dashboard/internal/timeline"
 )
 
 // MemoryDoc is the `memory --json` document.
@@ -71,7 +69,6 @@ type MemorySample struct {
 // keys records into a map where an absent entry already means "unenriched".
 func CompileMemory(events []Event, opts CompileOptions) MemoryDoc {
 	sessions := aggregate(events)
-	folds := foldMemory(events)
 	nowRFC := opts.Now.UTC().Format(time.RFC3339)
 
 	// Same order as Compile: by start time, then id.
@@ -94,7 +91,7 @@ func CompileMemory(events []Event, opts CompileOptions) MemoryDoc {
 		if !overlapsWindow(startRFC, endRFC, opts) {
 			continue
 		}
-		pts := folds[s.id]
+		pts := sortedMem(s.mem)
 		if len(pts) == 0 {
 			continue
 		}
@@ -143,31 +140,22 @@ type memPoint struct {
 	sample bool
 }
 
-// foldMemory collects the memory events per session, in time order. It is a
-// pass of its own rather than a case in aggregate: keeping it out of the
-// timeline fold is what guarantees a sample can never influence a lane.
-func foldMemory(events []Event) map[string][]memPoint {
-	out := map[string][]memPoint{}
-	for _, e := range events {
-		if e.SessionID == "" || !IsMemoryEvent(e.Type) {
-			continue
-		}
-		ns, ok := timeline.ParseNanos(e.TS)
-		if !ok {
-			continue
-		}
-		out[e.SessionID] = append(out[e.SessionID], memPoint{
-			ts:     e.TS,
-			ns:     ns,
-			tree:   e.MemTreeBytes,
-			peak:   e.MemPeakBytes,
-			sample: e.Type == EventMemorySample,
-		})
+// sortedMem returns a run's samples in time order, without disturbing the
+// collected slice.
+//
+// The samples are gathered in aggregate, where run ownership is known, but that
+// is the only thing aggregate does with them: they are never touched into the
+// evidence bound, so a sample still cannot influence a lane. Folding them in a
+// separate pass keyed by session id — which is what this replaced — stopped
+// working when a slug came to host a sequence of runs, because the fold had no
+// way to tell which run a sample fell inside.
+func sortedMem(pts []memPoint) []memPoint {
+	if len(pts) < 2 {
+		return pts
 	}
-	for id := range out {
-		pts := out[id]
-		sort.SliceStable(pts, func(i, j int) bool { return pts[i].ns < pts[j].ns })
-	}
+	out := make([]memPoint, len(pts))
+	copy(out, pts)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].ns < out[j].ns })
 	return out
 }
 

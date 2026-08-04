@@ -200,6 +200,46 @@ func TestCompileMemory_shouldAverageASingleReadingAsItself(t *testing.T) {
 	}
 }
 
+func TestCompileMemory_shouldAttributeSamplesToTheRunTheyFiredIn(t *testing.T) {
+	// The pump restarts a container under the same name once per phase task, so a
+	// slug hosts a sequence of runs and only the run open at the time owns a
+	// sample. Folding memory by slug — which is what the separate pass did —
+	// pooled every run's samples under the first run's id and left the later runs
+	// with nothing, so a branch's second container drew a hover with no figures.
+	events := []Event{
+		{Type: EventSessionStart, TS: "2026-07-22T03:00:00Z", SessionID: "feat-f71",
+			StartedAt: "2026-07-22T03:00:00Z", Agent: "opus", Project: "Arachne"},
+		{Type: EventMemorySample, TS: "2026-07-22T03:00:30Z", SessionID: "feat-f71",
+			MemTreeBytes: 1000, MemPeakBytes: 1000},
+		{Type: EventSessionEnd, TS: "2026-07-22T03:01:00Z", SessionID: "feat-f71",
+			End: "2026-07-22T03:01:00Z", Reason: ReasonExited},
+
+		{Type: EventSessionStart, TS: "2026-07-22T03:02:00Z", SessionID: "feat-f71",
+			StartedAt: "2026-07-22T03:02:00Z", Agent: "opus", Project: "Arachne"},
+		{Type: EventMemorySample, TS: "2026-07-22T03:02:30Z", SessionID: "feat-f71",
+			MemTreeBytes: 9000, MemPeakBytes: 9000},
+		{Type: EventSessionEnd, TS: "2026-07-22T03:03:00Z", SessionID: "feat-f71",
+			End: "2026-07-22T03:03:00Z", Reason: ReasonExited},
+	}
+	doc := compileMem(t, events, "2026-07-22T04:00:00Z")
+	if len(doc.Sessions) != 2 {
+		t.Fatalf("got %d sessions, want 2 — one per container run", len(doc.Sessions))
+	}
+	first, second := doc.Sessions[0], doc.Sessions[1]
+	if first.SessionID != "feat-f71" || second.SessionID != "feat-f71#2" {
+		t.Fatalf("run ids = %q, %q; want the bare slug then #2", first.SessionID, second.SessionID)
+	}
+	if len(first.Mem) != 1 || first.Mem[0].Tree == nil || *first.Mem[0].Tree != 1000 {
+		t.Fatalf("first run got %+v, want only its own 1000 sample", first.Mem)
+	}
+	if len(second.Mem) != 1 || second.Mem[0].Tree == nil || *second.Mem[0].Tree != 9000 {
+		t.Fatalf("second run got %+v, want only its own 9000 sample", second.Mem)
+	}
+	if second.PeakTreeBytes == nil || *second.PeakTreeBytes != 9000 {
+		t.Fatalf("second run peak = %v, want 9000", second.PeakTreeBytes)
+	}
+}
+
 func TestCompileMemory_shouldDropSessionsOutsideTheWindow(t *testing.T) {
 	events := memEvents()
 	doc := CompileMemory(events, CompileOptions{

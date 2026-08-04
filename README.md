@@ -71,6 +71,40 @@ go build -o switchboard-dashboard .
 | `--plan`      | `/tmp/claude-plan-usage.json` | Cached plan-usage file, read-only, for the gauge.                        |
 | `--summaries` | `~/.local/share/switchboard/summaries` | Session-summary records from `session-digest`; empty disables.  |
 | `--providers` | `""`                          | Providers config JSON; when set, merges the listed adapters (see below). |
+| `--settings`  | `~/.config/switchboard/dashboard.json` | Operator-model settings (see below); a missing file means defaults. |
+
+## Settings
+
+The operator model turns your focus and activity streams into "time this cost
+you" — the red half of the operator lane, the context-switch overhead, and the
+wall-clock the topline's **net agent hours** nets off. The thresholds it uses
+are judgement calls about how *you* work, not facts about the data, so they live
+in a file you own rather than in the frontend's source:
+
+```jsonc
+// ~/.config/switchboard/dashboard.json — every key optional, every value in ms
+{
+  "away_after_ms": 300000,      // 5m
+  "switch_recovery_ms": 90000,  // 90s
+  "switch_flicker_ms": 500,     // 0.5s
+  "min_engage_ms": 15000        // 15s
+}
+```
+
+| Key                  | Default | What it decides                                                                                                                                                                                              |
+| -------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `away_after_ms`      | `300000` (5m) | How long after your last keystroke or mouse move you still count as *at* a focused agent window. Reading a diff isn't idleness, so presence decays rather than blinking off — but a window left focused and untouched past this is you having **walked away**, and stops being charged as your time. Raise it if you read for long stretches; lower it if you leave sessions open when you go. |
+| `switch_recovery_ms` | `90000` (90s)  | How long re-acquiring context costs you after a context switch. Recovery windows are **unioned**, so a burst of switches inside one window costs one recovery, not one apiece.                        |
+| `switch_flicker_ms`  | `500` (0.5s)   | Minimum dwell for a focus arrival to count as a real switch at all. Below it, it's flicker (a notification, focus-follows-mouse) and is ignored by the count, the overlay, and the recovery charge alike. |
+| `min_engage_ms`      | `15000` (15s)  | Minimum focus dwell to count as attending. Separate from the flicker floor: passing through a window is a switch, but it isn't time spent working in it.                                              |
+
+Omitted keys keep their default and a missing file means "all defaults", so the
+file need only carry what you're changing. A non-positive value falls back to
+the default; a **malformed** file is a startup error rather than a silent
+default — a setting that didn't take should be loud. The values are served at
+`/api/settings` and fetched by the frontend before its first render; if that
+fetch fails the frontend uses the same built-in defaults, so an unreachable
+endpoint changes nothing.
 
 ## Data providers (adapters)
 
@@ -87,6 +121,11 @@ in one timeline and one cross-provider "agents aloft" count, each lane tagged
 with its provider (accent spine + legend chip). A provider that fails is recorded
 in the envelope's `provider_errors` rather than blanking the dashboard; only an
 all-providers-failed request is a `502`. See `examples/providers.json`.
+
+**Writing your own provider:** [`docs/provider-contract.md`](docs/provider-contract.md)
+is the full spec — the process contract, the envelope field by field with units,
+a minimum viable envelope to copy, what each optional field buys you in the UI,
+the suspect/ghost rules, and what the merge does to your output.
 
 ### Arachne provider (docker long-running sessions)
 
@@ -113,6 +152,14 @@ containers vanish on exit, it records its own time series and, on restart,
 reconciles against `docker ps` — closing sessions that ended while it was down at
 their last-seen time. Each running container is counted as one agent aloft for
 its lifetime (unattended auto mode), with subagent sub-bars layered on top.
+
+A session is one container **run**, not one branch. Arachne names a container
+after its worktree branch and the pump restarts that same name for each phase
+task, so a slug recurs through the day; the container id is what tells the runs
+apart, both between polls and across a recorder outage (it is persisted in
+`state.json`). Runs after the first take a `#N` suffix on their session id
+(`feat-f79`, `feat-f79#2`), which is what lets the dashboard — whose bars are
+keyed on session id — draw them as the separate sessions they are.
 
 ## Session summaries (`session-digest`)
 
@@ -198,12 +245,18 @@ interaction subagent sub-bars already have.
   `{available, mtime, age_seconds, stale, five_hour, seven_day, seven_day_opus}`.
   It never calls the OAuth endpoint. A missing file returns `200 {available:false}`
   and the UI falls back to its own recomputed cost.
+- **`GET /api/settings`** — returns the operator-model tunables
+  (`away_after_ms`, `switch_recovery_ms`, `switch_flicker_ms`, `min_engage_ms`)
+  loaded from `--settings`. Always `200`; an unconfigured server serves the
+  documented defaults, which are also the frontend's fallbacks.
 - Static assets are served from `/`. The UI also reads `?day`, `?since`, and
   `?until` from its own URL, so a window is shareable.
 
 ## Data contract
 
-The JSON shape and units are owned by Switchboard (`docs/history-schema.md`):
+The JSON shape and units are owned by Switchboard (`docs/history-schema.md`);
+[`docs/provider-contract.md`](docs/provider-contract.md) restates it as an
+implementer's spec for anyone writing a provider:
 
 - **Durations are nanoseconds**, **token fields are raw counts**, and **`cost_usd`
   is a float in dollars** recomputed by the producer from tokens × per-model price.
@@ -259,7 +312,9 @@ flags that shape instead of hiding it:
 
 The consequence for consumers: any "active" figure re-derived client-side by
 summing interval durations must clip each suspect lane at `suspect_since`, or it
-will disagree with the summary. `web/model.js` exposes `laneActiveMs` for that.
+will disagree with the summary. `web/model.js` exposes `clipSpanMs` for that: the
+single clip every re-derivation in the UI goes through. `laneActiveMs` is the
+ready-made helper for the common case, summing one lane's own intervals.
 Providers this repo compiles itself (arachne) run the same check with the caps in
 `internal/timeline/suspect.go`; a provider that omits the fields entirely is
 merged exactly as before, never silently clipped.

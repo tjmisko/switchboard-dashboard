@@ -23,9 +23,15 @@ func main() {
 	plan := flag.String("plan", DefaultPlanPath, "cached OAuth plan-usage file, read read-only for the utilization gauge")
 	summaries := flag.String("summaries", defaultSummariesDir(), "session-summary records written by session-digest; empty disables /api/summaries")
 	providers := flag.String("providers", "", "providers config JSON; when set, replaces the default single claude provider with a merged adapter set")
+	settingsPath := flag.String("settings", DefaultSettingsPath(), "operator-model settings JSON (away threshold, switch recovery); missing file means defaults")
 	flag.Parse()
 
-	srv := &Server{Ctl: *ctl, Dir: *dir, PlanPath: *plan, SummariesDir: *summaries}
+	settings, err := LoadSettings(*settingsPath)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+
+	srv := &Server{Ctl: *ctl, Dir: *dir, PlanPath: *plan, SummariesDir: *summaries, Settings: settings}
 	if *providers != "" {
 		cfg, err := provider.LoadConfig(*providers)
 		if err != nil {

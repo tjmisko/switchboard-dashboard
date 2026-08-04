@@ -39,8 +39,17 @@ func newMemHarness(t *testing.T, names [][]string) *memHarness {
 		history: filepath.Join(dir, "history.jsonl"),
 		now:     time.Date(2026, 7, 22, 3, 0, 0, 0, time.UTC),
 	}
+	// One container run across every poll: the same name always wearing the same
+	// id, so the restart check sees continuity and the cgroup fixture above stays
+	// the one being read.
+	running := make([][]Running, len(names))
+	for i, poll := range names {
+		for _, name := range poll {
+			running[i] = append(running[i], up(name, memProbeID))
+		}
+	}
 	h.fd = &fakeDocker{
-		names: names,
+		running: running,
 		inspect: map[string]Container{
 			"arachne-agent-feat-f71": {
 				Name: "arachne-agent-feat-f71", Slug: "feat-f71", ID: memProbeID,
@@ -248,7 +257,7 @@ func TestRecorder_shouldNotSampleAContainerWithNoCgroup(t *testing.T) {
 		now:     time.Date(2026, 7, 22, 3, 0, 0, 0, time.UTC),
 	}
 	fd := &fakeDocker{
-		names: [][]string{{"arachne-agent-feat-f71"}, {"arachne-agent-feat-f71"}},
+		running: [][]Running{{up("arachne-agent-feat-f71", memProbeID)}, {up("arachne-agent-feat-f71", memProbeID)}},
 		inspect: map[string]Container{
 			"arachne-agent-feat-f71": {Name: "arachne-agent-feat-f71", Slug: "feat-f71", ID: memProbeID},
 		},
@@ -304,7 +313,7 @@ func TestRecorder_shouldNotReportAnOOMKillThatHappenedWhileItWasDown(t *testing.
 
 	now := time.Date(2026, 7, 22, 3, 0, 0, 0, time.UTC)
 	fd := &fakeDocker{
-		names: [][]string{{"arachne-agent-feat-f71"}, {"arachne-agent-feat-f71"}},
+		running: [][]Running{{up("arachne-agent-feat-f71", memProbeID)}, {up("arachne-agent-feat-f71", memProbeID)}},
 		inspect: map[string]Container{
 			"arachne-agent-feat-f71": {Name: "arachne-agent-feat-f71", Slug: "feat-f71", ID: memProbeID},
 		},
@@ -361,7 +370,7 @@ func TestRecorder_shouldReportAKillThatArrivesAfterARestartPrimedTheCounter(t *t
 
 	now := time.Date(2026, 7, 22, 3, 0, 0, 0, time.UTC)
 	fd := &fakeDocker{
-		names: [][]string{{"arachne-agent-feat-f71"}, {"arachne-agent-feat-f71"}},
+		running: [][]Running{{up("arachne-agent-feat-f71", memProbeID)}, {up("arachne-agent-feat-f71", memProbeID)}},
 		inspect: map[string]Container{
 			"arachne-agent-feat-f71": {Name: "arachne-agent-feat-f71", Slug: "feat-f71", ID: memProbeID},
 		},

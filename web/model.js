@@ -215,29 +215,101 @@
   // never double-counted. A parent that keeps working WHILE a background subagent
   // runs counts as BOTH — correctly, since they are two independent work streams.
   // This is the force-multiplier numerator, measured instantaneously.
+  //
+  // Measuring it instantaneously is also why this series and the attention card
+  // can disagree. timeline.Merge counts working||delegating toward
+  // attention_union, matching the producer's isActive, and workIntervalsMs was
+  // deliberately NOT widened to match: crediting a delegating parent alongside
+  // the subagent it waits on reads here as two agents aloft, while a union is
+  // free to count both because it cannot double-count. The residual is real —
+  // for a LEGACY stream carrying delegating time that no subagent span covers,
+  // the chart's activeMs reads LOWER than the card's attention_union — but it
+  // is legacy-only, since modern producers emit dormant. Revisit only if the
+  // two figures visibly disagree on a real day.
   // -------------------------------------------------------------------------
 
-  // workIntervalsMs collects the aloft spans as epoch-ms [start, end] pairs:
-  // every 'working' status interval plus every non-phantom subagent span across
-  // all lanes, each held to its lane's evidence bound (see clipSpanMs). Pure;
-  // reads only lane.intervals[].status/start/end, lane.subagents[], and the
-  // lane's suspect fields.
-  function workIntervalsMs(lanes) {
+  // aloftSpans collects the aloft spans as {s, e, open}: every 'working' status
+  // interval plus every non-phantom subagent span across all lanes, each held to
+  // its lane's evidence bound (see clipSpanMs).
+  //
+  // `open` marks a span its lane has not yet superseded — it runs to the lane's
+  // newest sample, so as far as this lane has reported, it is STILL RUNNING. A
+  // working interval followed by an idle one is closed; the last working
+  // interval of a lane that is still working is open, because the producer ends
+  // an in-flight interval at the instant it sampled. Callers that only want the
+  // geometry use workIntervalsMs; the live-tail alignment needs the flag.
+  //
+  // Pure; reads only lane.intervals[].status/start/end, lane.subagents[], and
+  // the lane's suspect fields.
+  function aloftSpans(lanes) {
     const out = [];
     for (const lane of lanes || []) {
       const cut = suspectSinceMs(lane);
+      // the lane's newest observed instant — whatever is still in flight ends
+      // exactly here, because that is when the producer last looked.
+      let laneLast = -Infinity;
+      for (const iv of lane.intervals || []) {
+        const e = Date.parse(iv.end);
+        if (isFinite(e) && e > laneLast) laneLast = e;
+      }
       for (const iv of lane.intervals || []) {
         if (iv.status !== "working") continue;
         const span = clipSpanMs(Date.parse(iv.start), Date.parse(iv.end), cut);
-        if (span) out.push(span);
+        if (span) out.push({ s: span[0], e: span[1], open: span[1] >= laneLast });
       }
       for (const sa of lane.subagents || []) {
         if (sa.suspect) continue; // a phantom span is drawn, never credited
         const span = clipSpanMs(Date.parse(sa.start), Date.parse(sa.end), cut);
-        if (span) out.push(span);
+        if (span) out.push({ s: span[0], e: span[1], open: span[1] >= laneLast });
       }
     }
     return out;
+  }
+
+  // workIntervalsMs is aloftSpans as plain epoch-ms [start, end] pairs — the
+  // input concurrencyProfile takes.
+  function workIntervalsMs(lanes) {
+    return aloftSpans(lanes).map((x) => [x.s, x.e]);
+  }
+
+  // LIVE_TAIL_MS: how recent a lane's newest sample must be for its open spans
+  // to count as still running. Providers sample on their own cadence and the
+  // frontend re-polls every few seconds, so a live lane's sample is seconds old;
+  // a minute of slack absorbs a slow provider without ever calling a stalled
+  // feed live.
+  const LIVE_TAIL_MS = 60 * 1000;
+
+  // alignLiveTail squares off the trailing edge of a LIVE window's aloft spans.
+  //
+  // Each provider stamps its open spans with the moment IT last sampled, and
+  // those samples are staggered by tens of seconds, so a plain sweep decays
+  // step-by-step to zero at the right edge — drawn, it reads as the agents
+  // landing one after another when in fact they are all still up. Every span
+  // still open as of the newest sample is therefore extended to that sample, so
+  // the tail is one flat run at the live level.
+  //
+  // Returns {intervals, tail}: `intervals` are ms-pairs for concurrencyProfile
+  // (the spans untouched when there is no live tail), and `tail` is {t, n} —
+  // n agents aloft as of t — or null for a historical window, a stale feed, or
+  // nothing running.
+  //
+  // Pure; `nowMs` and `isLiveWindow` are passed in rather than read from the
+  // clock and the day picker.
+  function alignLiveTail(spans, nowMs, isLiveWindow) {
+    const all = spans || [];
+    const plain = all.map((x) => [x.s, x.e]);
+    if (!isLiveWindow) return { intervals: plain, tail: null };
+
+    const fresh = (x) => x.open && nowMs - x.e <= LIVE_TAIL_MS;
+    let t = -Infinity;
+    for (const x of all) if (fresh(x) && x.e > t) t = x.e;
+    if (!isFinite(t)) return { intervals: plain, tail: null };
+
+    const intervals = all.map((x) => (fresh(x) ? [x.s, Math.max(x.e, t)] : [x.s, x.e]));
+    // the level the step function holds at t — what the tail marker sits on
+    let n = 0;
+    for (const [s, e] of intervals) if (s <= t && e >= t) n++;
+    return n > 0 ? { intervals, tail: { t, n } } : { intervals: plain, tail: null };
   }
 
   // concurrencyProfile sweeps aloft intervals into the instantaneous step
@@ -719,6 +791,29 @@
     return "";
   }
 
+  // summaryCardHasContent gates the pinned card (app.js sessionPopoutHTML): the
+  // bar's click is a no-op unless the card would show something the hover did
+  // not. That is exactly summaryBodyHTML — the task bullets and the framing
+  // prose, both of which the tooltip withholds on purpose so that they stay the
+  // reason to click. A lone task counts: it renders a bullet the hover never
+  // showed.
+  //
+  // A record with neither adds only the digest's archival name and the id
+  // footer over what the tooltip already printed, so it pins nothing. That does
+  // cost something real — the archival name is not shown anywhere else, since
+  // the tooltip heads with the /name slug of the span under the cursor — and it
+  // is the accepted price. A bar that advertises nothing and then pins a card
+  // anyway is the worse failure, and the alternative (advertise the name, so the
+  // click is honest) buys a hint on records whose card is one line of text.
+  //
+  // Deliberately the same predicate as summaryHintText's: hint-empty,
+  // body-empty and card-empty are one condition, not three, so nothing is ever
+  // clickable with nothing behind it. model.test.js pins that as an invariant
+  // across every shape of record.
+  function summaryCardHasContent(summary) {
+    return Boolean(summary) && summaryBodyHTML(summary) !== "";
+  }
+
   // normalizeView validates a chart-view name, resolving "bars" — the sessions
   // view's pre-rename spelling — so persisted `sb-view` choices and old ?view=
   // links keep working. Returns null for anything that isn't a view, which both
@@ -729,11 +824,42 @@
     return null;
   }
 
+  // scaleGeometry resolves the footer's px/hour setting against the window on
+  // screen. The plot never draws narrower than its container — a short window
+  // would otherwise shrink into a corner and leave dead space — so the density
+  // actually drawn is the setting FLOORED at "the window exactly fills the
+  // width" (fit). The two are not the same number, and the gap is the whole
+  // reason this is a shared function: a 100-minute window in a 1100px plot fits
+  // at ~670 px/h, so every setting below that draws identically. Reporting or
+  // stepping the raw setting there moves a label while the chart holds still.
+  // Callers read `effective` for the readout, step off `effective`, and bound
+  // the buttons with canZoomIn/canZoomOut.
+  function scaleGeometry(spanMs, fitPlotW, pxPerHour, min, max) {
+    const hours = spanMs > 0 ? spanMs / 3600e3 : 0;
+    // a zero-length window has no density to speak of: no floor, draw to fit
+    const fit = hours > 0 ? fitPlotW / hours : 0;
+    const effective = Math.max(pxPerHour, fit);
+    return {
+      plotW: Math.max(fitPlotW, hours * pxPerHour),
+      fit,
+      effective,
+      // a step that lands under the floor redraws the same pixels, so the
+      // button that can only do that is spent — floor and ceiling both bound.
+      canZoomOut: effective > Math.max(min, fit) + 0.5,
+      canZoomIn: effective < max - 0.5,
+      // at the floor the chart is showing the whole window with nothing to
+      // scroll; the readout is fit's number, not the setting's.
+      atFit: fit > 0 && pxPerHour <= fit,
+    };
+  }
+
   return {
+    scaleGeometry,
     laneIdentity, rawSessionId, leadLabel, nameSegments, buildBar, buildBars,
-    spanInefficiency, switchArrivals, packLanes, workIntervalsMs, concurrencyProfile,
+    spanInefficiency, switchArrivals, packLanes, aloftSpans, workIntervalsMs, concurrencyProfile,
+    alignLiveTail,
     projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs, suspectTailMs,
     fmtBytes, spawnedBytes, laneMemory, memoryWindow, pressureWindow,
-    summaryTasks, summaryBodyHTML, summaryHintText, normalizeView,
+    summaryTasks, summaryBodyHTML, summaryHintText, summaryCardHasContent, normalizeView,
   };
 });

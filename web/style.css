@@ -220,7 +220,7 @@ button.ghost { background: transparent; color: var(--fg-muted); font-size: 12px;
 main { padding: 16px 18px 36px; }
 
 /* ---------- topline (dominant figures, top-left) ---------- */
-.topline { display: flex; align-items: flex-end; gap: 32px; margin: 2px 2px 18px; }
+.topline { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 14px 32px; margin: 2px 2px 18px; }
 .topline .th-val { font-family: var(--mono); font-size: 42px; font-weight: 700; letter-spacing: -1.2px; line-height: 1; }
 .topline .th-val.green { color: var(--c-working); }
 .topline .th-key { font-size: 11px; color: var(--fg-muted); margin-top: 7px; text-transform: uppercase; letter-spacing: 0.7px; }
@@ -702,6 +702,9 @@ main { padding: 16px 18px 36px; }
   background: rgba(88, 166, 255, 0.08); border: 1px solid var(--border-soft);
   border-radius: 5px; padding: 3px 6px; white-space: pre-wrap;
 }
+/* the same formula with this window's numbers substituted in, under the symbolic
+   form it instantiates — dimmed so the formula still reads first */
+.tooltip .t-subst { display: block; margin-top: 3px; color: var(--fg-muted); }
 .tooltip .t-result { margin-top: 5px; font-family: var(--mono); color: var(--fg-muted); }
 .tooltip .t-result b { color: var(--fg); font-weight: 700; }
 .tooltip .t-why { margin-top: 6px; color: var(--fg-muted); line-height: 1.45; }
@@ -746,7 +749,11 @@ main { padding: 16px 18px 36px; }
   background: var(--bg-elev-2); border: none; color: var(--fg-dim);
 }
 .popout .po-close:hover { color: var(--fg); }
-.popout .po-head { font-weight: 700; font-family: var(--mono); padding-right: 20px; }
+/* no padding-right to clear that button: a sticky float still sits in flow, so
+   .po-close already takes its own width plus 6px out of the head's line box.
+   Padding would also be the wrong tool — it shortens EVERY line of a head that
+   wraps, where the float shortens only the lines it actually intersects */
+.popout .po-head { font-weight: 700; font-family: var(--mono); }
 .popout .po-desc { color: var(--fg); margin-top: 8px; line-height: 1.4; }
 .popout .po-row { color: var(--fg-muted); margin-top: 6px; font-family: var(--mono); font-size: 12px; }
 .popout .po-row b { color: var(--fg); }
