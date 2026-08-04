@@ -228,27 +228,88 @@
   // two figures visibly disagree on a real day.
   // -------------------------------------------------------------------------
 
-  // workIntervalsMs collects the aloft spans as epoch-ms [start, end] pairs:
-  // every 'working' status interval plus every non-phantom subagent span across
-  // all lanes, each held to its lane's evidence bound (see clipSpanMs). Pure;
-  // reads only lane.intervals[].status/start/end, lane.subagents[], and the
-  // lane's suspect fields.
-  function workIntervalsMs(lanes) {
+  // aloftSpans collects the aloft spans as {s, e, open}: every 'working' status
+  // interval plus every non-phantom subagent span across all lanes, each held to
+  // its lane's evidence bound (see clipSpanMs).
+  //
+  // `open` marks a span its lane has not yet superseded — it runs to the lane's
+  // newest sample, so as far as this lane has reported, it is STILL RUNNING. A
+  // working interval followed by an idle one is closed; the last working
+  // interval of a lane that is still working is open, because the producer ends
+  // an in-flight interval at the instant it sampled. Callers that only want the
+  // geometry use workIntervalsMs; the live-tail alignment needs the flag.
+  //
+  // Pure; reads only lane.intervals[].status/start/end, lane.subagents[], and
+  // the lane's suspect fields.
+  function aloftSpans(lanes) {
     const out = [];
     for (const lane of lanes || []) {
       const cut = suspectSinceMs(lane);
+      // the lane's newest observed instant — whatever is still in flight ends
+      // exactly here, because that is when the producer last looked.
+      let laneLast = -Infinity;
+      for (const iv of lane.intervals || []) {
+        const e = Date.parse(iv.end);
+        if (isFinite(e) && e > laneLast) laneLast = e;
+      }
       for (const iv of lane.intervals || []) {
         if (iv.status !== "working") continue;
         const span = clipSpanMs(Date.parse(iv.start), Date.parse(iv.end), cut);
-        if (span) out.push(span);
+        if (span) out.push({ s: span[0], e: span[1], open: span[1] >= laneLast });
       }
       for (const sa of lane.subagents || []) {
         if (sa.suspect) continue; // a phantom span is drawn, never credited
         const span = clipSpanMs(Date.parse(sa.start), Date.parse(sa.end), cut);
-        if (span) out.push(span);
+        if (span) out.push({ s: span[0], e: span[1], open: span[1] >= laneLast });
       }
     }
     return out;
+  }
+
+  // workIntervalsMs is aloftSpans as plain epoch-ms [start, end] pairs — the
+  // input concurrencyProfile takes.
+  function workIntervalsMs(lanes) {
+    return aloftSpans(lanes).map((x) => [x.s, x.e]);
+  }
+
+  // LIVE_TAIL_MS: how recent a lane's newest sample must be for its open spans
+  // to count as still running. Providers sample on their own cadence and the
+  // frontend re-polls every few seconds, so a live lane's sample is seconds old;
+  // a minute of slack absorbs a slow provider without ever calling a stalled
+  // feed live.
+  const LIVE_TAIL_MS = 60 * 1000;
+
+  // alignLiveTail squares off the trailing edge of a LIVE window's aloft spans.
+  //
+  // Each provider stamps its open spans with the moment IT last sampled, and
+  // those samples are staggered by tens of seconds, so a plain sweep decays
+  // step-by-step to zero at the right edge — drawn, it reads as the agents
+  // landing one after another when in fact they are all still up. Every span
+  // still open as of the newest sample is therefore extended to that sample, so
+  // the tail is one flat run at the live level.
+  //
+  // Returns {intervals, tail}: `intervals` are ms-pairs for concurrencyProfile
+  // (the spans untouched when there is no live tail), and `tail` is {t, n} —
+  // n agents aloft as of t — or null for a historical window, a stale feed, or
+  // nothing running.
+  //
+  // Pure; `nowMs` and `isLiveWindow` are passed in rather than read from the
+  // clock and the day picker.
+  function alignLiveTail(spans, nowMs, isLiveWindow) {
+    const all = spans || [];
+    const plain = all.map((x) => [x.s, x.e]);
+    if (!isLiveWindow) return { intervals: plain, tail: null };
+
+    const fresh = (x) => x.open && nowMs - x.e <= LIVE_TAIL_MS;
+    let t = -Infinity;
+    for (const x of all) if (fresh(x) && x.e > t) t = x.e;
+    if (!isFinite(t)) return { intervals: plain, tail: null };
+
+    const intervals = all.map((x) => (fresh(x) ? [x.s, Math.max(x.e, t)] : [x.s, x.e]));
+    // the level the step function holds at t — what the tail marker sits on
+    let n = 0;
+    for (const [s, e] of intervals) if (s <= t && e >= t) n++;
+    return n > 0 ? { intervals, tail: { t, n } } : { intervals: plain, tail: null };
   }
 
   // concurrencyProfile sweeps aloft intervals into the instantaneous step
@@ -512,7 +573,8 @@
 
   return {
     laneIdentity, rawSessionId, leadLabel, nameSegments, buildBar, buildBars,
-    spanInefficiency, switchArrivals, packLanes, workIntervalsMs, concurrencyProfile,
+    spanInefficiency, switchArrivals, packLanes, aloftSpans, workIntervalsMs, concurrencyProfile,
+    alignLiveTail,
     projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs, suspectTailMs,
     summaryTasks, summaryBodyHTML, summaryHintText, summaryCardHasContent, normalizeView,
   };

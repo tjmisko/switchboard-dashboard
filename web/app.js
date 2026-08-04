@@ -410,6 +410,13 @@ function setDot(kind) {
   el.liveDot.className = "dot " + kind;
 }
 
+// isLiveWindow: is the day picker sitting on today? Only then can the timeline's
+// trailing edge be "now" — every other day is a closed window whose end really
+// is the end of the work.
+function isLiveWindow() {
+  return !el.day.value || el.day.value === todayLocal();
+}
+
 // ---------------------------------------------------------------------------
 // operator free-time (derived from focus / context switches)
 // ---------------------------------------------------------------------------
@@ -1426,8 +1433,17 @@ function renderConcurrencyChart(data) {
   const canvas = el.canvas;
   el.empty.hidden = true; // the canvas draws its own empty state
   const lanes = renderableLanes(data.lanes);
-  const prof = concurrencyProfile(workIntervalsMs(lanes));
-  const pts = prof.points;
+  const spans = aloftSpans(lanes);
+  // prof is the window's true accounting (peak / average / active time). The
+  // DRAWN profile may differ at the trailing edge: on a live window the spans
+  // still in flight are squared off to the newest sample (alignLiveTail), so the
+  // staggered per-provider sample times don't paint a landing that never
+  // happened. Stats stay on the unaligned figures.
+  const prof = concurrencyProfile(spans.map((x) => [x.s, x.e]));
+  const aligned = alignLiveTail(spans, Date.now(), isLiveWindow());
+  const live = aligned.tail;
+  const drawProf = live ? concurrencyProfile(aligned.intervals) : prof;
+  const pts = drawProf.points;
 
   const C = {
     inst: cssVar("--c-working", "#3fb950"),
@@ -1436,6 +1452,7 @@ function renderConcurrencyChart(data) {
     grid: cssVar("--border-soft", "#21262d"),
     axis: cssVar("--border", "#2b3240"),
     text: cssVar("--fg-dim", "#6e7681"),
+    bg: cssVar("--bg", "#0d1117"),
   };
 
   // window + horizontal scale (reuse the zoom density + scroll like the bars)
@@ -1448,7 +1465,9 @@ function renderConcurrencyChart(data) {
   const W = CGEO.LEFT + plotW + CGEO.RIGHT;
   const H = CGEO.HEIGHT;
   const plotTop = CGEO.TOP, plotBottom = H - CGEO.BOTTOM, plotH = plotBottom - plotTop;
-  const yTop = Math.max(1, prof.maxN);
+  // the axis has to hold whichever profile peaks higher: squaring off the tail
+  // can overlap spans that the raw samples showed one after another.
+  const yTop = Math.max(1, prof.maxN, drawProf.maxN);
 
   const X = (t) => CGEO.LEFT + ((t - t0) / span) * plotW;
   const Y = (n) => plotBottom - (n / yTop) * plotH;
@@ -1482,7 +1501,9 @@ function renderConcurrencyChart(data) {
     return lo;
   }
   function levelAt(t) {
-    if (t >= lastT) return 0; // after the final drop back to 0
+    // past the final breakpoint: 0, unless that breakpoint is a live tail — then
+    // those agents are still up, and the readout should say so.
+    if (t >= lastT) return live ? live.n : 0;
     const k = segAt(t);
     return k < 0 ? 0 : pts[k].n;
   }
@@ -1561,6 +1582,9 @@ function renderConcurrencyChart(data) {
       for (let k = 1; k < pts.length; k++) {
         const xx = X(pts[k].t);
         ctx.lineTo(xx, Y(pts[k - 1].n)); // hold previous level across the segment
+        // a live tail's final "step" is the sample ending, not a landing — the
+        // line runs out at its current level and the marker below caps it.
+        if (live && k === pts.length - 1) break;
         ctx.lineTo(xx, Y(pts[k].n));     // step to the new level
       }
     };
@@ -1574,6 +1598,26 @@ function renderConcurrencyChart(data) {
     ctx.beginPath();
     stepPath();
     ctx.strokeStyle = C.inst; ctx.lineWidth = 1.4; ctx.lineJoin = "round"; ctx.stroke();
+
+    // live tail cap: a dot at the current level with the count beside it. The
+    // dot carries a background-colored ring so it reads as a terminator rather
+    // than a kink in the step, and the count is nudged to stay on-canvas.
+    if (live) {
+      const lx = X(live.t), ly = Y(live.n);
+      ctx.beginPath();
+      ctx.arc(lx, ly, 4, 0, 2 * Math.PI);
+      ctx.fillStyle = C.inst; ctx.fill();
+      ctx.strokeStyle = C.bg; ctx.lineWidth = 1.5; ctx.stroke();
+
+      const label = String(live.n);
+      ctx.font = "700 13px " + MONO;
+      const halfW = ctx.measureText(label).width / 2;
+      const above = ly - 10 >= plotTop + 12; // no room above at the peak → sit below
+      ctx.fillStyle = C.inst;
+      ctx.textAlign = "center";
+      ctx.textBaseline = above ? "bottom" : "top";
+      ctx.fillText(label, Math.min(Math.max(lx, CGEO.LEFT + halfW + 2), W - halfW - 2), above ? ly - 9 : ly + 9);
+    }
 
     // smoothed 30-min rolling average (sampled per pixel)
     if (smoothOn) {

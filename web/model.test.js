@@ -9,7 +9,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   laneIdentity, rawSessionId, leadLabel, nameSegments, buildBars, spanInefficiency, switchArrivals, packLanes,
-  workIntervalsMs, concurrencyProfile, projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs,
+  aloftSpans, workIntervalsMs, concurrencyProfile, alignLiveTail,
+  projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs,
   suspectTailMs, normalizeView,
   summaryTasks, summaryBodyHTML, summaryHintText, summaryCardHasContent,
 } = require("./model.js");
@@ -346,6 +347,93 @@ test("concurrencyProfile handles no intervals: empty points, null average", () =
   assert.equal(prof.maxN, 0);
   assert.equal(prof.activeMs, 0);
   assert.equal(prof.avgActive, null);
+});
+
+// ---------------------------------------------------------------------------
+// live tail: which aloft spans are still in flight, and squaring them off
+// ---------------------------------------------------------------------------
+
+test("aloftSpans should mark a lane's last working interval open when nothing superseded it", () => {
+  const lanes = [{ intervals: [interval("idle", ms(0), ms(5)), interval("working", ms(5), ms(20))] }];
+  const spans = aloftSpans(lanes);
+  assert.equal(spans.length, 1);
+  assert.equal(spans[0].open, true, "the lane has reported nothing after it");
+});
+
+test("aloftSpans should mark a working interval closed once the lane reports a later status", () => {
+  const lanes = [{ intervals: [interval("working", ms(0), ms(10)), interval("idle", ms(10), ms(20))] }];
+  const spans = aloftSpans(lanes);
+  assert.equal(spans.length, 1);
+  assert.equal(spans[0].open, false, "going idle is the agent landing, not a stale sample");
+});
+
+test("aloftSpans should mark a subagent span open only when it runs to the lane's newest sample", () => {
+  const lanes = [{
+    intervals: [interval("delegating", ms(0), ms(20))],
+    subagents: [
+      { start: new Date(ms(0)).toISOString(), end: new Date(ms(12)).toISOString() },  // finished
+      { start: new Date(ms(5)).toISOString(), end: new Date(ms(20)).toISOString() },  // still running
+    ],
+  }];
+  const spans = aloftSpans(lanes);
+  assert.deepEqual(spans.map((x) => x.open), [false, true]);
+});
+
+test("alignLiveTail should extend every still-open span to the newest sample", () => {
+  // three streams, sampled 20s / 10s / 2s before now — all still running. The
+  // staggered ends would decay 3 -> 2 -> 1 -> 0 at the right edge.
+  const now = ms(60);
+  const spans = [
+    { s: ms(0), e: now - 20000, open: true },
+    { s: ms(10), e: now - 10000, open: true },
+    { s: ms(20), e: now - 2000, open: true },
+  ];
+  const { intervals, tail } = alignLiveTail(spans, now, true);
+  assert.deepEqual(tail, { t: now - 2000, n: 3 }, "all three are aloft at the newest sample");
+  assert.deepEqual(intervals.map((iv) => iv[1]), [now - 2000, now - 2000, now - 2000]);
+});
+
+test("alignLiveTail should leave closed spans where they ended", () => {
+  const now = ms(60);
+  const spans = [
+    { s: ms(0), e: ms(30), open: false },        // landed half an hour ago
+    { s: ms(40), e: now - 3000, open: true },    // still up
+  ];
+  const { intervals, tail } = alignLiveTail(spans, now, true);
+  assert.deepEqual(intervals[0], [ms(0), ms(30)], "a finished span is not resurrected");
+  assert.equal(tail.n, 1, "only the open stream counts as aloft");
+});
+
+test("alignLiveTail should return no tail for a historical window", () => {
+  const now = ms(60);
+  const spans = [{ s: ms(0), e: now - 3000, open: true }];
+  const { intervals, tail } = alignLiveTail(spans, now, false);
+  assert.equal(tail, null, "a closed day's drop to zero is real");
+  assert.deepEqual(intervals, [[ms(0), now - 3000]], "spans pass through untouched");
+});
+
+test("alignLiveTail should return no tail when the feed has gone stale", () => {
+  const now = ms(60);
+  const spans = [{ s: ms(0), e: now - 10 * 60000, open: true }];
+  assert.equal(alignLiveTail(spans, now, true).tail, null, "10-minute-old sample is not live");
+});
+
+test("alignLiveTail should return no tail when nothing is open", () => {
+  const now = ms(60);
+  const spans = [{ s: ms(0), e: now - 3000, open: false }];
+  assert.equal(alignLiveTail(spans, now, true).tail, null);
+  assert.equal(alignLiveTail([], now, true).tail, null);
+});
+
+test("alignLiveTail should count only the streams covering the newest sample", () => {
+  // one stream went stale 5 minutes ago (open, but its lane stopped reporting)
+  // while another is live: the marker reads 1, not 2.
+  const now = ms(60);
+  const spans = [
+    { s: ms(0), e: now - 5 * 60000, open: true },
+    { s: ms(50), e: now - 1000, open: true },
+  ];
+  assert.deepEqual(alignLiveTail(spans, now, true).tail, { t: now - 1000, n: 1 });
 });
 
 test("concurrencyProfile merges simultaneous starts into one point at the shared instant", () => {
