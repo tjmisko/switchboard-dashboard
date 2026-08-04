@@ -114,6 +114,14 @@ reconciles against `docker ps` — closing sessions that ended while it was down
 their last-seen time. Each running container is counted as one agent aloft for
 its lifetime (unattended auto mode), with subagent sub-bars layered on top.
 
+A session is one container **run**, not one branch. Arachne names a container
+after its worktree branch and the pump restarts that same name for each phase
+task, so a slug recurs through the day; the container id is what tells the runs
+apart, both between polls and across a recorder outage (it is persisted in
+`state.json`). Runs after the first take a `#N` suffix on their session id
+(`feat-f79`, `feat-f79#2`), which is what lets the dashboard — whose bars are
+keyed on session id — draw them as the separate sessions they are.
+
 ## Session summaries (`session-digest`)
 
 Subagents carry an authored identity from birth — the parent model writes a

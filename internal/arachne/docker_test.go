@@ -24,24 +24,24 @@ func (f fakeRunner) Run(ctx context.Context, args ...string) ([]byte, error) {
 	return nil, fmt.Errorf("no canned output for %v", args)
 }
 
-func TestClient_ListRunningNames_shouldFilterToArachnePrefix(t *testing.T) {
+func TestClient_ListRunning_shouldFilterToArachnePrefixAndCarryContainerIDs(t *testing.T) {
 	r := fakeRunner{outputs: map[string][]byte{
-		"ps": []byte("arachne-agent-feat-f71\narachne-agent\nsomething-else\n\n"),
+		"ps": []byte("abc123\tarachne-agent-feat-f71\ndef456\tarachne-agent\n789xyz\tsomething-else\n\n"),
 	}}
 	c := &Client{Runner: r}
-	names, err := c.ListRunningNames(context.Background())
+	running, err := c.ListRunning(context.Background())
 	if err != nil {
-		t.Fatalf("ListRunningNames: %v", err)
+		t.Fatalf("ListRunning: %v", err)
 	}
-	if len(names) != 2 {
-		t.Fatalf("names = %v, want the slugged + bare arachne-agent (something-else filtered)", names)
+	if len(running) != 2 {
+		t.Fatalf("running = %v, want the slugged + bare arachne-agent (something-else filtered)", running)
 	}
-	set := map[string]bool{}
-	for _, n := range names {
-		set[n] = true
+	byName := map[string]string{}
+	for _, rc := range running {
+		byName[rc.Name] = rc.ID
 	}
-	if !set["arachne-agent-feat-f71"] || !set["arachne-agent"] {
-		t.Fatalf("expected both arachne containers, got %v", names)
+	if byName["arachne-agent-feat-f71"] != "abc123" || byName["arachne-agent"] != "def456" {
+		t.Fatalf("expected both arachne containers with their ids, got %v", byName)
 	}
 }
 

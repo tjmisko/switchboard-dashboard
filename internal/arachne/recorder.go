@@ -11,7 +11,7 @@ import (
 
 // DockerClient is the docker surface the recorder needs (satisfied by *Client).
 type DockerClient interface {
-	ListRunningNames(ctx context.Context) ([]string, error)
+	ListRunning(ctx context.Context) ([]Running, error)
 	Inspect(ctx context.Context, name string) (Container, error)
 }
 
@@ -41,11 +41,12 @@ type Recorder struct {
 }
 
 type liveSession struct {
-	container Container
-	lastSeen  string
-	logOffset int64
-	openSubs  map[string]SubagentSpawn // tool_use_id -> Task spawn still running
-	usage     Usage
+	container   Container
+	containerID string // docker id, so a name reused by the next run is not mistaken for this one
+	lastSeen    string
+	logOffset   int64
+	openSubs    map[string]SubagentSpawn // tool_use_id -> Task spawn still running
+	usage       Usage
 }
 
 // NewRecorder builds a Recorder from Config.
@@ -111,51 +112,46 @@ func (r *Recorder) reconcile(ctx context.Context) error {
 	open := Reconstruct(events)
 	state := loadState(r.statePath)
 
-	names, err := r.docker.ListRunningNames(ctx)
+	running, err := r.docker.ListRunning(ctx)
 	if err != nil {
 		return err
 	}
-	liveSet := map[string]string{} // slug -> name
-	for _, n := range names {
-		liveSet[SlugOf(n)] = n
+	liveSet := map[string]Running{} // slug -> container
+	for _, rc := range running {
+		liveSet[SlugOf(rc.Name)] = rc
 	}
 	nowTS := r.nowTS()
 
-	// Close sessions that ended while we were down.
+	// Close sessions that ended while we were down. A slug running again under a
+	// NEW container id ended too: the pump started the next phase task while we
+	// were not watching, and only the id can say so — the name is identical
+	// either way. Dropping it from `open` leaves the live container to the first
+	// tick, which records it as the new session it is.
 	for slug, os_ := range open {
-		if _, stillLive := liveSet[slug]; stillLive {
+		rc, stillLive := liveSet[slug]
+		if stillLive && !restarted(state, slug, rc.ID) {
 			continue
 		}
-		end := os_.LastTS
-		if state != nil {
-			if ss, ok := state.Sessions[slug]; ok && ss.LastSeen > end {
-				end = ss.LastSeen
-			}
-		}
-		if end == "" {
-			end = nowTS
-		}
-		for id := range os_.OpenSubagents {
-			_ = r.writer.Append(Event{Type: EventSubagentStop, TS: nowTS, SessionID: slug, ToolUseID: id, End: end})
-		}
-		_ = r.writer.Append(Event{Type: EventSessionEnd, TS: nowTS, SessionID: slug, End: end, Reason: ReasonInferred})
+		r.closeFromHistory(slug, os_, state, nowTS)
+		delete(open, slug)
 	}
 
 	// Resume sessions still running.
-	for slug, name := range liveSet {
+	for slug, rc := range liveSet {
 		os_, wasOpen := open[slug]
 		if !wasOpen {
 			continue // handled as new by the first tick
 		}
-		c, err := r.docker.Inspect(ctx, name)
+		c, err := r.docker.Inspect(ctx, rc.Name)
 		if err != nil {
 			continue
 		}
 		ls := &liveSession{
-			container: c,
-			lastSeen:  os_.LastTS,
-			openSubs:  map[string]SubagentSpawn{},
-			usage:     os_.Usage,
+			container:   c,
+			containerID: rc.ID,
+			lastSeen:    os_.LastTS,
+			openSubs:    map[string]SubagentSpawn{},
+			usage:       os_.Usage,
 		}
 		// Restore open subagents from history.
 		for id, ev := range os_.OpenSubagents {
@@ -183,24 +179,33 @@ func (r *Recorder) reconcile(ctx context.Context) error {
 // tick performs one poll: detect new/gone containers and advance each live
 // session's log.
 func (r *Recorder) tick(ctx context.Context) error {
-	names, err := r.docker.ListRunningNames(ctx)
+	running, err := r.docker.ListRunning(ctx)
 	if err != nil {
 		return err
 	}
 	nowTS := r.nowTS()
-	curr := map[string]string{}
-	for _, n := range names {
-		curr[SlugOf(n)] = n
+	curr := map[string]Running{}
+	for _, rc := range running {
+		curr[SlugOf(rc.Name)] = rc
 	}
 
-	// New containers.
-	for slug, name := range curr {
-		if _, ok := r.live[slug]; ok {
+	// New containers — including one that has taken over a name we are already
+	// tracking. A restart landing between two polls shows up only as a changed
+	// container id; on the name alone the pump's next phase task would inherit
+	// the last one's session, and its freshly truncated log would be read at the
+	// dead run's offset. Inspect first, so a transient docker failure leaves the
+	// old run open for the next tick instead of closing it for nothing.
+	for slug, rc := range curr {
+		ls, tracked := r.live[slug]
+		if tracked && ls.containerID == rc.ID {
 			continue
 		}
-		c, err := r.docker.Inspect(ctx, name)
+		c, err := r.docker.Inspect(ctx, rc.Name)
 		if err != nil {
 			continue // try again next tick
+		}
+		if tracked {
+			r.closeLive(slug, ls, nowTS)
 		}
 		start := c.StartedAt
 		if start == "" {
@@ -211,12 +216,12 @@ func (r *Recorder) tick(ctx context.Context) error {
 			project = filepath.Base(c.RepoRoot)
 		}
 		_ = r.writer.Append(Event{
-			Type: EventSessionStart, TS: nowTS, SessionID: slug, Container: name,
+			Type: EventSessionStart, TS: nowTS, SessionID: slug, Container: rc.Name,
 			Agent: c.Agent, Project: project, ProjectFull: project,
 			TaskID: c.TaskID, Phase: c.Phase, Brief: c.Brief,
 			Workspace: c.Workspace, StartedAt: start,
 		})
-		r.live[slug] = &liveSession{container: c, lastSeen: nowTS, openSubs: map[string]SubagentSpawn{}}
+		r.live[slug] = &liveSession{container: c, containerID: rc.ID, lastSeen: nowTS, openSubs: map[string]SubagentSpawn{}}
 	}
 
 	// Gone containers.
@@ -224,15 +229,7 @@ func (r *Recorder) tick(ctx context.Context) error {
 		if _, ok := curr[slug]; ok {
 			continue
 		}
-		end := ls.lastSeen
-		if end == "" {
-			end = nowTS
-		}
-		for id := range ls.openSubs {
-			_ = r.writer.Append(Event{Type: EventSubagentStop, TS: nowTS, SessionID: slug, ToolUseID: id, End: end})
-		}
-		_ = r.writer.Append(Event{Type: EventSessionEnd, TS: nowTS, SessionID: slug, End: end, Reason: ReasonExited})
-		delete(r.live, slug)
+		r.closeLive(slug, ls, nowTS)
 	}
 
 	// Advance logs for surviving sessions.
@@ -246,6 +243,54 @@ func (r *Recorder) tick(ctx context.Context) error {
 
 	r.writeState(nowTS)
 	return nil
+}
+
+// closeLive ends a session we were tracking, at the last instant we saw it
+// alive, and stops tracking it. Its open subagents are closed at the same
+// instant: whatever they were doing, they did not outlive their container.
+func (r *Recorder) closeLive(slug string, ls *liveSession, nowTS string) {
+	end := ls.lastSeen
+	if end == "" {
+		end = nowTS
+	}
+	for id := range ls.openSubs {
+		_ = r.writer.Append(Event{Type: EventSubagentStop, TS: nowTS, SessionID: slug, ToolUseID: id, End: end})
+	}
+	_ = r.writer.Append(Event{Type: EventSessionEnd, TS: nowTS, SessionID: slug, End: end, Reason: ReasonExited})
+	delete(r.live, slug)
+}
+
+// closeFromHistory ends a session history has open but docker no longer backs,
+// at the latest instant either the history or the state snapshot attests to. The
+// reason is "inferred": we did not witness the exit, we deduced it on restart.
+func (r *Recorder) closeFromHistory(slug string, os_ *OpenSession, state *stateSnapshot, nowTS string) {
+	end := os_.LastTS
+	if state != nil {
+		if ss, ok := state.Sessions[slug]; ok && ss.LastSeen > end {
+			end = ss.LastSeen
+		}
+	}
+	if end == "" {
+		end = nowTS
+	}
+	for id := range os_.OpenSubagents {
+		_ = r.writer.Append(Event{Type: EventSubagentStop, TS: nowTS, SessionID: slug, ToolUseID: id, End: end})
+	}
+	_ = r.writer.Append(Event{Type: EventSessionEnd, TS: nowTS, SessionID: slug, End: end, Reason: ReasonInferred})
+}
+
+// restarted reports whether the container now wearing a slug's name is a
+// different one from the container the last state snapshot recorded. With no id
+// on either side — a snapshot written before the recorder tracked one, or none
+// at all — we cannot tell, and answer no: resuming a session that did in truth
+// restart merges two runs, but closing one that did not would end a session
+// that is still running, and history has no way back from that.
+func restarted(state *stateSnapshot, slug, liveID string) bool {
+	if state == nil || liveID == "" {
+		return false
+	}
+	ss, ok := state.Sessions[slug]
+	return ok && ss.ContainerID != "" && ss.ContainerID != liveID
 }
 
 // advanceLog reads a session's log tail and records subagents and usage.
@@ -308,9 +353,13 @@ type stateSnapshot struct {
 }
 
 type sessionState struct {
-	LastSeen  string `json:"last_seen"`
-	LogOffset int64  `json:"log_offset"`
-	Usage     Usage  `json:"usage"`
+	LastSeen string `json:"last_seen"`
+	// ContainerID is what a restart across a recorder outage is caught by: on
+	// the next reconcile the name is unchanged but the id is not. Omitted when
+	// unknown, and read back as "cannot tell" rather than "no restart".
+	ContainerID string `json:"container_id,omitempty"`
+	LogOffset   int64  `json:"log_offset"`
+	Usage       Usage  `json:"usage"`
 }
 
 func (r *Recorder) writeState(nowTS string) {
@@ -319,7 +368,12 @@ func (r *Recorder) writeState(nowTS string) {
 	}
 	snap := stateSnapshot{Updated: nowTS, Sessions: map[string]sessionState{}}
 	for slug, ls := range r.live {
-		snap.Sessions[slug] = sessionState{LastSeen: ls.lastSeen, LogOffset: ls.logOffset, Usage: ls.usage}
+		snap.Sessions[slug] = sessionState{
+			LastSeen:    ls.lastSeen,
+			ContainerID: ls.containerID,
+			LogOffset:   ls.logOffset,
+			Usage:       ls.usage,
+		}
 	}
 	b, err := json.Marshal(snap)
 	if err != nil {
