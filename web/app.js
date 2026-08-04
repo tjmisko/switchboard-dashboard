@@ -608,11 +608,13 @@ function positionViewGlider() {
   el.viewGlider.style.transform = "translateX(" + (btn.offsetLeft - el.viewseg.clientLeft) + "px)";
 }
 
-// renderTopline: two dominant figures framing AI's payoff.
-//   additional time (headline) = the EXTRA output-time AI bought you, where
-//     extra = agent-hours (fanout, parallelism counted) − the wall-clock you
-//     actually spent with ≥1 agent active (union). The subtitle frames it as an
-//     extended day — "as if a 27h day" (24h + extra).
+// renderTopline: three dominant figures framing AI's payoff, gross → net → rate.
+//   agent hours (lead) = fanout — every hour an agent spent working on your
+//     behalf, parallelism counted. The gross figure, before any netting.
+//   additional hours = the EXTRA output-time AI bought you, where extra =
+//     fanout − the wall-clock you actually spent with ≥1 agent active (union).
+//     Netting off union is what charges you for the time delegating cost you.
+//     The subtitle frames it as an extended day — "as if a 27h day" (24h + extra).
 //   force multiplier = fanout ÷ union — the average number of "you"s working
 //     during active time (≈3 agents in parallel → 3×), assuming you're equally
 //     effective with or without the AI.
@@ -623,14 +625,22 @@ function renderTopline(summary) {
   const DAY = 24 * 3600 * 1e9;                   // ns in a 24h day
   const mult = union > 0 ? fanout / union : null;
   // headline figures read WITHOUT seconds (coarse) — second-level precision is noise here.
+  const fanoutStr = humanDurationCoarse(fanout);
   const extraStr = humanDurationCoarse(extra);
   const dayStr = humanDurationCoarse(DAY + extra);
   const multStr = mult == null ? "—" : mult.toFixed(1) + "×";
+  const hoursTip = formulaTipHTML({
+    title: "agent hours",
+    formula: "Σ agent working time + subagent spans (fanout)",
+    result: fanoutStr,
+    why: "Total time agents spent working on your behalf, counting parallel sessions and subagents separately. Gross — the cost of delegating is not netted off yet.",
+    color: "var(--c-working)",
+  });
   const gainedTip = formulaTipHTML({
-    title: "effective time gained",
+    title: "additional hours",
     formula: "agent-hours (fanout) − active wall-clock (union)",
     result: "+" + extraStr,
-    why: `Extra output-time the agents bought you beyond the wall-clock you actually spent — as if your day ran ${dayStr} long.`,
+    why: `Agent hours net of the wall-clock you spent delegating and supervising — as if your day ran ${dayStr} long.`,
     color: "var(--c-working)",
   });
   const multTip = formulaTipHTML({
@@ -640,9 +650,13 @@ function renderTopline(summary) {
     why: "Average number of parallel sessions running during active time — how many 'you's were working at once.",
   });
   el.topline.innerHTML = `
+    <div class="th-block has-tip" data-tip="${escapeHTML(hoursTip)}">
+      <div class="th-val lead green">${fanoutStr}</div>
+      <div class="th-key">agent hours worked for you</div>
+    </div>
     <div class="th-block has-tip" data-tip="${escapeHTML(gainedTip)}">
       <div class="th-val green">+${extraStr}</div>
-      <div class="th-key">effective time gained ~ ${dayStr} day</div>
+      <div class="th-key">additional hours ~ ${dayStr} day</div>
     </div>
     <div class="th-block has-tip" data-tip="${escapeHTML(multTip)}">
       <div class="th-val">${multStr}</div>

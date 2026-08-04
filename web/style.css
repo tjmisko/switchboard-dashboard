@@ -220,8 +220,10 @@ button.ghost { background: transparent; color: var(--fg-muted); font-size: 12px;
 main { padding: 16px 18px 36px; }
 
 /* ---------- topline (dominant figures, top-left) ---------- */
-.topline { display: flex; align-items: flex-end; gap: 32px; margin: 2px 2px 18px; }
+.topline { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 14px 32px; margin: 2px 2px 18px; }
 .topline .th-val { font-family: var(--mono); font-size: 42px; font-weight: 700; letter-spacing: -1.2px; line-height: 1; }
+/* the lead figure (agent hours) outranks the two that qualify it */
+.topline .th-val.lead { font-size: 54px; letter-spacing: -1.6px; }
 .topline .th-val.green { color: var(--c-working); }
 .topline .th-key { font-size: 11px; color: var(--fg-muted); margin-top: 7px; text-transform: uppercase; letter-spacing: 0.7px; }
 
