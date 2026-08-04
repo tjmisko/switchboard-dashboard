@@ -3,6 +3,7 @@ package arachne
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/tjmisko/switchboard-dashboard/internal/timeline"
@@ -54,6 +55,18 @@ func Compile(events []Event, opts CompileOptions) *timeline.Timeline {
 		unclosed := endRFC == ""
 		if unclosed {
 			endRFC = nowRFC // still running
+		}
+		// A run that ends before it starts is not a short session, it is a
+		// broken one, and it draws as nothing at all — the failure that hid a
+		// whole day of Arachne work behind one inverted span. aggregate no
+		// longer produces one, but a history an older recorder wrote still can,
+		// and SpanNanos answers "no span" to a backwards pair rather than a
+		// negative one: unclamped, such a lane skips every aggregate below in
+		// silence. Hold the invariant here, where it is still visible.
+		if ss, okS := timeline.ParseNanos(startRFC); okS {
+			if ee, okE := timeline.ParseNanos(endRFC); okE && ee < ss {
+				endRFC = startRFC
+			}
 		}
 		if !overlapsWindow(startRFC, endRFC, opts) {
 			continue
@@ -215,6 +228,8 @@ type sub struct {
 	endTS       string
 }
 
+// sess is one container RUN. See aggregate for why that is not the same thing
+// as one session slug.
 type sess struct {
 	id        string
 	start     Event
@@ -223,7 +238,6 @@ type sess struct {
 	subOpen   map[string]*sub
 	subs      []*sub
 	usage     Usage
-	seen      bool
 
 	// lastTS is the newest event timestamp seen for this session, and lastNs its
 	// parsed form. For a session that never logged a session_end, this is the last
@@ -233,31 +247,71 @@ type sess struct {
 	lastNs int64
 }
 
-// aggregate folds the event stream into per-session records.
-func aggregate(events []Event) []*sess {
-	byID := map[string]*sess{}
-	order := []*sess{}
-	get := func(id string) *sess {
-		s := byID[id]
-		if s == nil {
-			s = &sess{id: id, subOpen: map[string]*sub{}}
-			byID[id] = s
-			order = append(order, s)
-		}
-		return s
+// touch advances the run's last-evidence mark. A timestamp that will not parse
+// cannot move it: the suspect check measures silence from this instant, and a
+// garbled clock must not be able to shorten or extend that silence.
+func (s *sess) touch(ts string) {
+	if ns, ok := timeline.ParseNanos(ts); ok && ns > s.lastNs {
+		s.lastTS, s.lastNs = ts, ns
 	}
+}
+
+// lastEvidence is the newest instant this run is attested at: its last event,
+// or its start when nothing followed (or nothing parsed).
+func (s *sess) lastEvidence() string {
+	if s.lastTS != "" {
+		return s.lastTS
+	}
+	return sessStartTS(s)
+}
+
+// aggregate folds the event stream into per-RUN records.
+//
+// A session is one container run, not one branch. Arachne names a container
+// after its worktree branch (arachne-agent-<slug>) and the pump restarts that
+// same name once per phase task, so a slug recurs all day. Keyed on the slug
+// alone, every run of a branch folded into a single record that took its start
+// from the newest run and its end from the previous one — an inverted span that
+// drew as nothing, credited no time, and buried every earlier run of the day
+// behind it. Each session_start therefore opens a fresh run, and only a slug's
+// newest run is open to the events that follow it.
+func aggregate(events []Event) []*sess {
+	current := map[string]*sess{} // slug -> the run events attach to
+	runs := map[string]int{}      // slug -> runs opened so far, for the id suffix
+	order := []*sess{}
+
 	for _, e := range events {
 		if e.SessionID == "" {
 			continue
 		}
-		s := get(e.SessionID)
-		if ns, ok := timeline.ParseNanos(e.TS); ok && ns > s.lastNs {
-			s.lastTS, s.lastNs = e.TS, ns
+
+		if e.Type == EventSessionStart {
+			// A start for a slug whose run is still open means we never saw the
+			// old container go — a restart that landed inside one poll, or a
+			// history torn by a crash. Close it at its last evidence rather than
+			// let the new run inherit its span, subagents, and token totals.
+			if prev := current[e.SessionID]; prev != nil && prev.endTS == "" {
+				prev.endTS = prev.lastEvidence()
+				prev.endReason = ReasonInferred
+			}
+			runs[e.SessionID]++
+			s := &sess{id: runID(e.SessionID, runs[e.SessionID]), start: e, subOpen: map[string]*sub{}}
+			s.touch(e.TS)
+			current[e.SessionID] = s
+			order = append(order, s)
+			continue
 		}
+
+		// Nothing open to attach to: either no start for this slug was ever
+		// recorded, or its run is closed — and a closed run is final, so no
+		// later event may reopen it, extend its evidence, or restate its usage.
+		s := current[e.SessionID]
+		if s == nil || s.endTS != "" {
+			continue
+		}
+		s.touch(e.TS)
+
 		switch e.Type {
-		case EventSessionStart:
-			s.start = e
-			s.seen = true
 		case EventSessionEnd:
 			s.endTS = e.End
 			if s.endTS == "" {
@@ -283,13 +337,18 @@ func aggregate(events []Event) []*sess {
 			}
 		}
 	}
-	out := make([]*sess, 0, len(order))
-	for _, s := range order {
-		if s.seen {
-			out = append(out, s) // drop sessions we never saw start for
-		}
+	return order
+}
+
+// runID names the Nth run of a slug. The first run keeps the bare slug, so the
+// ordinary one-container-per-branch day reads exactly as it always has; a
+// restart appends "#N", which is what lets the dashboard — whose bars are keyed
+// on session_id — draw a branch's runs as the separate sessions they are.
+func runID(slug string, run int) string {
+	if run <= 1 {
+		return slug
 	}
-	return out
+	return slug + "#" + strconv.Itoa(run)
 }
 
 // roundSec keeps the suspect reason strings readable (and identical in shape to

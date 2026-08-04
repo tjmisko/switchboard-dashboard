@@ -270,3 +270,120 @@ func TestCompile_shouldEmitTheSuspectReasonWordingSharedWithTheDaemon(t *testing
 		t.Errorf("subagent suspect_reason =\n\t%q\nwant\n\t%q", got, wantSub)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// run identity (the 2026-08-04 vanishing-pump class)
+// ---------------------------------------------------------------------------
+
+// The shape that hid a day of pump work. Arachne names a container after its
+// branch and the pump restarts that same name for the next phase task, so one
+// slug carries several runs. Folded into a single record, they produced one lane
+// that took its start from the newest run and its end from the previous one's
+// exit — a span running backwards, which draws as nothing at all, and took the
+// morning's hour and a half down with it.
+func TestCompile_shouldSplitRestartsOfOneContainerNameIntoSeparateRuns(t *testing.T) {
+	events := []Event{
+		{Type: EventSessionStart, TS: "2026-08-04T16:21:32Z", SessionID: "feat-f79", StartedAt: "2026-08-04T16:21:31Z", TaskID: "F79.2", Agent: "opus", Project: "Arachne"},
+		{Type: EventUsageSample, TS: "2026-08-04T17:00:00Z", SessionID: "feat-f79", TokIn: 100, TokOut: 10},
+		{Type: EventSessionEnd, TS: "2026-08-04T18:00:32Z", SessionID: "feat-f79", End: "2026-08-04T18:00:27Z", Reason: ReasonExited},
+		{Type: EventSessionStart, TS: "2026-08-04T18:00:47Z", SessionID: "feat-f79", StartedAt: "2026-08-04T18:00:43Z", TaskID: "F79.6", Agent: "opus", Project: "Arachne"},
+		{Type: EventUsageSample, TS: "2026-08-04T18:29:12Z", SessionID: "feat-f79", TokIn: 389, TokOut: 3896},
+	}
+	tl := Compile(events, CompileOptions{Now: mustTime(t, "2026-08-04T18:30:00Z"), Window: "2026-08-04"})
+
+	if len(tl.Lanes) != 2 {
+		t.Fatalf("lanes = %d, want one per container run: %+v", len(tl.Lanes), tl.Lanes)
+	}
+	first, second := tl.Lanes[0], tl.Lanes[1]
+	if first.SessionID != "feat-f79" || second.SessionID != "feat-f79#2" {
+		t.Fatalf("run ids = %q, %q; want the bare slug, then #2", first.SessionID, second.SessionID)
+	}
+	if first.Start != "2026-08-04T16:21:31Z" || first.End != "2026-08-04T18:00:27Z" {
+		t.Errorf("first run = %q..%q, want its own start and its own exit", first.Start, first.End)
+	}
+	if second.Start != "2026-08-04T18:00:43Z" || second.End != "2026-08-04T18:30:00Z" {
+		t.Errorf("second run = %q..%q, want its own start, still running at now", second.Start, second.End)
+	}
+	if first.Name != "F79.2" || second.Name != "F79.6" {
+		t.Errorf("task labels = %q, %q; want each run's own", first.Name, second.Name)
+	}
+	// A usage sample restates the totals of the run it belongs to. The second
+	// run's counter starts from zero with its container, so its samples must not
+	// read as the first run's continuing.
+	if first.TokOut != 10 || second.TokOut != 3896 {
+		t.Errorf("per-run tok_out = %d, %d; want 10 and 3896", first.TokOut, second.TokOut)
+	}
+	// 1h38m56s + 29m17s: both runs in full, neither suspect (both spoke recently).
+	if want := int64((5936 + 1757) * 1e9); tl.Summary.ByStatus["working"] != want {
+		t.Errorf("working = %d, want %d (both runs)", tl.Summary.ByStatus["working"], want)
+	}
+	if tl.Summary.SuspectLanes != 0 {
+		t.Errorf("suspect_lanes = %d, want 0", tl.Summary.SuspectLanes)
+	}
+}
+
+// A restart that lands inside one poll leaves no session_end between the two
+// starts. The older run still has to close at its last evidence: running it to
+// the newer one's start would credit silence as work, and leaving it open would
+// stretch it to now, straight over the top of the run that replaced it.
+func TestCompile_shouldCloseARunLeftOpenByAMissedExit(t *testing.T) {
+	events := []Event{
+		{Type: EventSessionStart, TS: "2026-08-04T10:00:00Z", SessionID: "feat-f79", StartedAt: "2026-08-04T10:00:00Z", TaskID: "F79.1"},
+		{Type: EventUsageSample, TS: "2026-08-04T10:20:00Z", SessionID: "feat-f79", TokIn: 5},
+		{Type: EventSessionStart, TS: "2026-08-04T10:25:00Z", SessionID: "feat-f79", StartedAt: "2026-08-04T10:24:00Z", TaskID: "F79.2"},
+	}
+	tl := Compile(events, CompileOptions{Now: mustTime(t, "2026-08-04T11:00:00Z")})
+
+	if len(tl.Lanes) != 2 {
+		t.Fatalf("lanes = %d, want 2: %+v", len(tl.Lanes), tl.Lanes)
+	}
+	if tl.Lanes[0].End != "2026-08-04T10:20:00Z" {
+		t.Errorf("first run end = %q, want its last evidence 10:20:00Z", tl.Lanes[0].End)
+	}
+	if tl.Lanes[1].End != "2026-08-04T11:00:00Z" {
+		t.Errorf("second run = %q, want it still running at now", tl.Lanes[1].End)
+	}
+}
+
+// A closed run is final. A straggling sample — a log line drained after the
+// container was already gone — must not reopen it, restate its usage, or move
+// the last-evidence mark the suspect check measures silence from.
+func TestCompile_shouldIgnoreEventsArrivingAfterARunIsClosed(t *testing.T) {
+	events := []Event{
+		{Type: EventSessionStart, TS: "2026-08-04T10:00:00Z", SessionID: "x", StartedAt: "2026-08-04T10:00:00Z"},
+		{Type: EventUsageSample, TS: "2026-08-04T10:10:00Z", SessionID: "x", TokIn: 100},
+		{Type: EventSessionEnd, TS: "2026-08-04T10:30:00Z", SessionID: "x", End: "2026-08-04T10:30:00Z", Reason: ReasonExited},
+		{Type: EventUsageSample, TS: "2026-08-04T10:40:00Z", SessionID: "x", TokIn: 999},
+	}
+	tl := Compile(events, CompileOptions{Now: mustTime(t, "2026-08-04T11:00:00Z")})
+
+	if len(tl.Lanes) != 1 {
+		t.Fatalf("lanes = %d, want 1: %+v", len(tl.Lanes), tl.Lanes)
+	}
+	if tl.Lanes[0].End != "2026-08-04T10:30:00Z" || tl.Lanes[0].TokIn != 100 {
+		t.Errorf("a closed run keeps its own end and usage, got %+v", tl.Lanes[0])
+	}
+}
+
+// The invariant the rest of the file's span arithmetic rests on. aggregate no
+// longer hands Compile a run that ends before it starts, but a history an older
+// recorder wrote still can — and a backwards lane is worse than a wrong one,
+// because it draws as nothing and reads as an empty row rather than a bug.
+func TestCompile_shouldNeverEmitALaneThatEndsBeforeItStarts(t *testing.T) {
+	events := []Event{
+		{Type: EventSessionStart, TS: "2026-08-04T18:00:47Z", SessionID: "x", StartedAt: "2026-08-04T18:00:43Z"},
+		{Type: EventSessionEnd, TS: "2026-08-04T18:00:50Z", SessionID: "x", End: "2026-08-04T18:00:27Z"},
+	}
+	tl := Compile(events, CompileOptions{Now: mustTime(t, "2026-08-04T18:30:00Z")})
+
+	l := tl.Lanes[0]
+	if l.End != l.Start {
+		t.Fatalf("an end before the start must clamp to the start, got %q..%q", l.Start, l.End)
+	}
+	if l.Intervals[0].End != l.Intervals[0].Start {
+		t.Errorf("the interval must clamp with the lane, got %+v", l.Intervals[0])
+	}
+	if tl.Summary.ByStatus["working"] != 0 {
+		t.Errorf("a zero-length run credits nothing, got %d", tl.Summary.ByStatus["working"])
+	}
+}
