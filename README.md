@@ -400,6 +400,77 @@ Providers this repo compiles itself (arachne) run the same check with the caps i
 `internal/timeline/suspect.go`; a provider that omits the fields entirely is
 merged exactly as before, never silently clipped.
 
+## Day transitions and profiling
+
+Changing the day is the page's most-used control and used to be its slowest: the
+whole transition sat behind one `switchboard-ctl timeline --json` subprocess,
+which takes 0.4s for a quiet day and up to 2s for a busy one. Nothing happened
+until it returned, so for the better part of a second the page showed the
+**previous** day's chart, totals and cost underneath the new day's date.
+
+Three changes, in order of how much they matter:
+
+**The frame goes up first.** Everything derivable from the date alone — the axis,
+the gutter, the panel chrome, the static labels — is drawn immediately, and every
+figure that is *not* derivable is replaced by a placeholder. Replaced, not
+dimmed: some labels carry a number inside the label ("agent hours net 4h 11m
+babysitting"), so a mask over the values leaves precisely those behind, which is
+the previous day's figure presenting itself as this one's. The axis is drawn at
+the outgoing day's clock window, the best available prediction of the incoming
+one, so it does not lurch when the real window arrives.
+
+**Days are cached and neighbours prefetched.** A day already fetched repaints
+from memory in the same frame as the keypress; 400ms after you land somewhere,
+the days either side are fetched in the background. Walking back through a week
+is therefore free after the first pass. A cache hit is always revalidated behind
+what it painted, so a stale entry is corrected rather than believed, and the
+freshness pill dates what is on screen rather than when it got there.
+
+**Only the newest request may paint.** Responses are tied to the day that asked
+for them (see `timelineGen` in `web/app.js`); a superseded fetch is aborted, and
+the 3s poll no longer stacks a second `ctl` run on a day already being fetched.
+
+Measured on a real history, 18 day-steps per build over the walk
+`08-04 → 08-03 → 08-02 → 08-03 → 08-04 → 08-05`, repeated three times:
+
+| | before | after |
+| --- | ---: | ---: |
+| time to first frame — mean | 946ms | **30ms** |
+| time to first frame — p95 | 2826ms | **41ms** |
+| time to the day's data — mean | 946ms | **114ms** |
+| time to the day's data — p95 | 2826ms | **1555ms** |
+
+First frame is ~31× faster and never exceeded 41ms. Time-to-data improves 8×
+because the walk is mostly cache hits; a **cold** day is still bounded by `ctl`
+(~1.4s, unchanged — that cost lives upstream), but its first frame is ~24ms
+rather than the whole wait. Client-side render is 6–45ms of that, so it was never
+the problem; `computeOperatorTime` is now memoised per parse because it was being
+run twice per render for 10ms each on a busy day.
+
+The rapid-step race was real, not theoretical. Four quick presses of Ctrl+← on
+the old build, measured: with `2026-08-01` selected the chart painted `08-02`,
+then `08-03`, then `08-04`, reaching `08-01` 1.5s later. The new build never
+painted a day other than the selected one across 377 samples.
+
+### Profiling
+
+The instrumentation that produced those numbers ships in the page, off by
+default. Turn it on with `?perf=1` or `sbPerf.enable()` (persisted), then:
+
+```js
+sbPerf.report()   // per-transition rows, then p50/p95 per kind
+sbPerf.log        // the raw records
+sbPerf.clear()
+sbPerf.disable()
+```
+
+Each record times a transition from the input that provoked it to two rAFs after
+the DOM settles — a render function returning is not the user seeing anything —
+and splits it into `fetch`, `parse`, `operator`, `render` and friends, tagged
+with where the data came from (`network`, `cache`, `unchanged`, `superseded`).
+Phases are also emitted as User Timing measures, so a devtools capture taken with
+profiling on carries the same breakdown inline on the flame chart.
+
 ## Development
 
 ```sh
