@@ -139,7 +139,14 @@ Known ways it goes wrong:
   observed events. This is not a ghost, and the repair is different.
 - MISATTRIBUTED PROJECT: correct timing, wrong project grouping — usually a cwd
   that resolved to an unexpected abbreviation.
-- EMPTY STATUS INTERVAL: an interval whose status is the empty string.
+- EMPTY STATUS INTERVAL: an interval whose status is the empty string, appearing
+  somewhere OTHER than first. A LEADING empty-status interval is normal and is
+  not a defect — it is the gap between a session being discovered and its first
+  transition, and it is present on the large majority of healthy lanes (882 of
+  969 on a measured day, with none occurring after the first interval). A lane
+  whose ONLY interval is empty-status is also usually fine: those are processes
+  that died before emitting a transition, and they are short (median 14s).
+  Do not report either shape as a problem.
 - STALE SUMMARY: the lane is fine but its summary describes different work.
 
 Investigate with the read-only tools you have. Useful commands:
