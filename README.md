@@ -430,27 +430,96 @@ freshness pill dates what is on screen rather than when it got there.
 for them (see `timelineGen` in `web/app.js`); a superseded fetch is aborted, and
 the 3s poll no longer stacks a second `ctl` run on a day already being fetched.
 
-Measured on a real history, 18 day-steps per build over the walk
-`08-04 → 08-03 → 08-02 → 08-03 → 08-04 → 08-05`, repeated three times:
+### Results
+
+Two things are timed, because they are two different experiences: **first frame**
+(the page has responded to the input and shows the new day's frame) and **time to
+data** (the day's real content is on screen). Before this change they were the
+same instant, since nothing was drawn until the data came.
+
+Walking a week — `08-04 → 08-03 → 08-02 → 08-03 → 08-04 → 08-05`, three rounds,
+n=18 per build, both builds run back to back on the same machine:
 
 | | before | after |
 | --- | ---: | ---: |
-| time to first frame — mean | 946ms | **30ms** |
-| time to first frame — p95 | 2826ms | **41ms** |
-| time to the day's data — mean | 946ms | **114ms** |
-| time to the day's data — p95 | 2826ms | **1555ms** |
+| first frame — mean | 647ms | **29ms** |
+| first frame — p95 | 1179ms | **55ms** |
+| time to data — mean | 647ms | **79ms** |
+| time to data, revisited days | 647ms | **29ms** |
 
-First frame is ~31× faster and never exceeded 41ms. Time-to-data improves 8×
-because the walk is mostly cache hits; a **cold** day is still bounded by `ctl`
-(~1.4s, unchanged — that cost lives upstream), but its first frame is ~24ms
-rather than the whole wait. Client-side render is 6–45ms of that, so it was never
-the problem; `computeOperatorTime` is now memoised per parse because it was being
-run twice per render for 10ms each on a busy day.
+First frame is **~22× faster** and never exceeded 55ms. Time to data improves ~8×
+across the walk because 17 of its 18 steps are revisits, which is the point of
+the cache — that is what walking a week actually looks like.
+
+Read the ratio, not the absolute "before" figures: they are `ctl` latency, which
+moves with machine load and with how busy the day was. Repeat runs of this walk
+put the before-mean anywhere in 580–650ms and the speedup in 18–22×, while the
+after-figures barely move, because nothing they measure depends on `ctl`.
+
+The same walk with the cache emptied before every step, so no step can hit:
+
+| | before | after |
+| --- | ---: | ---: |
+| first frame — mean | 636ms | **29ms** |
+| time to data — mean | 636ms | 781ms |
+
+**A genuinely cold day is not faster, and this is the honest limit of the change.**
+Its cost is `switchboard-ctl`, which lives upstream. The per-phase breakdown from
+the page's own profiler shows where a cold step goes:
+
+```
+day         total    first frame   scaffold   fetch   parse   render   lanes
+2026-08-04   1121ms         18ms     10.5ms  1079ms     2ms     25ms     171
+2026-08-03    637ms         21ms      3.7ms   614ms     0ms      9ms      19
+2026-08-02    480ms         28ms      3.5ms   450ms     0ms      4ms       1
+```
+
+The fetch is 94–96% of it. The scaffold costs 3–10ms and buys the other 1000ms
+back as responsiveness rather than as a shorter wait. The 636 → 781ms difference
+in the cold table is **not** a regression this introduces: per-request latency is
+identical on both builds (verified against both servers directly), and `ctl`'s
+own run-to-run spread for the same day is 450–1100ms, which is wider than the
+gap. Client render is 4–32ms and was never the problem — though
+`computeOperatorTime` was running twice per render at ~10ms each on a busy day,
+and is now memoised per parse.
 
 The rapid-step race was real, not theoretical. Four quick presses of Ctrl+← on
-the old build, measured: with `2026-08-01` selected the chart painted `08-02`,
-then `08-03`, then `08-04`, reaching `08-01` 1.5s later. The new build never
-painted a day other than the selected one across 377 samples.
+the old build, sampled every 20ms: with `2026-08-01` selected the chart painted
+`08-02`, then `08-03`, then `08-04`, reaching `08-01` 1.5s later. The new build
+never painted a day other than the selected one across 377 samples.
+
+### Reproducing the measurements
+
+`scripts/bench-day-transition.mjs` drives a real browser over CDP and is what
+produced the tables above.
+
+```sh
+# a headless Chrome with the devtools port open
+google-chrome --headless=new --remote-debugging-port=9222 \
+  --user-data-dir=$(mktemp -d) about:blank &
+
+# one server; add --compare to run a second build through the identical walk
+node scripts/bench-day-transition.mjs --url http://localhost:8080 --rounds 3
+node scripts/bench-day-transition.mjs --url http://localhost:8080 --cold
+```
+
+Three choices in it are worth knowing about, because each one is a way the
+numbers could have been made to lie:
+
+- **Both finish lines are two nested `requestAnimationFrame`s after the DOM
+  work.** The first fires before the coming paint, the second after it. Timing to
+  a render function returning would flatter every result by a frame or more.
+- **`--compare` runs both builds back to back**, same machine, same minute,
+  against the same real history. `ctl` latency moves with machine load and with
+  how busy the day was, so before/after numbers taken hours apart mean nothing.
+- **`--cold` empties the day cache before every step.** Without it a warm walk
+  credits the scaffold and the cache to a single number and hides how long a cold
+  day still is. Both walks are reported above for that reason.
+
+A subtle trap, since it cost a wrong number the first time: the finish line
+cannot simply be "`lastTimelineText` changed", because the scaffold blanks that
+variable on its way up — so a cold day reports the scaffold's 30ms as its
+time-to-data. The predicate also requires that no scaffold is up.
 
 ### Profiling
 
