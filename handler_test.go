@@ -578,6 +578,290 @@ func TestSummariesShouldKeepTheRecordWhenItsTasksFieldHasAnUnexpectedShape(t *te
 	}
 }
 
+// --- /api/memory ---
+
+// memoryFixtureHost is a host provider's `memory --json`: an agent/tree split per
+// session plus the machine-wide pressure series.
+const memoryFixtureHost = `{"window":"2026-06-26","sessions":[` +
+	`{"session_id":"s1","pid":4821,"agent":"claude","project":"sb","peak_agent_bytes":612368384,"avg_agent_bytes":498073600,"peak_tree_bytes":3221225472,"avg_tree_bytes":1503238553,` +
+	`"mem":[{"ts":"2026-06-26T13:00:00Z","agent":402653184,"tree":402653184},{"ts":"2026-06-26T13:20:00Z","agent":528482304,"tree":3221225472}]}` +
+	`],"pressure":[` +
+	`{"ts":"2026-06-26T13:00:00Z","avail_bytes":21474836480,"psi_avg10":0.0,"psi_stall_us":0},` +
+	`{"ts":"2026-06-26T13:20:00Z","avail_bytes":17179869184,"psi_avg10":2.1,"psi_stall_us":96000}]}`
+
+// memoryFixtureContainer is a container provider on the SAME host: a tree figure
+// with no agent split, a colliding raw session id, and — because pressure is
+// machine-wide — a verbatim repeat of the host's pressure series.
+const memoryFixtureContainer = `{"window":"2026-06-26","sessions":[` +
+	`{"session_id":"s1","project":"Arachne","peak_agent_bytes":null,"avg_agent_bytes":null,"peak_tree_bytes":8589934592,"avg_tree_bytes":4294967296,` +
+	`"mem":[{"ts":"2026-06-26T13:05:00Z","agent":null,"tree":8589934592}]}` +
+	`],"pressure":[` +
+	`{"ts":"2026-06-26T13:00:00Z","avail_bytes":21474836480,"psi_avg10":0.0,"psi_stall_us":0},` +
+	`{"ts":"2026-06-26T13:20:00Z","avail_bytes":17179869184,"psi_avg10":2.1,"psi_stall_us":96000}]}`
+
+// writeMemoryStub builds a ctl stub that serves the memory document — and fails
+// loudly for any other subcommand, so every test through it also pins that the
+// handler asked for `memory` rather than reusing the timeline argv.
+func writeMemoryStub(t *testing.T, doc string) string {
+	t.Helper()
+	return writeStub(t, "#!/bin/sh\nif [ \"$1\" != memory ]; then echo \"stub: want memory, got $1\" >&2; exit 2; fi\ncat <<'JSONEOF'\n"+doc+"\nJSONEOF\n")
+}
+
+// noMemoryStub imitates a ctl build that predates the subcommand: it rejects
+// `memory` the way a real CLI rejects an unknown one.
+func noMemoryStub(t *testing.T) string {
+	t.Helper()
+	return writeStub(t, "#!/bin/sh\nif [ \"$1\" = memory ]; then echo 'unknown subcommand \"memory\"' >&2; exit 1; fi\nprintf '%s' '"+fixtureJSON+"'\n")
+}
+
+type memoryBody struct {
+	Sessions map[string]struct {
+		PeakAgentBytes *int64 `json:"peak_agent_bytes"`
+		AvgAgentBytes  *int64 `json:"avg_agent_bytes"`
+		PeakTreeBytes  *int64 `json:"peak_tree_bytes"`
+		AvgTreeBytes   *int64 `json:"avg_tree_bytes"`
+		Mem            []struct {
+			TS    string `json:"ts"`
+			Agent *int64 `json:"agent"`
+			Tree  *int64 `json:"tree"`
+		} `json:"mem"`
+	} `json:"sessions"`
+	Pressure []struct {
+		TS         string   `json:"ts"`
+		AvailBytes *int64   `json:"avail_bytes"`
+		PSIAvg10   *float64 `json:"psi_avg10"`
+		PSIStallUS *int64   `json:"psi_stall_us"`
+	} `json:"pressure"`
+}
+
+// getMemory issues the request and decodes the body, asserting the endpoint's
+// standing promise that it is always a 200.
+func getMemory(t *testing.T, srv *Server, query string) (memoryBody, string) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/memory"+query, nil)
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %q)", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Result().Header.Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("content-type = %q, want application/json", ct)
+	}
+	var body memoryBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("memory body not json: %v (%q)", err, rec.Body.String())
+	}
+	return body, rec.Body.String()
+}
+
+func TestMemoryShouldKeySessionsByRawIdWhenThereIsOneProvider(t *testing.T) {
+	// The single-provider timeline path is a verbatim proxy, so its lane
+	// session_ids are un-namespaced; memory keys must match them exactly or every
+	// hover looks up an id that does not exist.
+	srv := &Server{Ctl: writeMemoryStub(t, memoryFixtureHost)}
+
+	body, _ := getMemory(t, srv, "?day=2026-06-26")
+
+	got, ok := body.Sessions["s1"]
+	if !ok {
+		t.Fatalf("sessions = %v, want the raw session id s1", body.Sessions)
+	}
+	if got.PeakAgentBytes == nil || *got.PeakAgentBytes != 612368384 {
+		t.Errorf("peak_agent_bytes = %v, want 612368384 verbatim", got.PeakAgentBytes)
+	}
+	if got.PeakTreeBytes == nil || *got.PeakTreeBytes != 3221225472 {
+		t.Errorf("peak_tree_bytes = %v, want 3221225472 verbatim", got.PeakTreeBytes)
+	}
+	if got.AvgTreeBytes == nil || *got.AvgTreeBytes != 1503238553 {
+		t.Errorf("avg_tree_bytes = %v, want the time-weighted average verbatim", got.AvgTreeBytes)
+	}
+	if len(got.Mem) != 2 || got.Mem[1].Tree == nil || *got.Mem[1].Tree != 3221225472 {
+		t.Errorf("mem series = %+v, want both samples with their tree figures", got.Mem)
+	}
+	if len(body.Pressure) != 2 || body.Pressure[1].PSIStallUS == nil || *body.Pressure[1].PSIStallUS != 96000 {
+		t.Errorf("pressure = %+v, want the provider's series verbatim", body.Pressure)
+	}
+}
+
+func TestMemoryShouldNamespaceSessionKeysWhenProvidersAreMerged(t *testing.T) {
+	// Both providers report a session called "s1". timeline.Merge namespaces lane
+	// ids the same way, so these keys still line up with the lanes they enrich.
+	srv := &Server{Providers: []provider.Provider{
+		provider.NewSubprocessProvider("claude", "Claude", []string{writeMemoryStub(t, memoryFixtureHost)}, "", provider.Capabilities{Memory: true}),
+		provider.NewSubprocessProvider("arachne", "Arachne", []string{writeMemoryStub(t, memoryFixtureContainer)}, "", provider.Capabilities{Memory: true}),
+	}}
+
+	body, raw := getMemory(t, srv, "?day=2026-06-26")
+
+	if len(body.Sessions) != 2 {
+		t.Fatalf("sessions = %v, want both providers' s1 kept apart", body.Sessions)
+	}
+	host, ok := body.Sessions["claude:s1"]
+	if !ok {
+		t.Fatalf("missing claude:s1 in %v", body.Sessions)
+	}
+	if host.PeakAgentBytes == nil || *host.PeakAgentBytes != 612368384 {
+		t.Errorf("claude peak_agent_bytes = %v, want 612368384", host.PeakAgentBytes)
+	}
+	container, ok := body.Sessions["arachne:s1"]
+	if !ok {
+		t.Fatalf("missing arachne:s1 in %v", body.Sessions)
+	}
+	if container.PeakTreeBytes == nil || *container.PeakTreeBytes != 8589934592 {
+		t.Errorf("arachne peak_tree_bytes = %v, want 8589934592 (not the host's)", container.PeakTreeBytes)
+	}
+	// A container total has no meaningful inner boundary, so the agent split is
+	// absent — and must arrive as an explicit null rather than a dropped key,
+	// since 0 bytes is a legal reading the UI has to tell apart from "unknown".
+	if container.PeakAgentBytes != nil {
+		t.Errorf("arachne peak_agent_bytes = %v, want null", *container.PeakAgentBytes)
+	}
+	if !strings.Contains(raw, `"peak_agent_bytes":null`) {
+		t.Errorf("body should carry an explicit null agent figure, got %s", raw)
+	}
+	if len(container.Mem) != 1 || container.Mem[0].Agent != nil || container.Mem[0].Tree == nil {
+		t.Errorf("container sample = %+v, want a tree-only reading", container.Mem)
+	}
+}
+
+func TestMemoryShouldNotDoubleTheMachineWidePressureSeries(t *testing.T) {
+	// Two providers on one host observe the same physical memory and report the
+	// same series. Concatenating them would double the reported stall time and
+	// halve the apparent available bytes, so the first provider's series wins.
+	srv := &Server{Providers: []provider.Provider{
+		provider.NewSubprocessProvider("claude", "Claude", []string{writeMemoryStub(t, memoryFixtureHost)}, "", provider.Capabilities{Memory: true}),
+		provider.NewSubprocessProvider("arachne", "Arachne", []string{writeMemoryStub(t, memoryFixtureContainer)}, "", provider.Capabilities{Memory: true}),
+	}}
+
+	body, _ := getMemory(t, srv, "?day=2026-06-26")
+
+	if len(body.Pressure) != 2 {
+		t.Fatalf("pressure has %d points, want the 2 of a single series: %+v", len(body.Pressure), body.Pressure)
+	}
+	var stall int64
+	for _, p := range body.Pressure {
+		if p.PSIStallUS != nil {
+			stall += *p.PSIStallUS
+		}
+	}
+	if stall != 96000 {
+		t.Errorf("total stall = %dus, want 96000 (summing both providers would give 192000)", stall)
+	}
+	if body.Pressure[0].TS != "2026-06-26T13:00:00Z" || body.Pressure[1].TS != "2026-06-26T13:20:00Z" {
+		t.Errorf("pressure timestamps = %+v, want one ordered series", body.Pressure)
+	}
+}
+
+func TestMemoryShouldFallBackToALaterProvidersPressureWhenTheFirstHasNone(t *testing.T) {
+	// First-provider-wins is about the first NON-EMPTY series: a provider that
+	// cannot read pressure must not silence the one that can.
+	noPressure := `{"window":"2026-06-26","sessions":[{"session_id":"s1","peak_tree_bytes":1024,"avg_tree_bytes":1024}],"pressure":[]}`
+	srv := &Server{Providers: []provider.Provider{
+		provider.NewSubprocessProvider("arachne", "Arachne", []string{writeMemoryStub(t, noPressure)}, "", provider.Capabilities{Memory: true}),
+		provider.NewSubprocessProvider("claude", "Claude", []string{writeMemoryStub(t, memoryFixtureHost)}, "", provider.Capabilities{Memory: true}),
+	}}
+
+	body, _ := getMemory(t, srv, "?day=2026-06-26")
+
+	if len(body.Pressure) != 2 {
+		t.Fatalf("pressure = %+v, want the second provider's series", body.Pressure)
+	}
+}
+
+func TestMemoryShouldServeAnEmptySetWhenTheProviderHasNoMemorySubcommand(t *testing.T) {
+	// An older ctl exits non-zero on `memory`. That is an expected state, not an
+	// error surface: /api/timeline 502s on a failed provider, this one does not.
+	srv := &Server{Ctl: noMemoryStub(t)}
+
+	body, raw := getMemory(t, srv, "?day=2026-06-26")
+
+	if len(body.Sessions) != 0 {
+		t.Fatalf("sessions = %v, want empty", body.Sessions)
+	}
+	if len(body.Pressure) != 0 {
+		t.Fatalf("pressure = %v, want empty", body.Pressure)
+	}
+	if !strings.Contains(raw, `"sessions":{}`) {
+		t.Errorf("sessions should be an empty object, not null: %s", raw)
+	}
+}
+
+func TestMemoryShouldKeepTheOtherProvidersWhenOneHasNoMemorySupport(t *testing.T) {
+	srv := &Server{Providers: []provider.Provider{
+		provider.NewSubprocessProvider("arachne", "Arachne", []string{noMemoryStub(t)}, "", provider.Capabilities{}),
+		provider.NewSubprocessProvider("claude", "Claude", []string{writeMemoryStub(t, memoryFixtureHost)}, "", provider.Capabilities{Memory: true}),
+	}}
+
+	body, _ := getMemory(t, srv, "?day=2026-06-26")
+
+	if len(body.Sessions) != 1 {
+		t.Fatalf("sessions = %v, want only the provider that answered", body.Sessions)
+	}
+	if _, ok := body.Sessions["claude:s1"]; !ok {
+		t.Errorf("missing claude:s1 in %v", body.Sessions)
+	}
+	if len(body.Pressure) != 2 {
+		t.Errorf("pressure = %+v, want the answering provider's series", body.Pressure)
+	}
+}
+
+func TestMemoryShouldSurviveAProviderPrintingSomethingUnreadable(t *testing.T) {
+	srv := &Server{Providers: []provider.Provider{
+		provider.NewSubprocessProvider("broken", "Broken", []string{writeMemoryStub(t, "not json at all")}, "", provider.Capabilities{Memory: true}),
+		provider.NewSubprocessProvider("claude", "Claude", []string{writeMemoryStub(t, memoryFixtureHost)}, "", provider.Capabilities{Memory: true}),
+	}}
+
+	body, _ := getMemory(t, srv, "?day=2026-06-26")
+
+	if _, ok := body.Sessions["claude:s1"]; !ok {
+		t.Fatalf("sessions = %v, want the readable provider kept", body.Sessions)
+	}
+}
+
+func TestMemoryShouldDropARecordThatCarriesNoSessionId(t *testing.T) {
+	// The key IS the lane identity; a record without one cannot enrich anything,
+	// and keying it on "" would collide every such record onto one entry.
+	doc := `{"window":"2026-06-26","sessions":[{"session_id":"","peak_tree_bytes":1},{"session_id":"s1","peak_tree_bytes":2}],"pressure":[]}`
+	srv := &Server{Ctl: writeMemoryStub(t, doc)}
+
+	body, _ := getMemory(t, srv, "?day=2026-06-26")
+
+	if len(body.Sessions) != 1 {
+		t.Fatalf("sessions = %v, want only the keyable record", body.Sessions)
+	}
+	if _, ok := body.Sessions["s1"]; !ok {
+		t.Errorf("missing s1 in %v", body.Sessions)
+	}
+}
+
+func TestMemoryShouldForwardTheRequestedWindowToTheProvider(t *testing.T) {
+	argvFile := filepath.Join(t.TempDir(), "argv.txt")
+	body := "#!/bin/sh\n: > " + argvFile + "\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> " + argvFile + "; done\nprintf '%s' '" + memoryFixtureHost + "'\n"
+	srv := &Server{Ctl: writeStub(t, body), Dir: "/server/default"}
+
+	getMemory(t, srv, "?day=2026-06-26&since=2026-06-01&until=2026-06-30&dir=/from/query")
+
+	raw, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("read argv file: %v", err)
+	}
+	args := strings.Fields(strings.TrimSpace(string(raw)))
+	if len(args) == 0 || args[0] != "memory" {
+		t.Fatalf("argv = %v, want the memory subcommand first", args)
+	}
+	if !contains(args, "--json") {
+		t.Fatalf("argv = %v, want --json", args)
+	}
+	// --plan-window is a timeline flag; carrying it over would fail the call.
+	if contains(args, "--plan-window") {
+		t.Fatalf("argv = %v, should not carry the timeline flags", args)
+	}
+	mustContainPair(t, args, "--day", "2026-06-26")
+	mustContainPair(t, args, "--since", "2026-06-01")
+	mustContainPair(t, args, "--until", "2026-06-30")
+	mustContainPair(t, args, "--dir", "/from/query")
+}
+
 func TestSummariesShouldServeEmptySetWhenStoreMissing(t *testing.T) {
 	srv := &Server{SummariesDir: filepath.Join(t.TempDir(), "nonexistent")}
 	rec := httptest.NewRecorder()

@@ -6,6 +6,103 @@ import (
 	"github.com/tjmisko/switchboard-dashboard/internal/timeline"
 )
 
+// The memory document annotates the very lanes the envelope draws, so the two
+// have to agree about where a session's evidence stops. Compile and
+// CompileMemory reach that bound by their own routes — one to clip credited
+// attention, the other to clip the series — and a lane the envelope refuses to
+// credit past 06:30 must not carry a hover figure measured at 09:00.
+//
+// The second case is the one that pays for the whole test. Memory samples are
+// events like any other, and left in the general lastTS fold they would count as
+// evidence of life, so a container that died silently would look alive right up
+// to the bound: no suspect flag, no clip, on either path.
+func TestCompileAndCompileMemory_shouldClipAtTheSameTrustedBound(t *testing.T) {
+	cases := []struct {
+		name        string
+		events      []Event
+		now         string
+		wantSuspect bool
+		wantPoints  int // series points surviving the clip
+	}{
+		{
+			// Talking through its life: nothing is suspect, nothing is clipped.
+			name: "live lane keeps its whole series",
+			events: []Event{
+				{Type: EventSessionStart, TS: "2026-07-22T06:00:00Z", SessionID: "busy", StartedAt: "2026-07-22T06:00:00Z"},
+				{Type: EventMemorySample, TS: "2026-07-22T06:00:00Z", SessionID: "busy", MemTreeBytes: 1000, MemPeakBytes: 1000},
+				{Type: EventUsageSample, TS: "2026-07-22T09:00:00Z", SessionID: "busy", TokIn: 10},
+				{Type: EventMemorySample, TS: "2026-07-22T09:30:00Z", SessionID: "busy", MemTreeBytes: 2000, MemPeakBytes: 2000},
+			},
+			now:         "2026-07-22T10:00:00Z",
+			wantSuspect: false,
+			wantPoints:  2,
+		},
+		{
+			// The ghost that only ever sampled. Its last real evidence is the
+			// 06:30 usage sample; the memory samples that follow are our timer
+			// talking, not the agent, and must neither clear the suspect flag nor
+			// survive the clip.
+			name: "sampled ghost is still a ghost",
+			events: []Event{
+				{Type: EventSessionStart, TS: "2026-07-22T06:00:00Z", SessionID: "ghost", StartedAt: "2026-07-22T06:00:00Z"},
+				{Type: EventUsageSample, TS: "2026-07-22T06:30:00Z", SessionID: "ghost", TokIn: 10},
+				{Type: EventMemorySample, TS: "2026-07-22T06:00:00Z", SessionID: "ghost", MemTreeBytes: 1000, MemPeakBytes: 1000},
+				{Type: EventMemorySample, TS: "2026-07-22T08:00:00Z", SessionID: "ghost", MemTreeBytes: 5000, MemPeakBytes: 5000},
+				{Type: EventMemorySample, TS: "2026-07-22T11:00:00Z", SessionID: "ghost", MemTreeBytes: 9000, MemPeakBytes: 9000},
+			},
+			now:         "2026-07-22T11:30:00Z",
+			wantSuspect: true,
+			wantPoints:  1, // only the 06:00 reading predates the 06:30 bound
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := CompileOptions{Now: mustTime(t, tc.now), Window: "2026-07-22"}
+			tl := Compile(tc.events, opts)
+			if len(tl.Lanes) != 1 {
+				t.Fatalf("got %d lanes, want 1", len(tl.Lanes))
+			}
+			lane := tl.Lanes[0]
+			if lane.Suspect != tc.wantSuspect {
+				t.Fatalf("lane.Suspect = %v, want %v (reason %q)", lane.Suspect, tc.wantSuspect, lane.SuspectReason)
+			}
+
+			doc := CompileMemory(tc.events, opts)
+			if len(doc.Sessions) != 1 {
+				t.Fatalf("got %d memory sessions, want 1", len(doc.Sessions))
+			}
+			mem := doc.Sessions[0]
+			if len(mem.Mem) != tc.wantPoints {
+				t.Fatalf("series has %d points, want %d", len(mem.Mem), tc.wantPoints)
+			}
+			if !tc.wantSuspect {
+				return
+			}
+			// Every surviving point must predate the bound the envelope published,
+			// which is the only place the two paths are forced to agree.
+			bound, ok := timeline.ParseNanos(lane.SuspectSince)
+			if !ok {
+				t.Fatalf("lane.SuspectSince = %q is unparsable", lane.SuspectSince)
+			}
+			for _, p := range mem.Mem {
+				ns, ok := timeline.ParseNanos(p.TS)
+				if !ok {
+					t.Fatalf("series point %q is unparsable", p.TS)
+				}
+				if ns >= bound {
+					t.Fatalf("series point at %s survived the lane's %s bound", p.TS, lane.SuspectSince)
+				}
+			}
+			// And the peak may not be the one read from the synthesized tail.
+			if mem.PeakTreeBytes == nil || *mem.PeakTreeBytes != 1000 {
+				t.Fatalf("peak_tree_bytes = %v, want 1000 — the 9000 was read after the lane went dark",
+					mem.PeakTreeBytes)
+			}
+		})
+	}
+}
+
 // The merged view's central premise is that a day looks the same merged as it
 // does single-provider. Every other merge test asserts a hand-computed constant
 // against a hand-built envelope, which cannot catch the two halves drifting

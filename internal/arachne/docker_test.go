@@ -24,29 +24,29 @@ func (f fakeRunner) Run(ctx context.Context, args ...string) ([]byte, error) {
 	return nil, fmt.Errorf("no canned output for %v", args)
 }
 
-func TestClient_ListRunningNames_shouldFilterToArachnePrefix(t *testing.T) {
+func TestClient_ListRunning_shouldFilterToArachnePrefixAndCarryContainerIDs(t *testing.T) {
 	r := fakeRunner{outputs: map[string][]byte{
-		"ps": []byte("arachne-agent-feat-f71\narachne-agent\nsomething-else\n\n"),
+		"ps": []byte("abc123\tarachne-agent-feat-f71\ndef456\tarachne-agent\n789xyz\tsomething-else\n\n"),
 	}}
 	c := &Client{Runner: r}
-	names, err := c.ListRunningNames(context.Background())
+	running, err := c.ListRunning(context.Background())
 	if err != nil {
-		t.Fatalf("ListRunningNames: %v", err)
+		t.Fatalf("ListRunning: %v", err)
 	}
-	if len(names) != 2 {
-		t.Fatalf("names = %v, want the slugged + bare arachne-agent (something-else filtered)", names)
+	if len(running) != 2 {
+		t.Fatalf("running = %v, want the slugged + bare arachne-agent (something-else filtered)", running)
 	}
-	set := map[string]bool{}
-	for _, n := range names {
-		set[n] = true
+	byName := map[string]string{}
+	for _, rc := range running {
+		byName[rc.Name] = rc.ID
 	}
-	if !set["arachne-agent-feat-f71"] || !set["arachne-agent"] {
-		t.Fatalf("expected both arachne containers, got %v", names)
+	if byName["arachne-agent-feat-f71"] != "abc123" || byName["arachne-agent"] != "def456" {
+		t.Fatalf("expected both arachne containers with their ids, got %v", byName)
 	}
 }
 
 func TestClient_Inspect_shouldParseEnvStatusAndStartedAt(t *testing.T) {
-	body := `[{"Name":"/arachne-agent-feat-f71","State":{"Status":"running","StartedAt":"2026-07-22T02:00:00Z"},"Config":{"Env":["PATH=/usr/bin","AGENT_MODEL=opus","ARACHNE_TASK_ID=F71.1","ARACHNE_PHASE=F71","WORKSPACE_PATH=/ws/feat/f71","REPO_ROOT=/home/x/Arachne","ARACHNE_BRIEF=/ws/brief.md"]}}]`
+	body := `[{"Id":"` + fullID + `","Name":"/arachne-agent-feat-f71","State":{"Status":"running","StartedAt":"2026-07-22T02:00:00Z"},"Config":{"Env":["PATH=/usr/bin","AGENT_MODEL=opus","ARACHNE_TASK_ID=F71.1","ARACHNE_PHASE=F71","WORKSPACE_PATH=/ws/feat/f71","REPO_ROOT=/home/x/Arachne","ARACHNE_BRIEF=/ws/brief.md"]},"HostConfig":{"CgroupParent":"","Memory":3221225472,"MemorySwap":5368709120}}]`
 	r := fakeRunner{outputs: map[string][]byte{"inspect": []byte(body)}}
 	c := &Client{Runner: r}
 	got, err := c.Inspect(context.Background(), "arachne-agent-feat-f71")
@@ -64,6 +64,43 @@ func TestClient_Inspect_shouldParseEnvStatusAndStartedAt(t *testing.T) {
 	}
 	if got.LogPath() != "/ws/feat/f71/.arachne-agent.log" {
 		t.Fatalf("log path = %q", got.LogPath())
+	}
+}
+
+// fullID is the 64-char form docker inspect reports. `docker ps` truncates to 12
+// chars, which does not match the cgroup scope dirname — hence inspect-only.
+const fullID = "3f8a1c5e9b2d47a06e1f8c3b5d9a72e4f60c18b3a5d7e92f4c6b8a0d1e3f5c79"
+
+func TestClient_Inspect_shouldCaptureFullIDAndHostConfigLimits(t *testing.T) {
+	body := `[{"Id":"` + fullID + `","Name":"/arachne-agent-feat-f71","State":{"Status":"running"},"Config":{"Env":[]},"HostConfig":{"CgroupParent":"custom.slice","Memory":6442450944,"MemorySwap":8589934592}}]`
+	c := &Client{Runner: fakeRunner{outputs: map[string][]byte{"inspect": []byte(body)}}}
+	got, err := c.Inspect(context.Background(), "arachne-agent-feat-f71")
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if got.ID != fullID {
+		t.Fatalf("ID = %q, want the full 64-char id %q", got.ID, fullID)
+	}
+	if len(got.ID) != 64 {
+		t.Fatalf("ID length = %d, want 64 (short form would not match the scope dirname)", len(got.ID))
+	}
+	if got.CgroupParent != "custom.slice" {
+		t.Fatalf("CgroupParent = %q, want custom.slice", got.CgroupParent)
+	}
+	if got.MemoryLimit != 6442450944 || got.MemorySwap != 8589934592 {
+		t.Fatalf("limits wrong: %+v", got)
+	}
+}
+
+func TestClient_Inspect_shouldLeaveLimitsZeroWhenHostConfigAbsent(t *testing.T) {
+	body := `[{"Id":"` + fullID + `","Name":"/arachne-agent","State":{"Status":"running"},"Config":{"Env":[]}}]`
+	c := &Client{Runner: fakeRunner{outputs: map[string][]byte{"inspect": []byte(body)}}}
+	got, err := c.Inspect(context.Background(), "arachne-agent")
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if got.CgroupParent != "" || got.MemoryLimit != 0 || got.MemorySwap != 0 {
+		t.Fatalf("expected zero limits without HostConfig, got %+v", got)
 	}
 }
 

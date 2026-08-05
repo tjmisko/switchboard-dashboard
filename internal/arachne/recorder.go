@@ -11,7 +11,7 @@ import (
 
 // DockerClient is the docker surface the recorder needs (satisfied by *Client).
 type DockerClient interface {
-	ListRunningNames(ctx context.Context) ([]string, error)
+	ListRunning(ctx context.Context) ([]Running, error)
 	Inspect(ctx context.Context, name string) (Container, error)
 }
 
@@ -21,6 +21,9 @@ type Config struct {
 	HistoryPath string        // append-only history log
 	StatePath   string        // reconciliation snapshot (overwritten each tick)
 	Interval    time.Duration // poll cadence
+	// CgroupRoot is the cgroup v2 mount container memory is read from
+	// (defaults to DefaultCgroupRoot). Tests point it at a fixture tree.
+	CgroupRoot string
 	// Now injects the clock (defaults to time.Now). Tick timestamps use it.
 	Now func() time.Time
 }
@@ -36,16 +39,57 @@ type Recorder struct {
 	interval    time.Duration
 	now         func() time.Time
 
-	writer *Writer
-	live   map[string]*liveSession // keyed by session slug
+	writer  *Writer
+	cgroups *CgroupReader
+	// memSampleEvery is how many polls separate two memory_sample events. See
+	// MemorySampleInterval for why the two cadences differ.
+	memSampleEvery int
+	live           map[string]*liveSession // keyed by session slug
+}
+
+// MemorySampleInterval is the wall-clock cadence for memory_sample events.
+//
+// It is deliberately much slower than the poll interval. Every history line is
+// fsync'd (Writer.Append), and Arachne pools up to six containers, so sampling
+// on every 5s poll would append ~17k fsync'd events per container per day to a
+// log that has taken about 2,500 lines since it started. Thirty seconds keeps
+// the series legible at roughly a two-thousandth of that cost.
+//
+// The resolution given up is smaller than it looks, because the figure that
+// matters most does not depend on the cadence at all: memory.peak is a
+// kernel-maintained high-water mark, so the peak is exact no matter how sparsely
+// we sample. The series is only ever needed for shape and a time-weighted mean.
+const MemorySampleInterval = 30 * time.Second
+
+// memorySampleEvery is the sample divisor: how many interval-length polls fit
+// into MemorySampleInterval, at least one. At the default 5s interval it is 6.
+// Deriving it from the interval rather than hard-coding 6 keeps the wall-clock
+// cadence stable when the interval is configured differently.
+func memorySampleEvery(interval time.Duration) int {
+	if interval <= 0 || interval >= MemorySampleInterval {
+		return 1
+	}
+	return int((MemorySampleInterval + interval - 1) / interval) // ceil
 }
 
 type liveSession struct {
-	container Container
-	lastSeen  string
-	logOffset int64
-	openSubs  map[string]SubagentSpawn // tool_use_id -> Task spawn still running
-	usage     Usage
+	container   Container
+	containerID string // docker id, so a name reused by the next run is not mistaken for this one
+	lastSeen    string
+	logOffset   int64
+	openSubs    map[string]SubagentSpawn // tool_use_id -> Task spawn still running
+	usage       Usage
+
+	memTicks   int         // polls since this session's last emitted memory sample
+	memPending *memReading // last cgroup reading not yet written to history
+	oomKills   int64       // last observed memory.events oom_kill counter
+}
+
+// memReading is one cgroup reading held between the poll that took it and the
+// tick that writes it out.
+type memReading struct {
+	mem ContainerMemory
+	ts  string
 }
 
 // NewRecorder builds a Recorder from Config.
@@ -59,12 +103,14 @@ func NewRecorder(cfg Config) *Recorder {
 		interval = 5 * time.Second
 	}
 	return &Recorder{
-		docker:      cfg.Docker,
-		historyPath: cfg.HistoryPath,
-		statePath:   cfg.StatePath,
-		interval:    interval,
-		now:         now,
-		live:        map[string]*liveSession{},
+		docker:         cfg.Docker,
+		historyPath:    cfg.HistoryPath,
+		statePath:      cfg.StatePath,
+		interval:       interval,
+		now:            now,
+		cgroups:        NewCgroupReader(cfg.CgroupRoot),
+		memSampleEvery: memorySampleEvery(interval),
+		live:           map[string]*liveSession{},
 	}
 }
 
@@ -111,55 +157,60 @@ func (r *Recorder) reconcile(ctx context.Context) error {
 	open := Reconstruct(events)
 	state := loadState(r.statePath)
 
-	names, err := r.docker.ListRunningNames(ctx)
+	running, err := r.docker.ListRunning(ctx)
 	if err != nil {
 		return err
 	}
-	liveSet := map[string]string{} // slug -> name
-	for _, n := range names {
-		liveSet[SlugOf(n)] = n
+	liveSet := map[string]Running{} // slug -> container
+	for _, rc := range running {
+		liveSet[SlugOf(rc.Name)] = rc
 	}
 	nowTS := r.nowTS()
 
-	// Close sessions that ended while we were down.
+	// Close sessions that ended while we were down. A slug running again under a
+	// NEW container id ended too: the pump started the next phase task while we
+	// were not watching, and only the id can say so — the name is identical
+	// either way. Dropping it from `open` leaves the live container to the first
+	// tick, which records it as the new session it is.
 	for slug, os_ := range open {
-		if _, stillLive := liveSet[slug]; stillLive {
+		rc, stillLive := liveSet[slug]
+		if stillLive && !restarted(state, slug, rc.ID) {
 			continue
 		}
-		end := os_.LastTS
-		if state != nil {
-			if ss, ok := state.Sessions[slug]; ok && ss.LastSeen > end {
-				end = ss.LastSeen
-			}
-		}
-		if end == "" {
-			end = nowTS
-		}
-		for id := range os_.OpenSubagents {
-			_ = r.writer.Append(Event{Type: EventSubagentStop, TS: nowTS, SessionID: slug, ToolUseID: id, End: end})
-		}
-		_ = r.writer.Append(Event{Type: EventSessionEnd, TS: nowTS, SessionID: slug, End: end, Reason: ReasonInferred})
+		r.closeFromHistory(slug, os_, state, nowTS)
+		delete(open, slug)
 	}
 
 	// Resume sessions still running.
-	for slug, name := range liveSet {
+	for slug, rc := range liveSet {
 		os_, wasOpen := open[slug]
 		if !wasOpen {
 			continue // handled as new by the first tick
 		}
-		c, err := r.docker.Inspect(ctx, name)
+		c, err := r.docker.Inspect(ctx, rc.Name)
 		if err != nil {
 			continue
 		}
 		ls := &liveSession{
-			container: c,
-			lastSeen:  os_.LastTS,
-			openSubs:  map[string]SubagentSpawn{},
-			usage:     os_.Usage,
+			container:   c,
+			containerID: rc.ID,
+			lastSeen:    os_.LastTS,
+			openSubs:    map[string]SubagentSpawn{},
+			usage:       os_.Usage,
 		}
 		// Restore open subagents from history.
 		for id, ev := range os_.OpenSubagents {
 			ls.openSubs[id] = SubagentSpawn{ToolUseID: id, AgentType: ev.AgentType, Description: ev.Description, TS: ev.TS}
+		}
+		// Prime the OOM counter without emitting anything. memory.events is
+		// cumulative over the container's life and does not reset when we restart,
+		// so a kill that happened while we were down is already in it; emitting on
+		// the first poll would date that old kill to now. There is no honest
+		// timestamp to give it, and the same discipline the session-end
+		// reconciliation follows applies — observe the gap, do not synthesize
+		// through it.
+		if m, err := r.cgroups.Read(c); err == nil {
+			ls.oomKills = m.OOMKills
 		}
 		// Resume the log at the persisted offset; without one, skip the backlog
 		// to avoid re-emitting subagents we already recorded before the crash.
@@ -183,24 +234,33 @@ func (r *Recorder) reconcile(ctx context.Context) error {
 // tick performs one poll: detect new/gone containers and advance each live
 // session's log.
 func (r *Recorder) tick(ctx context.Context) error {
-	names, err := r.docker.ListRunningNames(ctx)
+	running, err := r.docker.ListRunning(ctx)
 	if err != nil {
 		return err
 	}
 	nowTS := r.nowTS()
-	curr := map[string]string{}
-	for _, n := range names {
-		curr[SlugOf(n)] = n
+	curr := map[string]Running{}
+	for _, rc := range running {
+		curr[SlugOf(rc.Name)] = rc
 	}
 
-	// New containers.
-	for slug, name := range curr {
-		if _, ok := r.live[slug]; ok {
+	// New containers — including one that has taken over a name we are already
+	// tracking. A restart landing between two polls shows up only as a changed
+	// container id; on the name alone the pump's next phase task would inherit
+	// the last one's session, and its freshly truncated log would be read at the
+	// dead run's offset. Inspect first, so a transient docker failure leaves the
+	// old run open for the next tick instead of closing it for nothing.
+	for slug, rc := range curr {
+		ls, tracked := r.live[slug]
+		if tracked && ls.containerID == rc.ID {
 			continue
 		}
-		c, err := r.docker.Inspect(ctx, name)
+		c, err := r.docker.Inspect(ctx, rc.Name)
 		if err != nil {
 			continue // try again next tick
+		}
+		if tracked {
+			r.closeLive(slug, ls, nowTS)
 		}
 		start := c.StartedAt
 		if start == "" {
@@ -211,12 +271,12 @@ func (r *Recorder) tick(ctx context.Context) error {
 			project = filepath.Base(c.RepoRoot)
 		}
 		_ = r.writer.Append(Event{
-			Type: EventSessionStart, TS: nowTS, SessionID: slug, Container: name,
+			Type: EventSessionStart, TS: nowTS, SessionID: slug, Container: rc.Name,
 			Agent: c.Agent, Project: project, ProjectFull: project,
 			TaskID: c.TaskID, Phase: c.Phase, Brief: c.Brief,
 			Workspace: c.Workspace, StartedAt: start,
 		})
-		r.live[slug] = &liveSession{container: c, lastSeen: nowTS, openSubs: map[string]SubagentSpawn{}}
+		r.live[slug] = &liveSession{container: c, containerID: rc.ID, lastSeen: nowTS, openSubs: map[string]SubagentSpawn{}}
 	}
 
 	// Gone containers.
@@ -224,15 +284,7 @@ func (r *Recorder) tick(ctx context.Context) error {
 		if _, ok := curr[slug]; ok {
 			continue
 		}
-		end := ls.lastSeen
-		if end == "" {
-			end = nowTS
-		}
-		for id := range ls.openSubs {
-			_ = r.writer.Append(Event{Type: EventSubagentStop, TS: nowTS, SessionID: slug, ToolUseID: id, End: end})
-		}
-		_ = r.writer.Append(Event{Type: EventSessionEnd, TS: nowTS, SessionID: slug, End: end, Reason: ReasonExited})
-		delete(r.live, slug)
+		r.closeLive(slug, ls, nowTS)
 	}
 
 	// Advance logs for surviving sessions.
@@ -242,10 +294,66 @@ func (r *Recorder) tick(ctx context.Context) error {
 		}
 		ls.lastSeen = nowTS
 		r.advanceLog(slug, ls, nowTS)
+		r.sampleMemory(slug, ls, nowTS)
 	}
 
 	r.writeState(nowTS)
 	return nil
+}
+
+// closeLive ends a session we were tracking, at the last instant we saw it
+// alive, and stops tracking it. Its open subagents are closed at the same
+// instant: whatever they were doing, they did not outlive their container.
+func (r *Recorder) closeLive(slug string, ls *liveSession, nowTS string) {
+	end := ls.lastSeen
+	if end == "" {
+		end = nowTS
+	}
+	// The cgroup goes with the container, so the reading held from the last poll
+	// is the final one there will ever be. Flushing it keeps the tail of the
+	// series — and the high-water mark it carries — from being lost in the gap
+	// between the last emitted sample and the exit. Both paths here are a run
+	// ending: the container gone from docker, and a restart that reused its name.
+	r.flushMemorySample(slug, ls)
+	r.cgroups.Forget(ls.container.ID)
+	for id := range ls.openSubs {
+		_ = r.writer.Append(Event{Type: EventSubagentStop, TS: nowTS, SessionID: slug, ToolUseID: id, End: end})
+	}
+	_ = r.writer.Append(Event{Type: EventSessionEnd, TS: nowTS, SessionID: slug, End: end, Reason: ReasonExited})
+	delete(r.live, slug)
+}
+
+// closeFromHistory ends a session history has open but docker no longer backs,
+// at the latest instant either the history or the state snapshot attests to. The
+// reason is "inferred": we did not witness the exit, we deduced it on restart.
+func (r *Recorder) closeFromHistory(slug string, os_ *OpenSession, state *stateSnapshot, nowTS string) {
+	end := os_.LastTS
+	if state != nil {
+		if ss, ok := state.Sessions[slug]; ok && ss.LastSeen > end {
+			end = ss.LastSeen
+		}
+	}
+	if end == "" {
+		end = nowTS
+	}
+	for id := range os_.OpenSubagents {
+		_ = r.writer.Append(Event{Type: EventSubagentStop, TS: nowTS, SessionID: slug, ToolUseID: id, End: end})
+	}
+	_ = r.writer.Append(Event{Type: EventSessionEnd, TS: nowTS, SessionID: slug, End: end, Reason: ReasonInferred})
+}
+
+// restarted reports whether the container now wearing a slug's name is a
+// different one from the container the last state snapshot recorded. With no id
+// on either side — a snapshot written before the recorder tracked one, or none
+// at all — we cannot tell, and answer no: resuming a session that did in truth
+// restart merges two runs, but closing one that did not would end a session
+// that is still running, and history has no way back from that.
+func restarted(state *stateSnapshot, slug, liveID string) bool {
+	if state == nil || liveID == "" {
+		return false
+	}
+	ss, ok := state.Sessions[slug]
+	return ok && ss.ContainerID != "" && ss.ContainerID != liveID
 }
 
 // advanceLog reads a session's log tail and records subagents and usage.
@@ -298,6 +406,56 @@ func (r *Recorder) advanceLog(slug string, ls *liveSession, nowTS string) {
 	}
 }
 
+// sampleMemory reads the container's cgroup and records what it found.
+//
+// The read happens on every poll but the sample is written only every
+// memSampleEvery polls. The two cadences are deliberately different because
+// their costs are: a read is six small files under /sys/fs/cgroup, while every
+// history line is fsync'd.
+//
+// Reading on every poll is what makes an OOM kill catchable at all. The counter
+// is checked at the poll interval rather than the sample interval, so a
+// container whose cage fires and then dies still leaves the event behind — at
+// the sample interval the container would usually be gone, and its cgroup with
+// it, before anyone looked.
+func (r *Recorder) sampleMemory(slug string, ls *liveSession, nowTS string) {
+	m, err := r.cgroups.Read(ls.container)
+	if err != nil {
+		return // exited, or a layout we could not resolve; never fatal to a tick
+	}
+	if m.OOMKills > ls.oomKills {
+		// Its own event, not a field on a sample: the cage firing is a discrete
+		// fact the timeline should be able to mark, and today it surfaces only as
+		// an unexplained session_end. The memory figures ride along as the
+		// diagnostic context for why it fired.
+		_ = r.writer.Append(Event{
+			Type: EventOOMKill, TS: nowTS, SessionID: slug,
+			OOMKills: m.OOMKills, OOMKillDelta: m.OOMKills - ls.oomKills,
+			MemTreeBytes: m.Current, MemPeakBytes: m.Peak, MemMaxBytes: m.Max,
+		})
+		ls.oomKills = m.OOMKills
+	}
+	ls.memPending = &memReading{mem: m, ts: nowTS}
+	if ls.memTicks%r.memSampleEvery == 0 {
+		r.flushMemorySample(slug, ls) // a new session samples on its first poll
+	}
+	ls.memTicks++
+}
+
+// flushMemorySample writes the held reading, if there is one, and clears it.
+func (r *Recorder) flushMemorySample(slug string, ls *liveSession) {
+	p := ls.memPending
+	if p == nil {
+		return
+	}
+	_ = r.writer.Append(Event{
+		Type: EventMemorySample, TS: p.ts, SessionID: slug,
+		MemTreeBytes: p.mem.Current, MemPeakBytes: p.mem.Peak, MemMaxBytes: p.mem.Max,
+		MemSwapBytes: p.mem.Swap, MemInactiveFileBytes: p.mem.InactiveFile,
+	})
+	ls.memPending = nil
+}
+
 func (r *Recorder) nowTS() string { return r.now().UTC().Format(time.RFC3339) }
 
 // --- state snapshot ---
@@ -308,9 +466,13 @@ type stateSnapshot struct {
 }
 
 type sessionState struct {
-	LastSeen  string `json:"last_seen"`
-	LogOffset int64  `json:"log_offset"`
-	Usage     Usage  `json:"usage"`
+	LastSeen string `json:"last_seen"`
+	// ContainerID is what a restart across a recorder outage is caught by: on
+	// the next reconcile the name is unchanged but the id is not. Omitted when
+	// unknown, and read back as "cannot tell" rather than "no restart".
+	ContainerID string `json:"container_id,omitempty"`
+	LogOffset   int64  `json:"log_offset"`
+	Usage       Usage  `json:"usage"`
 }
 
 func (r *Recorder) writeState(nowTS string) {
@@ -319,7 +481,12 @@ func (r *Recorder) writeState(nowTS string) {
 	}
 	snap := stateSnapshot{Updated: nowTS, Sessions: map[string]sessionState{}}
 	for slug, ls := range r.live {
-		snap.Sessions[slug] = sessionState{LastSeen: ls.lastSeen, LogOffset: ls.logOffset, Usage: ls.usage}
+		snap.Sessions[slug] = sessionState{
+			LastSeen:    ls.lastSeen,
+			ContainerID: ls.containerID,
+			LogOffset:   ls.logOffset,
+			Usage:       ls.usage,
+		}
 	}
 	b, err := json.Marshal(snap)
 	if err != nil {

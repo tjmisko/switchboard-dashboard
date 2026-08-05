@@ -48,6 +48,7 @@ func NewClient() *Client { return &Client{Runner: ExecRunner{}} }
 // Container is the metadata an adapter extracts per session container.
 type Container struct {
 	Name      string
+	ID        string // .Id — the full 64-char id; the cgroup scope dirname derives from it
 	Slug      string // session identity: name minus the "arachne-agent-" prefix
 	Status    string // .State.Status (running/exited/…)
 	StartedAt string // .State.StartedAt (RFC3339) — accurate session start
@@ -57,6 +58,11 @@ type Container struct {
 	Brief     string // ARACHNE_BRIEF
 	Workspace string // WORKSPACE_PATH (worktree)
 	RepoRoot  string // REPO_ROOT
+
+	// Host-side cgroup/limit facts, from .HostConfig.
+	CgroupParent string // relocates the container's cgroup when non-empty
+	MemoryLimit  int64  // --memory, bytes (0 = unlimited)
+	MemorySwap   int64  // --memory-swap, bytes (0 = unset, -1 = unlimited)
 }
 
 // LogPath is the container's stream-json log inside its worktree.
@@ -76,28 +82,42 @@ func SlugOf(name string) string {
 	return name
 }
 
-// ListRunningNames returns the names of running Arachne session containers. The
-// docker name filter is a substring match, so results are re-checked against the
-// NamePrefix to avoid matching an unrelated container that merely contains it.
-func (c *Client) ListRunningNames(ctx context.Context) ([]string, error) {
-	out, err := c.Runner.Run(ctx, "ps", "--filter", "name="+NamePrefix, "--format", "{{.Names}}")
+// Running is one running container as `docker ps` reports it. The ID is what
+// separates a run from the next one to wear the same name: Arachne's pump
+// restarts arachne-agent-<slug> once per phase task, so the name identifies the
+// branch, never the run. Watching names alone, a restart between two polls is
+// invisible — the two runs fuse into one endless session, and its log gets read
+// at the dead run's offset.
+type Running struct {
+	Name string
+	ID   string
+}
+
+// ListRunning returns the running Arachne session containers. The docker name
+// filter is a substring match, so results are re-checked against the NamePrefix
+// to avoid matching an unrelated container that merely contains it.
+func (c *Client) ListRunning(ctx context.Context) ([]Running, error) {
+	out, err := c.Runner.Run(ctx, "ps", "--filter", "name="+NamePrefix, "--format", "{{.ID}}\t{{.Names}}")
 	if err != nil {
 		return nil, err
 	}
-	var names []string
+	var running []Running
 	for _, line := range strings.Split(string(out), "\n") {
-		name := strings.TrimSpace(line)
-		if name == "" {
+		id, name, ok := strings.Cut(strings.TrimSpace(line), "\t")
+		if !ok {
+			continue // blank line, or a format we cannot split into id and name
+		}
+		id, name = strings.TrimSpace(id), strings.TrimSpace(name)
+		if name != NamePrefix && !strings.HasPrefix(name, NamePrefix+"-") {
 			continue
 		}
-		if name == NamePrefix || strings.HasPrefix(name, NamePrefix+"-") {
-			names = append(names, name)
-		}
+		running = append(running, Running{Name: name, ID: id})
 	}
-	return names, nil
+	return running, nil
 }
 
 type inspectResult struct {
+	ID    string `json:"Id"`
 	Name  string `json:"Name"`
 	State struct {
 		Status    string `json:"Status"`
@@ -106,6 +126,11 @@ type inspectResult struct {
 	Config struct {
 		Env []string `json:"Env"`
 	} `json:"Config"`
+	HostConfig struct {
+		CgroupParent string `json:"CgroupParent"`
+		Memory       int64  `json:"Memory"`
+		MemorySwap   int64  `json:"MemorySwap"`
+	} `json:"HostConfig"`
 }
 
 // Inspect returns the metadata for one container.
@@ -124,16 +149,20 @@ func (c *Client) Inspect(ctx context.Context, name string) (Container, error) {
 	r := arr[0]
 	env := parseEnv(r.Config.Env)
 	return Container{
-		Name:      name,
-		Slug:      SlugOf(name),
-		Status:    r.State.Status,
-		StartedAt: r.State.StartedAt,
-		Agent:     env["AGENT_MODEL"],
-		TaskID:    env["ARACHNE_TASK_ID"],
-		Phase:     env["ARACHNE_PHASE"],
-		Brief:     env["ARACHNE_BRIEF"],
-		Workspace: env["WORKSPACE_PATH"],
-		RepoRoot:  env["REPO_ROOT"],
+		Name:         name,
+		ID:           r.ID,
+		Slug:         SlugOf(name),
+		Status:       r.State.Status,
+		StartedAt:    r.State.StartedAt,
+		Agent:        env["AGENT_MODEL"],
+		TaskID:       env["ARACHNE_TASK_ID"],
+		Phase:        env["ARACHNE_PHASE"],
+		Brief:        env["ARACHNE_BRIEF"],
+		Workspace:    env["WORKSPACE_PATH"],
+		RepoRoot:     env["REPO_ROOT"],
+		CgroupParent: r.HostConfig.CgroupParent,
+		MemoryLimit:  r.HostConfig.Memory,
+		MemorySwap:   r.HostConfig.MemorySwap,
 	}, nil
 }
 

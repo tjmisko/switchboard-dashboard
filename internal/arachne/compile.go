@@ -3,6 +3,7 @@ package arachne
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/tjmisko/switchboard-dashboard/internal/timeline"
@@ -60,6 +61,18 @@ func Compile(events []Event, opts CompileOptions) *timeline.Timeline {
 		unclosed := endRFC == ""
 		if unclosed {
 			endRFC = notBefore(nowRFC, startRFC) // still running
+		}
+		// A run that ends before it starts is not a short session, it is a
+		// broken one, and it draws as nothing at all — the failure that hid a
+		// whole day of Arachne work behind one inverted span. aggregate no
+		// longer produces one, but a history an older recorder wrote still can,
+		// and SpanNanos answers "no span" to a backwards pair rather than a
+		// negative one: unclamped, such a lane skips every aggregate below in
+		// silence. Hold the invariant here, where it is still visible.
+		if ss, okS := timeline.ParseNanos(startRFC); okS {
+			if ee, okE := timeline.ParseNanos(endRFC); okE && ee < ss {
+				endRFC = startRFC
+			}
 		}
 		if !overlapsWindow(startRFC, endRFC, opts) {
 			continue
@@ -123,30 +136,24 @@ func Compile(events []Event, opts CompileOptions) *timeline.Timeline {
 		// way timeline.trustedEndNanos does.
 		var trustedNs int64
 		clip := false
-		if unclosed {
-			evidenceTS := s.lastTS
-			if evidenceTS == "" {
-				evidenceTS = startRFC
-			}
-			if es, ee, ok := timeline.SpanNanos(evidenceTS, endRFC); ok && ee-es >= int64(timeline.DefaultSuspectTrailingCap) {
-				lane.Suspect = true
-				lane.SuspectSince = evidenceTS
-				// Everything up to and including "cap" is a contract with the
-				// daemon's internal/history/suspect.go, which words the same
-				// condition for its own lanes: in a merged day the two sentences sit
-				// in one list, and an operator must not be able to tell which
-				// provider wrote which. Leading with the cap comparison and trailing
-				// with the status is what makes that possible on the daemon's side —
-				// its status clause then has a noun slot to sit in and no "a
-				// unknown-status lane" to disagree with. Arachne appends no such
-				// clause: its lane is one synthesized "working" interval (see
-				// Intervals above), so a status is a constant and carries nothing.
-				lane.SuspectReason = fmt.Sprintf("unclosed lane stretched to now: silent %s >= %s cap",
-					roundSec(time.Duration(ee-es)), roundSec(timeline.DefaultSuspectTrailingCap))
-				trustedNs, clip = es, true
-				out.Summary.SuspectLanes++
-				out.Summary.SuspectDuration += ee - es
-			}
+		if sus, ok := suspectTrailing(s, startRFC, endRFC, unclosed); ok {
+			lane.Suspect = true
+			lane.SuspectSince = sus.evidenceTS
+			// Everything up to and including "cap" is a contract with the
+			// daemon's internal/history/suspect.go, which words the same
+			// condition for its own lanes: in a merged day the two sentences sit
+			// in one list, and an operator must not be able to tell which
+			// provider wrote which. Leading with the cap comparison and trailing
+			// with the status is what makes that possible on the daemon's side —
+			// its status clause then has a noun slot to sit in and no "a
+			// unknown-status lane" to disagree with. Arachne appends no such
+			// clause: its lane is one synthesized "working" interval (see
+			// Intervals above), so a status is a constant and carries nothing.
+			lane.SuspectReason = fmt.Sprintf("unclosed lane stretched to now: silent %s >= %s cap",
+				roundSec(time.Duration(sus.stretchNs)), roundSec(timeline.DefaultSuspectTrailingCap))
+			trustedNs, clip = sus.trustedNs, true
+			out.Summary.SuspectLanes++
+			out.Summary.SuspectDuration += sus.stretchNs
 		}
 		out.Lanes = append(out.Lanes, lane)
 
@@ -221,6 +228,8 @@ type sub struct {
 	endTS       string
 }
 
+// sess is one container RUN. See aggregate for why that is not the same thing
+// as one session slug.
 type sess struct {
 	id        string
 	start     Event
@@ -229,7 +238,6 @@ type sess struct {
 	subOpen   map[string]*sub
 	subs      []*sub
 	usage     Usage
-	seen      bool
 
 	// lastTS is the newest event timestamp seen for this session, and lastNs its
 	// parsed form. For a session that never logged a session_end, this is the last
@@ -237,33 +245,99 @@ type sess struct {
 	// stretches the lane to is inference. See the suspect check in Compile.
 	lastTS string
 	lastNs int64
+
+	// mem holds this run's memory samples, in arrival order. Collected during
+	// aggregate rather than folded separately so a sample lands on the run that
+	// was open when it fired: a slug hosts a sequence of runs, so the slug alone
+	// no longer identifies who a sample belongs to.
+	mem []memPoint
 }
 
-// aggregate folds the event stream into per-session records.
-func aggregate(events []Event) []*sess {
-	byID := map[string]*sess{}
-	order := []*sess{}
-	get := func(id string) *sess {
-		s := byID[id]
-		if s == nil {
-			s = &sess{id: id, subOpen: map[string]*sub{}}
-			byID[id] = s
-			order = append(order, s)
-		}
-		return s
+// touch advances the run's last-evidence mark. A timestamp that will not parse
+// cannot move it: the suspect check measures silence from this instant, and a
+// garbled clock must not be able to shorten or extend that silence.
+func (s *sess) touch(ts string) {
+	if ns, ok := timeline.ParseNanos(ts); ok && ns > s.lastNs {
+		s.lastTS, s.lastNs = ts, ns
 	}
+}
+
+// lastEvidence is the newest instant this run is attested at: its last event,
+// or its start when nothing followed (or nothing parsed).
+func (s *sess) lastEvidence() string {
+	if s.lastTS != "" {
+		return s.lastTS
+	}
+	return sessStartTS(s)
+}
+
+// aggregate folds the event stream into per-RUN records.
+//
+// A session is one container run, not one branch. Arachne names a container
+// after its worktree branch (arachne-agent-<slug>) and the pump restarts that
+// same name once per phase task, so a slug recurs all day. Keyed on the slug
+// alone, every run of a branch folded into a single record that took its start
+// from the newest run and its end from the previous one — an inverted span that
+// drew as nothing, credited no time, and buried every earlier run of the day
+// behind it. Each session_start therefore opens a fresh run, and only a slug's
+// newest run is open to the events that follow it.
+func aggregate(events []Event) []*sess {
+	current := map[string]*sess{} // slug -> the run events attach to
+	runs := map[string]int{}      // slug -> runs opened so far, for the id suffix
+	order := []*sess{}
+
 	for _, e := range events {
 		if e.SessionID == "" {
 			continue
 		}
-		s := get(e.SessionID)
-		if ns, ok := timeline.ParseNanos(e.TS); ok && ns > s.lastNs {
-			s.lastTS, s.lastNs = e.TS, ns
+
+		if e.Type == EventSessionStart {
+			// A start for a slug whose run is still open means we never saw the
+			// old container go — a restart that landed inside one poll, or a
+			// history torn by a crash. Close it at its last evidence rather than
+			// let the new run inherit its span, subagents, and token totals.
+			if prev := current[e.SessionID]; prev != nil && prev.endTS == "" {
+				prev.endTS = prev.lastEvidence()
+				prev.endReason = ReasonInferred
+			}
+			runs[e.SessionID]++
+			s := &sess{id: runID(e.SessionID, runs[e.SessionID]), start: e, subOpen: map[string]*sub{}}
+			s.touch(e.TS)
+			current[e.SessionID] = s
+			order = append(order, s)
+			continue
 		}
+
+		// Nothing open to attach to: either no start for this slug was ever
+		// recorded, or its run is closed — and a closed run is final, so no
+		// later event may reopen it, extend its evidence, or restate its usage.
+		s := current[e.SessionID]
+		if s == nil || s.endTS != "" {
+			continue
+		}
+
+		// Memory samples are collected here, where run ownership is known, so
+		// they land on the run that was open when the sample fired rather than on
+		// the slug — which now hosts a sequence of runs. They are deliberately not
+		// touched into the evidence bound: they fire on a timer, not in response
+		// to anything the agent did, so a container that died without a
+		// session_end would otherwise look alive right up to the bound, masking
+		// exactly the case the suspect check exists to catch.
+		if IsMemoryEvent(e.Type) {
+			if ns, ok := timeline.ParseNanos(e.TS); ok {
+				s.mem = append(s.mem, memPoint{
+					ts:     e.TS,
+					ns:     ns,
+					tree:   e.MemTreeBytes,
+					peak:   e.MemPeakBytes,
+					sample: e.Type == EventMemorySample,
+				})
+			}
+			continue
+		}
+		s.touch(e.TS)
+
 		switch e.Type {
-		case EventSessionStart:
-			s.start = e
-			s.seen = true
 		case EventSessionEnd:
 			s.endTS = e.End
 			if s.endTS == "" {
@@ -289,13 +363,48 @@ func aggregate(events []Event) []*sess {
 			}
 		}
 	}
-	out := make([]*sess, 0, len(order))
-	for _, s := range order {
-		if s.seen {
-			out = append(out, s) // drop sessions we never saw start for
-		}
+	return order
+}
+
+// runID names the Nth run of a slug. The first run keeps the bare slug, so the
+// ordinary one-container-per-branch day reads exactly as it always has; a
+// restart appends "#N", which is what lets the dashboard — whose bars are keyed
+// on session_id — draw a branch's runs as the separate sessions they are.
+func runID(slug string, run int) string {
+	if run <= 1 {
+		return slug
 	}
-	return out
+	return slug + "#" + strconv.Itoa(run)
+}
+
+// suspect is the outcome of the trailing-interval plausibility check.
+type suspect struct {
+	evidenceTS string // last instant backed by evidence
+	trustedNs  int64  // its parsed form; meaningful only when the check fired
+	stretchNs  int64  // how far past it the session was stretched
+}
+
+// suspectTrailing runs the trailing-interval check for a session nothing ever
+// closed: a lane stretched to the bound whose silence since its last real event
+// is longer than a session plausibly sits quiet. Both halves matter — a session
+// emitting events all along is long, not suspect, however long it runs.
+//
+// Compile and CompileMemory both call it so the timeline and the memory series
+// are clipped at exactly the same instant. A session that has one bound in the
+// envelope and another in its memory record would be worse than either alone.
+func suspectTrailing(s *sess, startRFC, endRFC string, unclosed bool) (suspect, bool) {
+	if !unclosed {
+		return suspect{}, false
+	}
+	evidenceTS := s.lastTS
+	if evidenceTS == "" {
+		evidenceTS = startRFC
+	}
+	es, ee, ok := timeline.SpanNanos(evidenceTS, endRFC)
+	if !ok || ee-es < int64(timeline.DefaultSuspectTrailingCap) {
+		return suspect{}, false
+	}
+	return suspect{evidenceTS: evidenceTS, trustedNs: es, stretchNs: ee - es}, true
 }
 
 // roundSec keeps the suspect reason strings readable (and identical in shape to

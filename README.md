@@ -71,6 +71,40 @@ go build -o switchboard-dashboard .
 | `--plan`      | `/tmp/claude-plan-usage.json` | Cached plan-usage file, read-only, for the gauge.                        |
 | `--summaries` | `~/.local/share/switchboard/summaries` | Session-summary records from `session-digest`; empty disables.  |
 | `--providers` | `""`                          | Providers config JSON; when set, merges the listed adapters (see below). |
+| `--settings`  | `~/.config/switchboard/dashboard.json` | Operator-model settings (see below); a missing file means defaults. |
+
+## Settings
+
+The operator model turns your focus and activity streams into "time this cost
+you" — the red half of the operator lane, the context-switch overhead, and the
+wall-clock the topline's **net agent hours** nets off. The thresholds it uses
+are judgement calls about how *you* work, not facts about the data, so they live
+in a file you own rather than in the frontend's source:
+
+```jsonc
+// ~/.config/switchboard/dashboard.json — every key optional, every value in ms
+{
+  "away_after_ms": 300000,      // 5m
+  "switch_recovery_ms": 90000,  // 90s
+  "switch_flicker_ms": 500,     // 0.5s
+  "min_engage_ms": 15000        // 15s
+}
+```
+
+| Key                  | Default | What it decides                                                                                                                                                                                              |
+| -------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `away_after_ms`      | `300000` (5m) | How long after your last keystroke or mouse move you still count as *at* a focused agent window. Reading a diff isn't idleness, so presence decays rather than blinking off — but a window left focused and untouched past this is you having **walked away**, and stops being charged as your time. Raise it if you read for long stretches; lower it if you leave sessions open when you go. |
+| `switch_recovery_ms` | `90000` (90s)  | How long re-acquiring context costs you after a context switch. Recovery windows are **unioned**, so a burst of switches inside one window costs one recovery, not one apiece.                        |
+| `switch_flicker_ms`  | `500` (0.5s)   | Minimum dwell for a focus arrival to count as a real switch at all. Below it, it's flicker (a notification, focus-follows-mouse) and is ignored by the count, the overlay, and the recovery charge alike. |
+| `min_engage_ms`      | `15000` (15s)  | Minimum focus dwell to count as attending. Separate from the flicker floor: passing through a window is a switch, but it isn't time spent working in it.                                              |
+
+Omitted keys keep their default and a missing file means "all defaults", so the
+file need only carry what you're changing. A non-positive value falls back to
+the default; a **malformed** file is a startup error rather than a silent
+default — a setting that didn't take should be loud. The values are served at
+`/api/settings` and fetched by the frontend before its first render; if that
+fetch fails the frontend uses the same built-in defaults, so an unreachable
+endpoint changes nothing.
 
 ## Data providers (adapters)
 
@@ -87,6 +121,11 @@ in one timeline and one cross-provider "agents aloft" count, each lane tagged
 with its provider (accent spine + legend chip). A provider that fails is recorded
 in the envelope's `provider_errors` rather than blanking the dashboard; only an
 all-providers-failed request is a `502`. See `examples/providers.json`.
+
+**Writing your own provider:** [`docs/provider-contract.md`](docs/provider-contract.md)
+is the full spec — the process contract, the envelope field by field with units,
+a minimum viable envelope to copy, what each optional field buys you in the UI,
+the suspect/ghost rules, and what the merge does to your output.
 
 ### Arachne provider (docker long-running sessions)
 
@@ -113,6 +152,14 @@ containers vanish on exit, it records its own time series and, on restart,
 reconciles against `docker ps` — closing sessions that ended while it was down at
 their last-seen time. Each running container is counted as one agent aloft for
 its lifetime (unattended auto mode), with subagent sub-bars layered on top.
+
+A session is one container **run**, not one branch. Arachne names a container
+after its worktree branch and the pump restarts that same name for each phase
+task, so a slug recurs through the day; the container id is what tells the runs
+apart, both between polls and across a recorder outage (it is persisted in
+`state.json`). Runs after the first take a `#N` suffix on their session id
+(`feat-f79`, `feat-f79#2`), which is what lets the dashboard — whose bars are
+keyed on session id — draw them as the separate sessions they are.
 
 ## Session summaries (`session-digest`)
 
@@ -186,17 +233,30 @@ interaction subagent sub-bars already have.
   distinct work items the pinned card renders as bullets; it is absent for
   single-task sessions and for records generated before the field existed.
   Always `200`; a missing store yields an empty set.
+- **`GET /api/memory`** — returns `{sessions: {<session_id>: {peak_agent_bytes,
+  avg_agent_bytes, peak_tree_bytes, avg_tree_bytes, mem}}, pressure}` for the
+  same window, from each provider's `memory --json`. Bytes throughout; `mem` is
+  an optional `{ts, agent, tree}` series and `pressure` an optional machine-wide
+  `{ts, avail_bytes, psi_avg10, psi_stall_us}` series. Always `200`; a provider
+  that fails or does not implement the subcommand contributes nothing rather than
+  erroring, so hovers simply go unenriched.
 - **`GET /api/plan`** — returns a normalized, read-only view of the cached
   plan-usage file for the cost gauge:
   `{available, mtime, age_seconds, stale, five_hour, seven_day, seven_day_opus}`.
   It never calls the OAuth endpoint. A missing file returns `200 {available:false}`
   and the UI falls back to its own recomputed cost.
+- **`GET /api/settings`** — returns the operator-model tunables
+  (`away_after_ms`, `switch_recovery_ms`, `switch_flicker_ms`, `min_engage_ms`)
+  loaded from `--settings`. Always `200`; an unconfigured server serves the
+  documented defaults, which are also the frontend's fallbacks.
 - Static assets are served from `/`. The UI also reads `?day`, `?since`, and
   `?until` from its own URL, so a window is shareable.
 
 ## Data contract
 
-The JSON shape and units are owned by Switchboard (`docs/history-schema.md`):
+The JSON shape and units are owned by Switchboard (`docs/history-schema.md`);
+[`docs/provider-contract.md`](docs/provider-contract.md) restates it as an
+implementer's spec for anyone writing a provider:
 
 - **Durations are nanoseconds**, **token fields are raw counts**, and **`cost_usd`
   is a float in dollars** recomputed by the producer from tokens × per-model price.
@@ -207,6 +267,28 @@ The JSON shape and units are owned by Switchboard (`docs/history-schema.md`):
 The summary exposes three attention figures: **union** (wall-clock with at least
 one session active), **per-session** (the sum of per-session active time), and
 **fanout** (active time weighted by subagents, approximating total agent compute).
+
+### Memory
+
+Memory rides a **separate surface** (`/api/memory`, from each provider's
+`memory --json`), deliberately not the timeline envelope. Two reasons, and both
+are load-bearing rather than stylistic:
+
+- A live sample series changes the timeline response bytes on every poll, which
+  would defeat the unchanged→no-repaint check. Memory instead follows the
+  session-summaries pattern — its own endpoint, its own slow cadence, read lazily
+  when a tooltip opens, so it costs no repaints at all.
+- On the producer side, memory samples are kept out of lane routing entirely so
+  they cannot disturb the suspect-lane post-check. A sample fires every tick
+  whether or not the session is doing anything, so counting it as evidence of
+  life would mask exactly the lost-session-death case that check exists to catch.
+
+Per session: `peak_*`/`avg_*` for the agent process alone and for its whole
+process tree, in bytes (`Pss + SwapPss`). `tree − agent` is what spawned work
+cost — subagents have no PIDs, so the tree is the only unit that captures them.
+Averages are time-weighted. Container providers (arachne) report a tree figure
+only, with no agent split, since a container total has no meaningful inner
+boundary.
 
 ### Suspect lanes
 
