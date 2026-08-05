@@ -40,7 +40,7 @@ invocation, so it loads instantly and runs offline.
   | key | does |
   | --- | --- |
   | <kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd> | cycle the plot forward / back through sessions → agents aloft → projects, wrapping at both ends |
-  | <kbd>Ctrl</kbd>+<kbd>←</kbd> / <kbd>Ctrl</kbd>+<kbd>→</kbd> | step the window one day back / forward |
+  | <kbd>Ctrl</kbd>+<kbd>←</kbd> / <kbd>Ctrl</kbd>+<kbd>→</kbd> | step the window one day back / forward, stopping at today |
   | <kbd>c</kbd> | open the date popover |
   | <kbd>3</kbd> | toggle the 30-minute average |
   | <kbd>Shift</kbd>+<kbd>C</kbd> | toggle context switches |
@@ -57,10 +57,16 @@ invocation, so it loads instantly and runs offline.
   Inside the date popover: <kbd>←</kbd><kbd>↑</kbd><kbd>↓</kbd><kbd>→</kbd> move
   the cursor a day or a week, <kbd>PgUp</kbd>/<kbd>PgDn</kbd> page a month,
   <kbd>t</kbd> jumps to today, <kbd>Enter</kbd> commits and <kbd>Esc</kbd>
-  closes. Nothing is loaded until you commit. It is the page's own calendar
-  rather than the native picker, which can't be themed, renders the date in the
-  browser locale where this page speaks ISO, and takes the keyboard away from
-  the page entirely while it is open.
+  closes. Nothing is loaded until you commit.
+
+  Today is the far end everywhere: the forward arrow is spent once the window
+  is on today, future cells are disabled, the cursor stops there rather than
+  walking past it, and `?day=` is clamped on the way in. The dashboard reports
+  what has already run, so a future day could only ever draw an empty grid.
+
+  It is the page's own calendar rather than the native picker, which can't be
+  themed, renders the date in the browser locale where this page speaks ISO,
+  and takes the keyboard away from the page entirely while it is open.
 - **Live by default**: polls `/api/timeline` every ~3s and repaints on change,
   with a freshness indicator.
 

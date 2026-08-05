@@ -827,7 +827,7 @@ function toggleControl(input, owningView) {
 // handleShortcutKey is the page's whole keymap:
 //
 //   Tab / Shift+Tab   cycle the plot forward / back through the three views
-//   Ctrl+← / Ctrl+→   step the window one day back / forward
+//   Ctrl+← / Ctrl+→   step the window one day back / forward (stops at today)
 //   c                 open the date popover
 //   3                 toggle the 30-minute average (aloft chart)
 //   Shift+C           toggle context switches (swimlanes)
@@ -2774,7 +2774,14 @@ function todayLocal() {
 }
 // The day arithmetic itself is model.js's, in UTC — see stepISODate. A blank
 // field means "today", which is the one thing the pure helper won't invent.
-function shiftDay(base, delta) { return stepISODate(base || todayLocal(), delta); }
+//
+// Today is the far end: this dashboard renders sessions that have run, and a
+// day that hasn't happened yet can only ever draw an empty grid. So the step is
+// clamped rather than left free — the ceiling is enforced here, on the one
+// helper every day-changing path funnels through.
+function shiftDay(base, delta) {
+  return clampISODate(stepISODate(base || todayLocal(), delta), todayLocal());
+}
 
 function reloadNow() { hidePopout(); loadTimeline(); }
 
@@ -2782,8 +2789,14 @@ function reloadNow() { hidePopout(); loadTimeline(); }
 // refetch. Shared by the topbar arrows and their keyboard equivalents
 // (Ctrl+← / Ctrl+→) so neither path can drift from the other. Those chords
 // stay live while the calendar is open, so the grid follows the day out.
+//
+// A step the clamp swallowed changes nothing, so it does nothing: refetching
+// the day already on screen would flash the grid for a keypress that didn't
+// move it.
 function stepDay(delta) {
-  el.day.value = shiftDay(el.day.value, delta);
+  const next = shiftDay(el.day.value, delta);
+  if (next === el.day.value) return;
+  el.day.value = next;
   syncDayDisplay();
   if (calendarOpen()) { calCursor = el.day.value; renderCalendar(); focusCursorCell(); }
   reloadNow();
@@ -2868,6 +2881,10 @@ function renderCalendar() {
   const today = todayLocal();
   el.calYm.textContent = grid.year + "-" + String(grid.month + 1).padStart(2, "0");
   el.calMonthName.textContent = MONTH_NAMES[grid.month];
+  // The forward pager is spent once the grid is showing the month today falls
+  // in: there is no later month with anything in it. Compared as YYYY-MM
+  // strings, same as everywhere else on this page.
+  el.calNext.disabled = el.calYm.textContent >= today.slice(0, 7);
   const frag = document.createDocumentFragment();
   for (const cell of grid.cells) {
     const b = document.createElement("button");
@@ -2878,8 +2895,11 @@ function renderCalendar() {
     b.setAttribute("role", "gridcell");
     b.setAttribute("aria-label", cell.iso);
     if (!cell.inMonth) b.classList.add("out");
-    // ISO days sort as strings, so this is just "hasn't happened yet"
-    if (cell.iso > today) b.classList.add("future");
+    // ISO days sort as strings, so this is just "hasn't happened yet" — and a
+    // day that hasn't happened has nothing to show, so the cell is dead rather
+    // than merely dim. `disabled` is what says so to the pointer, the keyboard
+    // and a screen reader at once; the .future class is only the paint.
+    if (cell.iso > today) { b.classList.add("future"); b.disabled = true; }
     if (cell.iso === today) b.classList.add("today");
     if (cell.iso === el.day.value) { b.classList.add("sel"); b.setAttribute("aria-selected", "true"); }
     // roving tabindex: exactly one cell is in the tab order at a time
@@ -2896,9 +2916,15 @@ function focusCursorCell() {
 
 // moveCursor walks the keyboard cursor without committing anything. Landing
 // outside the month on display pages the grid to follow it.
+//
+// The cursor stops at today rather than refusing the move: a week-down press
+// from three days ago lands ON today, which is where the user was heading, and
+// paging into a future month lands there too. Keeping the cursor at or below
+// today is also what lets future cells be `disabled` — the roving tabindex has
+// to land on a focusable cell, and a disabled one takes no focus.
 function moveCursor(iso) {
   if (!Number.isFinite(parseISODate(iso))) return;
-  calCursor = iso;
+  calCursor = clampISODate(iso, todayLocal());
   renderCalendar();
   focusCursorCell();
 }
@@ -2906,6 +2932,7 @@ function moveCursor(iso) {
 // commitDay is the only path that changes the day the page is showing.
 function commitDay(iso) {
   if (!Number.isFinite(parseISODate(iso))) return;
+  if (iso > todayLocal()) return; // belt to the disabled cells' braces
   el.day.value = iso;
   syncDayDisplay();
   closeCalendar(true);
@@ -2934,7 +2961,9 @@ function handleCalendarKey(ev) {
 
 function applyUrlParams() {
   const q = new URLSearchParams(window.location.search);
-  el.day.value = q.get("day") || todayLocal();
+  // ?day is clamped like every other way in: a hand-typed future day would
+  // otherwise open on an empty grid with the forward arrow already spent.
+  el.day.value = clampISODate(q.get("day") || todayLocal(), todayLocal());
   // ?view=sessions|line|projects deep-links the chart view (URL wins over the
   // persisted choice for this load, mirroring how ?day overrides the default day).
   const v = normalizeView(q.get("view"));
@@ -2947,6 +2976,18 @@ function applyUrlParams() {
 // still ask for el.day.value; this is the only thing that renders it.
 function syncDayDisplay() {
   el.dayDisplay.textContent = el.day.value || "—";
+  syncDayBounds();
+}
+
+// syncDayBounds spends the forward arrow once the window is sitting on today,
+// so the ceiling is visible before it is hit rather than felt as a dead button.
+// A blank field is today (see isLiveWindow), so it counts as the far end too.
+//
+// Re-run on the live tick as well as on every day change: a dashboard left open
+// across midnight gets a new today, and the arrow has to come back to life
+// there without a reload.
+function syncDayBounds() {
+  el.nextDay.disabled = !el.day.value || el.day.value >= todayLocal();
 }
 
 // ---------------------------------------------------------------------------
@@ -3105,7 +3146,9 @@ function init() {
   planTimer = setInterval(loadPlan, PLAN_POLL_MS);
   setInterval(loadSummaries, SUMMARIES_POLL_MS);
   setInterval(loadMemory, MEMORY_POLL_MS);
-  setInterval(tickLive, 1000);
+  // the same tick reseats the day's forward bound, so midnight rolling over
+  // under an open dashboard hands the next day back rather than staying locked
+  setInterval(() => { tickLive(); syncDayBounds(); }, 1000);
 }
 
 init();
