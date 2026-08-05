@@ -270,6 +270,7 @@ const el = {
   empty: document.getElementById("empty"),
   tooltip: document.getElementById("tooltip"),
   popout: document.getElementById("popout"),
+  ctxmenu: document.getElementById("ctxmenu"),
   cardAttention: document.getElementById("card-attention"),
   cardCost: document.getElementById("card-cost"),
   optCtxSwitches: document.getElementById("opt-ctx-switches"),
@@ -302,6 +303,8 @@ let lastPlan = null;       // parsed /api/plan
 let lastPlanText = "";
 let lastSummaries = {};    // /api/summaries session_id → {name, description, tasks, summary, tokens}
 let lastMemory = null;     // /api/memory {sessions, pressure} — read lazily at hover, never repainted
+let lastFlags = {};        // /api/flags laneFlagKey → record (operator data-quality flags)
+let lastFlagsText = "";    // raw /api/flags JSON, part of the repaint-on-change guard
 let lastUpdatedAt = null;  // ms of last successful timeline fetch
 let fetchOK = false;
 let timelineTimer = null;
@@ -347,7 +350,10 @@ function buildQuery() {
 
 async function loadTimeline() {
   try {
-    const res = await fetch("/api/timeline?" + buildQuery(), { cache: "no-store" });
+    const [res, flagsText] = await Promise.all([
+      fetch("/api/timeline?" + buildQuery(), { cache: "no-store" }),
+      fetchFlags(),
+    ]);
     const text = await res.text();
     if (!res.ok) {
       let msg = text;
@@ -359,8 +365,13 @@ async function loadTimeline() {
     hideError();
     fetchOK = true;
     lastUpdatedAt = Date.now();
-    if (text === lastTimelineText) { tickLive(); return; } // unchanged → no repaint
+    // Both texts gate the repaint. An APPLIED flag already changes the timeline
+    // bytes — the overlay runs server-side — but a flag that is merely filed,
+    // investigating, or awaiting review changes only its own record, and its
+    // badge still has to appear without waiting for an unrelated timeline edit.
+    if (text === lastTimelineText && flagsText === lastFlagsText) { tickLive(); return; }
     lastTimelineText = text;
+    lastFlagsText = flagsText;
     lastData = JSON.parse(text);
     render(lastData);
     tickLive();
@@ -368,6 +379,29 @@ async function loadTimeline() {
     showError(String(e));
     fetchOK = false;
   }
+}
+
+// fetchFlags refreshes lastFlags and returns the raw body for the repaint guard.
+// A failure leaves the previous set in place and returns the previous text, so a
+// blip in this endpoint neither blanks the badges nor forces a repaint — the
+// timeline is the load-bearing fetch and this one must never break it.
+async function fetchFlags() {
+  try {
+    const res = await fetch("/api/flags", { cache: "no-store" });
+    if (!res.ok) return lastFlagsText;
+    const text = await res.text();
+    lastFlags = (JSON.parse(text) || {}).flags || {};
+    return text;
+  } catch (_) {
+    return lastFlagsText;
+  }
+}
+
+// flagForLane is the lane's flag record, or null. Keyed by lane rather than by
+// session, because a session can own several lanes and only one of them may be
+// the bad one.
+function flagForLane(lane) {
+  return lastFlags[laneFlagKey(lane)] || null;
 }
 
 // loadSettings pulls the operator-model tunables over OP's fallbacks. Fetched
@@ -1511,6 +1545,7 @@ function drawSession(lane, rowTop, x, haveActivity, activeGlobal) {
   // cost rides the right end of the identifier (name-span) line above the bar;
   // the last name segment reserves room for it so label and cost never collide.
   const segs = nameSegments(lane);
+  const laneFlag = flagForLane(lane);
   const costText = lane.cost_usd != null ? fmtUSD(lane.cost_usd) : "";
   const sessEnd = x(Date.parse(lane.end));
   const sessW = Math.max(1, sessEnd - x(Date.parse(lane.start)));
@@ -1519,10 +1554,13 @@ function drawSession(lane, rowTop, x, haveActivity, activeGlobal) {
   segs.forEach((seg, i) => {
     const sx = x(seg.start), ex = x(seg.end), sw = Math.max(1, ex - sx);
     const isLead = seg.kind === "lead";
+    const flaggedNow = laneFlag && laneFlag.status !== "reverted";
     const bg = svgEl("rect", {
-      class: "name-seg" + (isLead ? " lead" : ""), x: sx, y: nameY, width: sw, height: GEO.NAME_H, rx: 1,
+      class: "name-seg" + (isLead ? " lead" : "") + (flaggedNow ? " flagged" : ""),
+      x: sx, y: nameY, width: sw, height: GEO.NAME_H, rx: 1,
     });
     bg.setAttribute("data-session", laneIdentity(lane)); // bars are keyed by identity, not name
+    bg.addEventListener("contextmenu", (ev) => { ev.preventDefault(); ev.stopPropagation(); openLaneMenu(lane, ev); });
     attachTip(bg, () => nameSegTipHTML(lane, seg));
     // click pins the archival summary card when session-digest has one WITH
     // something in it; the empty string is sessionPopoutHTML's way of saying the
@@ -1552,6 +1590,21 @@ function drawSession(lane, rowTop, x, haveActivity, activeGlobal) {
     attachTip(t, () => gutterTipHTML(lane, currentName(lane)));
     el.svg.appendChild(t);
   }
+  // ---- operator flag badge ----
+  // Drawn on a lane the operator flagged and the overlay left standing: a
+  // repaired lane is either gone or already changed, so the badge here always
+  // means "flagged, and this is still what you are looking at". A flag still
+  // being investigated draws dimmer, so "we are working on it" and "we looked
+  // and left it" are not the same mark.
+  if (laneFlag && laneFlag.status !== "reverted") {
+    const settled = laneFlag.status === "applied" || laneFlag.status === "pending_review";
+    const badge = svgEl("text", {
+      class: "flag-badge" + (settled ? "" : " pending"),
+      x: x(Date.parse(lane.start)) + 3, y: nameY - 2,
+    });
+    badge.textContent = "⚑";
+    el.svg.appendChild(badge);
+  }
 
   // ---- main status bars ----
   for (const iv of lane.intervals || []) {
@@ -1567,6 +1620,10 @@ function drawSession(lane, rowTop, x, haveActivity, activeGlobal) {
     else if (iv.status === "dormant") attrs["fill-opacity"] = DORMANT_OPACITY;
     const rect = svgEl("rect", attrs);
     attachTip(rect, () => intervalTipHTML(lane, iv));
+    // Right-click reaches the same menu from the status bar as from the name
+    // band. A lane that is one long wrong interval — the shape most worth
+    // flagging — often has no name band worth aiming at.
+    rect.addEventListener("contextmenu", (ev) => { ev.preventDefault(); ev.stopPropagation(); openLaneMenu(lane, ev); });
     el.svg.appendChild(rect);
   }
 
@@ -2765,6 +2822,190 @@ function pinPopout(html, ev) {
 function hidePopout() { el.popout.hidden = true; }
 
 // ---------------------------------------------------------------------------
+// lane context menu (right-click a session)
+// ---------------------------------------------------------------------------
+
+// FLAG_STATUS_TEXT reads a record's lifecycle state back to the operator. The
+// wording says what the dashboard is DOING about it, not just what the state is
+// called, because the state's whole purpose is to explain why the lane in front
+// of them does or does not look repaired.
+const FLAG_STATUS_TEXT = {
+  pending: "flagged — investigation queued",
+  investigating: "investigating…",
+  applied: "repaired — the overlay is in force",
+  pending_review: "diagnosed, but not confident enough to apply on its own",
+  failed: "the investigation could not explain it",
+  reverted: "flag withdrawn — the lane is drawn as the producer reported it",
+};
+
+function hideMenu() { el.ctxmenu.hidden = true; }
+function menuOpen() { return !el.ctxmenu.hidden; }
+
+// openLaneMenu builds the right-click menu for one lane. It reads lastFlags at
+// OPEN time rather than at render time, so a flag whose investigation finished
+// between the last repaint and this click shows its current state.
+function openLaneMenu(lane, ev) {
+  hideTip();
+  const flag = flagForLane(lane);
+  const name = currentName(lane) || lane.project || "session";
+  const rows = [];
+
+  if (flag) {
+    const status = FLAG_STATUS_TEXT[flag.status] || flag.status;
+    rows.push(`<div class="cm-status"><b>${escapeHTML(status)}</b>${
+      flag.root_cause ? `<br>${escapeHTML(flag.root_cause)}` : ""
+    }</div>`);
+    if (flag.root_cause || flag.verdict) {
+      rows.push(`<button data-act="details">Investigation details…</button>`);
+    }
+    if (flag.status === "pending_review") {
+      rows.push(`<button class="cm-flag" data-act="apply">Apply the proposed repair</button>`);
+    }
+    if (flag.status !== "reverted") {
+      rows.push(`<button data-act="revert">Revert this flag</button>`);
+    } else {
+      rows.push(`<button class="cm-flag" data-act="flag">Flag again</button>`);
+    }
+  } else {
+    rows.push(`<input class="cm-note" type="text" placeholder="what looks wrong? (optional)">`);
+    rows.push(`<button class="cm-flag" data-act="flag">Flag as bad data</button>`);
+    rows.push(`<button class="cm-flag" data-act="flag-long">Flag: ran longer than it should have</button>`);
+  }
+  rows.push(`<button data-act="copy-id">Copy session id</button>`);
+
+  el.ctxmenu.innerHTML = `<div class="cm-head">${escapeHTML(name)}</div>` + rows.join("");
+  el.ctxmenu.hidden = false;
+  placeAtCursor(el.ctxmenu, ev);
+
+  const note = el.ctxmenu.querySelector(".cm-note");
+  if (note) {
+    note.focus();
+    // Enter files the flag, so the whole gesture is right-click → type → Enter.
+    // The keydown is stopped from bubbling because the page's bare-key shortcuts
+    // (c, 3, …) would otherwise fire from inside this field.
+    note.addEventListener("keydown", (keyEv) => {
+      keyEv.stopPropagation();
+      if (keyEv.key !== "Enter") return;
+      keyEv.preventDefault();
+      hideMenu();
+      fileFlag(lane, note.value.trim());
+    });
+  }
+
+  el.ctxmenu.querySelectorAll("button").forEach((button) => {
+    button.addEventListener("click", (clickEv) => {
+      clickEv.stopPropagation();
+      runMenuAction(button.getAttribute("data-act"), lane, flag, note ? note.value.trim() : "", clickEv);
+    });
+  });
+}
+
+function runMenuAction(action, lane, flag, note, ev) {
+  switch (action) {
+    case "flag":
+      hideMenu();
+      fileFlag(lane, note);
+      return;
+    case "flag-long":
+      hideMenu();
+      fileFlag(lane, note || "ran longer than it should have");
+      return;
+    case "apply":
+      hideMenu();
+      // Applying a reviewed verdict is the same POST as filing: re-flagging a
+      // settled lane re-opens it, which is exactly the operator saying "look
+      // again" — and the second look is what promotes it out of review.
+      fileFlag(lane, flag && flag.note ? flag.note : "");
+      return;
+    case "revert":
+      hideMenu();
+      revertFlag(lane);
+      return;
+    case "details":
+      hideMenu();
+      pinPopout(flagPopoutHTML(lane, flag), ev);
+      return;
+    case "copy-id":
+      hideMenu();
+      if (navigator.clipboard) navigator.clipboard.writeText(rawSessionId(lane) || String(lane.pid || ""));
+      return;
+  }
+}
+
+// flagPopoutHTML renders the investigation: what it concluded, why, the evidence
+// it stood on, and the upstream report it drafted. The draft is shown rather
+// than filed — the overlay fixes the view, and whether the underlying defect is
+// worth a ticket is not a call an investigator should make on its own.
+function flagPopoutHTML(lane, flag) {
+  if (!flag) return "";
+  const parts = [`<div class="po-head">${escapeHTML(flag.verdict || "flagged")}</div>`];
+  if (flag.confidence) parts.push(`<div class="po-row">confidence ${escapeHTML(flag.confidence)}</div>`);
+  if (flag.note) parts.push(`<div class="po-desc">you said: ${escapeHTML(flag.note)}</div>`);
+  if (flag.root_cause) parts.push(`<div class="po-desc">${escapeHTML(flag.root_cause)}</div>`);
+  if (flag.action && flag.action.type && flag.action.type !== "none") {
+    parts.push(`<div class="po-row">repair: ${escapeHTML(flag.action.type)}</div>`);
+  }
+  for (const line of flag.evidence || []) {
+    parts.push(`<div class="po-row">${escapeHTML(line)}</div>`);
+  }
+  if (flag.upstream && flag.upstream.title) {
+    parts.push(`<div class="po-row">upstream (${escapeHTML(flag.upstream.repo || "?")}): ${escapeHTML(flag.upstream.title)}</div>`);
+  }
+  if (flag.agent && flag.agent.error) {
+    parts.push(`<div class="po-row">investigation failed: ${escapeHTML(flag.agent.error)}</div>`);
+  }
+  return parts.join("");
+}
+
+// placeAtCursor is pinPopout's geometry, factored out so the menu and the card
+// stay off the viewport edges the same way.
+function placeAtCursor(node, ev) {
+  const pad = 14, r = node.getBoundingClientRect();
+  let x = ev.clientX + pad, y = ev.clientY + pad;
+  if (x + r.width > window.innerWidth) x = window.innerWidth - r.width - pad;
+  if (y + r.height > window.innerHeight) y = ev.clientY - r.height - pad;
+  node.style.left = Math.max(8, x) + "px";
+  node.style.top = Math.max(8, y) + "px";
+}
+
+async function fileFlag(lane, note) {
+  await postFlags("/api/flags", {
+    session_id: lane.session_id || "",
+    lane_start: lane.start,
+    lane_end: lane.end,
+    provider: lane.provider || "",
+    project: lane.project || "",
+    note: note || "",
+  });
+}
+
+async function revertFlag(lane) {
+  await postFlags("/api/flags/revert", {
+    session_id: lane.session_id || "",
+    lane_start: lane.start,
+  });
+}
+
+// postFlags sends one flag mutation and refreshes immediately, so the badge (or
+// the repaired lane) lands on the click rather than up to a poll later.
+async function postFlags(path, body) {
+  try {
+    const res = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      showError(`${path}: ${res.status} ${await res.text()}`);
+      return;
+    }
+    await loadTimeline();
+  } catch (e) {
+    showError(String(e));
+  }
+}
+
+// ---------------------------------------------------------------------------
 // controls
 // ---------------------------------------------------------------------------
 
@@ -3114,11 +3355,17 @@ function init() {
   // and closing here too would make opening by click impossible.
   document.addEventListener("click", (ev) => {
     if (!el.popout.hidden && !el.popout.contains(ev.target)) hidePopout();
+    if (menuOpen() && !el.ctxmenu.contains(ev.target)) hideMenu();
     if (calendarOpen() && !el.calendar.contains(ev.target) && !el.dateField.contains(ev.target)) {
       closeCalendar(false);
     }
   });
-  document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") hidePopout(); });
+  document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") { hidePopout(); hideMenu(); } });
+  // A right-click anywhere but a lane closes the menu and restores the browser's
+  // own; only the lanes claim that gesture, and only while pointing at one.
+  document.addEventListener("contextmenu", (ev) => {
+    if (menuOpen() && !el.ctxmenu.contains(ev.target)) hideMenu();
+  });
 
   // The panel is anchored to the topbar, which scrolls away with the page: keep
   // it seated while the trigger is still in frame, and let it go once it isn't.

@@ -8,7 +8,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
-  laneIdentity, rawSessionId, leadLabel, nameSegments, buildBars, spanInefficiency, switchArrivals, packLanes,
+  laneIdentity, laneFlagKey, rawSessionId, leadLabel, nameSegments, buildBars, spanInefficiency, switchArrivals, packLanes,
   aloftSpans, workIntervalsMs, concurrencyProfile, alignLiveTail,
   projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs,
   suspectTailMs, normalizeView, VIEW_ORDER, stepView, scaleGeometry,
@@ -1909,4 +1909,47 @@ test("scaleGeometry should fall back to the plot width for an empty window", () 
   assert.equal(g.fit, 0);
   assert.equal(g.effective, 240, "with no window, the setting speaks for itself");
   assert.equal(g.atFit, false);
+});
+
+// --- laneFlagKey: identifying one LANE, not one session -----------------------
+
+test("laneFlagKey should separate two lanes when one session produced both", () => {
+  // The 2026-08-05 defect: session 296eb0f0 emitted a real 19-second lane and a
+  // ghost stretched to three hours. Flagging the ghost must not touch the real
+  // one, so the lane's own start has to be part of the key.
+  const id = "296eb0f0-44c5-4406-84a9-04abae0db150";
+  const real = { session_id: id, start: "2026-08-05T10:29:18.669751036-07:00" };
+  const ghost = { session_id: id, start: "2026-08-05T10:29:37.438991459-07:00" };
+  assert.equal(laneIdentity(real), laneIdentity(ghost), "precondition: one bar identity");
+  assert.notEqual(laneFlagKey(real), laneFlagKey(ghost));
+});
+
+test("laneFlagKey should agree with the Go key when the lane is the known ghost", () => {
+  // Pinned against internal/flags.Key: the browser computes the key it POSTs and
+  // the server computes the key it files under, and a drift between them files a
+  // flag nothing ever finds.
+  const key = laneFlagKey({
+    session_id: "296eb0f0-44c5-4406-84a9-04abae0db150",
+    start: "2026-08-05T10:29:37.438991459-07:00",
+  });
+  assert.equal(key, "296eb0f0-44c5-4406-84a9-04abae0db150__1785950977438");
+});
+
+test("laneFlagKey should collapse spellings when the same instant carries a different offset", () => {
+  const utc = laneFlagKey({ session_id: "s", start: "2026-08-05T17:29:37.438991459Z" });
+  const offset = laneFlagKey({ session_id: "s", start: "2026-08-05T10:29:37.438991459-07:00" });
+  assert.equal(utc, offset);
+});
+
+test("laneFlagKey should strip the provider namespace when the view is merged", () => {
+  const key = laneFlagKey({ session_id: "claude:296eb0f0", start: "2026-08-05T17:29:37Z" });
+  assert.ok(!key.includes(":"), `key still holds a colon: ${key}`);
+  assert.equal(key, "claude-296eb0f0__1785950977000");
+});
+
+test("laneFlagKey should still distinguish lanes when the session has no id", () => {
+  const a = laneFlagKey({ start: "2026-08-05T10:00:00Z" });
+  const b = laneFlagKey({ start: "2026-08-05T11:00:00Z" });
+  assert.ok(a.startsWith("session__"));
+  assert.notEqual(a, b);
 });
