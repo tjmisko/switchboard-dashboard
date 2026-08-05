@@ -32,6 +32,27 @@ It is not caught by the producer's own `suspect` check: three hours sits under
 the 4h `DefaultSuspectTrailingCap`, so the ghost is invisible until it has
 already spent the day polluting the totals.
 
+### How often, measured
+
+Over the seven day-files 2026-07-30 → 08-05, the exact signature (a
+`session_end` followed in timestamp order by a later `transition` for the same
+session) occurs **16 times**: 1, 12, 0, 0, 0, 1, 2 per day. It is bursty rather
+than steady — the twelve on 07-31 land in one day.
+
+The blind spot is total. Across every day swept, **every** unnamed
+single-interval lane came in **under** the 4h cap — 41 on 08-05, 19 on 08-04, 22
+on 07-31 — and not one exceeded it. On 07-31 the producer's `suspect` check
+flagged exactly **1** lane out of those 22. The check is calibrated for lanes
+stretched to *now*; a ghost born and closed inside the same day never reaches it.
+
+**What is NOT a defect, despite looking like one:** an interval with an empty
+`status`. It occurs only as the *leading* interval — 882 of 969 lanes on
+2026-08-05, and **zero** occurrences after the first — and is simply the gap
+between a session being discovered and its first transition. Lanes whose only
+interval is statusless (30 that day) are processes that died before transitioning
+at all; they are short, median 14s. The investigator's prompt says so explicitly,
+because the shape is common enough to invite a confident wrong diagnosis.
+
 ## Where things live
 
 ```
