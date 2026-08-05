@@ -335,6 +335,14 @@ in `Compile`. Truncated, never rounded: a lane must not extend past the present,
 and must not end before its own start either, so a session that began inside the
 current bucket is closed at its start rather than behind it.
 
+The memory surface (`/api/memory`) takes the same bound, for a different reason.
+It is fetched lazily at hover and never polled, so byte-stability buys it
+nothing; what matters is that it clips each session's series where that session's
+lane stopped being believed. A bound derived a second time, a second differently,
+puts the hover and the bar it is drawn inside a quantum apart — so `CompileMemory`
+truncates exactly as `Compile` does, and a provider serving both surfaces should
+too.
+
 ## Development
 
 ```sh

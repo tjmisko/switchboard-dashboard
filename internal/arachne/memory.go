@@ -16,6 +16,8 @@ package arachne
 import (
 	"sort"
 	"time"
+
+	"github.com/tjmisko/switchboard-dashboard/internal/timeline"
 )
 
 // MemoryDoc is the `memory --json` document.
@@ -69,7 +71,14 @@ type MemorySample struct {
 // keys records into a map where an absent entry already means "unenriched".
 func CompileMemory(events []Event, opts CompileOptions) MemoryDoc {
 	sessions := aggregate(events)
-	nowRFC := opts.Now.UTC().Format(time.RFC3339)
+	// The same bound Compile closes a lane at, derived the same way (see there):
+	// truncated onto the shared quantum, and never behind the session's own start.
+	// Byte-stability is not what it buys here — this document is fetched lazily at
+	// hover, never polled — the clip below is. It stops the series where the lane
+	// stopped being believed, and the hover draws that series inside the bar
+	// Compile emitted: two bounds derived differently put the two a quantum apart
+	// and the hover contradicts the bar it annotates.
+	nowRFC := opts.Now.Truncate(timeline.LiveBoundQuantum).UTC().Format(time.RFC3339)
 
 	// Same order as Compile: by start time, then id.
 	sort.Slice(sessions, func(i, j int) bool {
@@ -86,7 +95,7 @@ func CompileMemory(events []Event, opts CompileOptions) MemoryDoc {
 		endRFC := s.endTS
 		unclosed := endRFC == ""
 		if unclosed {
-			endRFC = nowRFC
+			endRFC = notBefore(nowRFC, startRFC)
 		}
 		if !overlapsWindow(startRFC, endRFC, opts) {
 			continue
