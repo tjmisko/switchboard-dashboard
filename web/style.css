@@ -125,11 +125,11 @@ code { font-family: var(--mono); color: var(--fg-muted); }
 
 .nav { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
-/* date-field: a native <input type="date"> sits transparent on top so the
-   calendar/value stay native, while the visible text shows our ISO (YYYY-MM-DD)
-   format that the native input can't render on its own. */
+/* date-field: the trigger for our own calendar popover (.cal below). The day
+   itself lives in a hidden input; this button only ever shows it, in the ISO
+   form the page speaks everywhere. While the popover is up the field wears the
+   accent border, so trigger and panel read as one open control. */
 .date-field {
-  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -143,30 +143,10 @@ code { font-family: var(--mono); color: var(--fg-muted); }
   cursor: pointer;
 }
 .date-field:hover { border-color: var(--fg-dim); }
-.date-field:focus-within { border-color: var(--accent); }
+.date-field:focus-visible { outline: none; border-color: var(--accent); }
+.date-field[aria-expanded="true"] { border-color: var(--accent); }
 .date-field .date-ico { color: var(--fg-muted); display: block; }
-.date-field input[type="date"] {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  opacity: 0;
-  cursor: pointer;
-}
-
-input[type="date"] {
-  background: var(--bg-elev-2);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 5px 7px;
-  font-family: var(--mono);
-  font-size: 12px;
-}
-input[type="date"]:focus { outline: none; border-color: var(--accent); }
+.date-field[aria-expanded="true"] .date-ico { color: var(--accent); }
 
 button {
   font-family: var(--sans);
@@ -467,6 +447,16 @@ main { padding: 16px 18px 36px; }
   .proj-seg { transition: none; }
   .projects.enter .proj-seg { animation: none; }
 }
+
+/* entry sweep (sessions view): a curtain in the wrap's own background parked
+   over the stretch the reveal hasn't reached, with a hairline in the identity
+   green at its leading edge — the same left→right gesture the aloft trace and
+   the project bars use. Geometry and the hairline's fade-out are set per frame
+   by app.js ("chart entry: the sweep"), which is also where reduced motion is
+   honoured: one JS ticker drives both time views, since the aloft chart is a
+   canvas with no element to keyframe. */
+.tl-sweep-cover { fill: var(--bg-elev); }
+.tl-sweep-edge { stroke: var(--c-working); stroke-width: 1; }
 
 /* svg elements */
 .idle-band { fill: rgba(110, 118, 129, 0.08); }
@@ -769,6 +759,113 @@ main { padding: 16px 18px 36px; }
 .popout .po-tasks li { margin-top: 4px; }
 .popout .po-tasks li:first-child { margin-top: 0; }
 .popout .po-tasks li::marker { color: var(--fg-dim); }
+
+/* ---------- date popover ----------
+   The page's own calendar, in the page's own language: mono numerals, an
+   ISO-first title (2026-08, the month's name trailing dim behind it), and the
+   selected day wearing exactly the green pill the view switcher's glider wears
+   — one vocabulary for "this is the thing you're looking at". The keyboard
+   cursor is the browser's own focus, moved cell to cell, so the ring is the
+   page's blue and assistive tech follows it for free.
+
+   Six fixed rows: paging months never resizes the panel, so the day under the
+   pointer stays under the pointer. */
+.cal {
+  position: fixed; z-index: 80;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 9px 10px 8px;
+  box-shadow: 0 10px 34px var(--shadow-2);
+  font-family: var(--mono);
+  user-select: none;
+  transform-origin: top center;
+  animation: cal-in 0.16s cubic-bezier(0.26, 1.36, 0.44, 1);
+}
+@keyframes cal-in {
+  from { opacity: 0; transform: translateY(-4px) scale(0.97); }
+  to { opacity: 1; transform: none; }
+}
+
+.cal-head { display: flex; align-items: center; gap: 6px; }
+.cal-title {
+  flex: 1; display: flex; align-items: baseline; justify-content: center; gap: 7px;
+  font-size: 12.5px; font-weight: 700; color: var(--fg);
+}
+.cal-monthname {
+  font-weight: 400; font-size: 11px; color: var(--fg-dim);
+  text-transform: uppercase; letter-spacing: 0.7px;
+}
+.cal-page {
+  padding: 2px 8px; font-size: 14px; line-height: 1;
+  background: transparent; border-color: transparent; color: var(--fg-dim);
+}
+.cal-page:hover { color: var(--fg); border-color: var(--border-soft); }
+
+.cal-dow, .cal-grid { display: grid; grid-template-columns: repeat(7, 30px); gap: 2px; }
+.cal-dow {
+  margin: 8px 0 4px;
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px;
+  color: var(--fg-muted); text-align: center;
+  border-bottom: 1px solid var(--border-soft); padding-bottom: 5px;
+}
+/* the weekend reads one step back — the workweek is what this dashboard is about */
+.cal-dow span:nth-child(n + 6) { color: var(--fg-dim); }
+
+.cal-day {
+  position: relative;
+  height: 27px; padding: 0;
+  font-family: var(--mono); font-size: 12px;
+  background: transparent; border: 1px solid transparent; border-radius: 6px;
+  color: var(--fg);
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+.cal-day:hover { background: var(--bg-elev); border-color: var(--border-soft); }
+/* three weights, in the order the eye should find them: days with activity
+   behind them read first, days that haven't happened yet step back one, and
+   days outside the month on display are there for orientation only. The two
+   quiet tiers are deliberately a full step apart — collapsing them would make
+   most of a mid-month grid look disabled. */
+.cal-day.future { color: var(--fg-muted); }
+.cal-day.out { color: var(--fg-dim); opacity: 0.5; }
+/* today: a dot under the numeral, the same mark whether or not it is selected */
+.cal-day.today::after {
+  content: ""; position: absolute; left: 50%; bottom: 3px;
+  width: 3px; height: 3px; margin-left: -1.5px; border-radius: 50%;
+  background: var(--fg-muted);
+}
+/* the selected day — the viewseg glider's exact pill, so "active" looks the
+   same everywhere on the page */
+.cal-day.sel {
+  background: rgba(63, 185, 80, 0.13);
+  border-color: rgba(63, 185, 80, 0.35);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  color: var(--fg); font-weight: 700; opacity: 1;
+}
+.cal-day.sel.today::after { background: var(--c-working); }
+.cal-day:focus { outline: none; border-color: var(--accent); }
+.cal-day:focus-visible { outline: none; border-color: var(--accent); }
+
+.cal-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--border-soft);
+}
+.cal-today {
+  padding: 3px 9px; font-family: var(--mono); font-size: 10.5px;
+  text-transform: uppercase; letter-spacing: 0.7px;
+  background: transparent; color: var(--fg-muted); border-color: var(--border-soft);
+}
+.cal-today:hover { color: var(--fg); border-color: var(--fg-dim); }
+.cal-keys { display: flex; gap: 4px; }
+.cal-keys kbd {
+  font-family: var(--mono); font-size: 9.5px; color: var(--fg-dim);
+  border: 1px solid var(--border-soft); border-radius: 4px; padding: 1px 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cal { animation: none; }
+  .cal-day { transition: none; }
+}
 
 /* ---------- footer ---------- */
 .footer {

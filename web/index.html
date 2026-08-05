@@ -40,13 +40,18 @@
     </div>
 
     <div class="nav">
-      <button id="prev-day" class="icon" title="previous day">‹</button>
-      <span class="date-field" id="date-field">
+      <button id="prev-day" class="icon" title="previous day (Ctrl+←)">‹</button>
+      <!-- The day is held in a hidden input (every reader still asks for
+           el.day.value) and opened with our own calendar popover rather than
+           the native picker, which cannot be themed and swallows the keyboard
+           whole while it is up. -->
+      <button class="date-field" id="date-field" type="button" aria-haspopup="dialog" aria-expanded="false"
+              aria-label="choose a date" title="choose a date (c)">
         <span class="date-text" id="day-display">—</span>
         <svg class="date-ico" viewBox="0 0 16 16" width="13" height="13" fill="currentColor" aria-hidden="true"><path d="M3.5 0a.5.5 0 0 1 .5.5V1h8V.5a.5.5 0 0 1 1 0V1h1a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V3a2 2 0 0 1 2-2h1V.5a.5.5 0 0 1 .5-.5M1 4v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V4z"/></svg>
-        <input type="date" id="day" aria-label="date" />
-      </span>
-      <button id="next-day" class="icon" title="next day">›</button>
+      </button>
+      <input type="hidden" id="day" />
+      <button id="next-day" class="icon" title="next day (Ctrl+→)">›</button>
     </div>
 
     <button id="theme-toggle" class="icon theme-toggle" title="toggle theme" aria-label="toggle color theme">
@@ -98,7 +103,7 @@
         <div class="chart-stats" id="chart-stats"></div>
       </div>
       <div class="chart-footer">
-        <div class="viewseg" id="viewseg" role="group" aria-label="chart view">
+        <div class="viewseg" id="viewseg" role="group" aria-label="chart view — Tab and Shift+Tab cycle the views" title="Tab / Shift+Tab to cycle views">
           <span class="viewseg-glider" id="viewseg-glider" aria-hidden="true"></span>
           <button id="view-sessions" class="viewseg-btn" type="button" aria-pressed="true" title="session swimlanes">sessions</button>
           <button id="view-line" class="viewseg-btn" type="button" aria-pressed="false" title="agents working over time">agents aloft</button>
@@ -110,17 +115,17 @@
           <button id="zoom-reset" class="zoom-read" type="button" title="reset to default scale"><span id="zoom-val">240</span> px/h</button>
           <button id="zoom-in" class="zoom-btn" type="button" title="zoom in — stretch time" aria-label="zoom in">+</button>
         </div>
-        <label class="toggle sessions-only" for="opt-focus">
+        <label class="toggle sessions-only" for="opt-focus" title="toggle with Shift+F">
           <input type="checkbox" id="opt-focus" class="toggle-input" />
           <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
           <span class="toggle-label">show focus</span>
         </label>
-        <label class="toggle sessions-only" for="opt-ctx-switches">
+        <label class="toggle sessions-only" for="opt-ctx-switches" title="toggle with Shift+C">
           <input type="checkbox" id="opt-ctx-switches" class="toggle-input" />
           <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
           <span class="toggle-label">show context switches</span>
         </label>
-        <label class="toggle line-only" for="opt-smooth">
+        <label class="toggle line-only" for="opt-smooth" title="toggle with 3">
           <input type="checkbox" id="opt-smooth" class="toggle-input" checked />
           <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
           <span class="toggle-label">30-min average</span>
@@ -142,6 +147,23 @@
 
   <div id="tooltip" class="tooltip" hidden></div>
   <div id="popout" class="popout" hidden></div>
+
+  <!-- date popover: our own calendar, in the page's own idiom. Six fixed weeks
+       so paging months never resizes it; the grid itself is stamped by app.js
+       from model.js's monthGrid. -->
+  <div id="calendar" class="cal" role="dialog" aria-modal="true" aria-label="choose a date" hidden>
+    <div class="cal-head">
+      <button class="cal-page" id="cal-prev" type="button" aria-label="previous month">‹</button>
+      <div class="cal-title"><span id="cal-ym">—</span><span class="cal-monthname" id="cal-monthname"></span></div>
+      <button class="cal-page" id="cal-next" type="button" aria-label="next month">›</button>
+    </div>
+    <div class="cal-dow" aria-hidden="true"><span>mo</span><span>tu</span><span>we</span><span>th</span><span>fr</span><span>sa</span><span>su</span></div>
+    <div class="cal-grid" id="cal-grid" role="grid" aria-label="days"></div>
+    <div class="cal-foot">
+      <button class="cal-today" id="cal-today" type="button">today</button>
+      <span class="cal-keys" aria-hidden="true"><kbd>←↑↓→</kbd><kbd>⏎</kbd><kbd>esc</kbd></span>
+    </div>
+  </div>
 
   <footer class="footer">
     <div class="footer-item"><span class="fk">durations</span><span class="fv">nanoseconds (÷1e9)</span></div>

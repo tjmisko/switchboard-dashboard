@@ -1025,6 +1025,91 @@
     return null;
   }
 
+  // ---------------------------------------------------------------------------
+  // ISO calendar arithmetic (the date popover)
+  //
+  // A day here is a plain YYYY-MM-DD string, and the string is the truth — not
+  // an instant. So every step below runs in UTC on the parsed parts: local
+  // midnight plus setDate() lands on the wrong day in any zone whose DST
+  // transition falls at midnight, and there is no clock in a calendar grid to
+  // absorb the hour. UTC has no transitions, so day arithmetic is exact ms.
+  // ---------------------------------------------------------------------------
+
+  const DAY_MS = 86400e3;
+
+  // parseISODate returns the UTC epoch ms of a YYYY-MM-DD day, or NaN. Strict
+  // about shape: Date.parse would happily take "2026" or an RFC3339 instant,
+  // and either would silently move the grid to a day the caller never named.
+  function parseISODate(iso) {
+    if (typeof iso !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(iso)) return NaN;
+    const t = Date.parse(iso + "T00:00:00Z");
+    // round-trip check: Date.parse accepts 2026-02-31 and rolls it into March
+    return Number.isFinite(t) && new Date(t).toISOString().slice(0, 10) === iso ? t : NaN;
+  }
+
+  // stepISODate walks a day forward or back. Returns the input unchanged when
+  // it isn't a date, so a caller stepping a blank field can't manufacture one.
+  function stepISODate(iso, days) {
+    const t = parseISODate(iso);
+    if (!Number.isFinite(t)) return iso;
+    return new Date(t + days * DAY_MS).toISOString().slice(0, 10);
+  }
+
+  // stepISOMonth pages a month at a time, holding the day of the month where it
+  // fits and CLAMPING where it doesn't: 31 Mar back a month is 28 Feb, not 3
+  // Mar. Rolling over instead would make paging non-reversible — page back then
+  // forward and you would land in a different month than you started in.
+  function stepISOMonth(iso, months) {
+    const t = parseISODate(iso);
+    if (!Number.isFinite(t)) return iso;
+    const d = new Date(t);
+    const target = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + months, 1));
+    const y = target.getUTCFullYear(), m = target.getUTCMonth();
+    const lastDay = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+    return new Date(Date.UTC(y, m, Math.min(d.getUTCDate(), lastDay))).toISOString().slice(0, 10);
+  }
+
+  // monthGrid lays out the month containing `iso` the way a calendar draws it:
+  // 42 cells, Monday-first — the page speaks ISO dates everywhere, so it keeps
+  // ISO weeks too. Always six rows, even when five would hold the month, so the
+  // popover never changes height (and never moves the day under the cursor)
+  // as the user pages through months. Returns null for a non-date.
+  function monthGrid(iso) {
+    const t = parseISODate(iso);
+    if (!Number.isFinite(t)) return null;
+    const anchor = new Date(t);
+    const year = anchor.getUTCFullYear(), month = anchor.getUTCMonth();
+    const first = Date.UTC(year, month, 1);
+    // getUTCDay is Sunday-based (0=Sun); Monday-first puts Sunday last.
+    const lead = (new Date(first).getUTCDay() + 6) % 7;
+    const cells = [];
+    for (let i = 0; i < 42; i++) {
+      const d = new Date(first - lead * DAY_MS + i * DAY_MS);
+      cells.push({
+        iso: d.toISOString().slice(0, 10),
+        day: d.getUTCDate(),
+        inMonth: d.getUTCFullYear() === year && d.getUTCMonth() === month,
+      });
+    }
+    return { year, month, cells };
+  }
+
+  // VIEW_ORDER is the left-to-right order of the footer's view switcher, and so
+  // the order Tab / Shift+Tab walk. Keep it in step with the buttons in
+  // index.html: the keyboard must land where the eye expects the glider to go.
+  const VIEW_ORDER = ["sessions", "line", "projects"];
+
+  // stepView returns the view `delta` places along VIEW_ORDER, wrapping at both
+  // ends so the cycle has no dead key — Tab past projects lands back on
+  // sessions, Shift+Tab off sessions lands on projects. An unrecognized current
+  // view is treated as the default (sessions), so a corrupted `sb-view` costs
+  // one keypress rather than wedging the cycle.
+  function stepView(view, delta) {
+    const from = VIEW_ORDER.indexOf(normalizeView(view) || "sessions");
+    const n = VIEW_ORDER.length;
+    return VIEW_ORDER[(((from + delta) % n) + n) % n];
+  }
+
   // scaleGeometry resolves the footer's px/hour setting against the window on
   // screen. The plot never draws narrower than its container — a short window
   // would otherwise shrink into a corner and leave dead space — so the density
@@ -1063,5 +1148,7 @@
     fmtBytes, spawnedBytes, laneMemory, memoryWindow, pressureWindow,
     summaryTasks, summaryBodyHTML, summaryHintText, summaryCardHasContent, normalizeView,
     fmtTokens, shortModel, tokenBilled, tokenTotals, tokenRowsHTML,
+    VIEW_ORDER, stepView,
+    parseISODate, stepISODate, stepISOMonth, monthGrid,
   };
 });

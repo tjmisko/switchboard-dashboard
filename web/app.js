@@ -247,6 +247,13 @@ const el = {
   dateField: document.getElementById("date-field"),
   prevDay: document.getElementById("prev-day"),
   nextDay: document.getElementById("next-day"),
+  calendar: document.getElementById("calendar"),
+  calGrid: document.getElementById("cal-grid"),
+  calYm: document.getElementById("cal-ym"),
+  calMonthName: document.getElementById("cal-monthname"),
+  calPrev: document.getElementById("cal-prev"),
+  calNext: document.getElementById("cal-next"),
+  calToday: document.getElementById("cal-today"),
   liveDot: document.getElementById("live-dot"),
   updated: document.getElementById("updated"),
   error: document.getElementById("error"),
@@ -632,6 +639,86 @@ function renderChartArea(data) {
   updateZoomReadout();
 }
 
+// ---------------------------------------------------------------------------
+// chart entry: the sweep
+//
+// All three views reveal left→right along the axis they measure. The projects
+// bars already grow that way in CSS (proj-grow, below); the two TIME views
+// replay the day from t0 under this ticker rather than a keyframe each, because
+// the aloft chart is a canvas with no DOM to hang a keyframe on — one driver
+// keeps the easing, the durations and the "on view ENTRY only" rule in a single
+// place.
+//
+// The ticker owns one number: how much of the plot is revealed. Both time views
+// read sweepProgress() as they draw, so a repaint that lands mid-sweep (the 3s
+// poll, a theme flip) redraws at the reveal already on screen instead of
+// snapping to the finished chart. Per frame the ticker then re-runs only the
+// cheap part — four attributes on the sessions curtain, one repaint of the
+// canvas.
+// ---------------------------------------------------------------------------
+
+const SWEEP_MS = { sessions: 380, line: 560 };
+// fast off the mark, gently arriving — a plotter head that knows where it stops
+const sweepEase = (p) => 1 - Math.pow(1 - p, 3);
+// ramp re-maps progress through [a,b] onto 0..1. The sweep's internal beats —
+// the average line settling in behind the trace, the leading hairline running
+// out before the end — are all expressed with it, and nothing else.
+const ramp = (p, a, b) => Math.min(1, Math.max(0, (p - a) / (b - a)));
+const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)");
+
+let sweepP = 1;   // revealed fraction of the plot; 1 = settled
+let sweepRaf = 0; // rAF handle, 0 when no sweep is in flight
+
+function sweepProgress() { return sweepP; }
+function sweeping() { return sweepRaf !== 0; }
+
+// sweepX is the reveal's leading edge, in plot coordinates, right now. It runs
+// across the VISIBLE band rather than the full plot: both time views scroll, and
+// at the default density barely half the plot is on screen (zoomed in, a tenth),
+// so pacing the reveal by total width would run the part you can actually see
+// off in a fraction of the duration — a flicker instead of a sweep. Whatever
+// lies beyond the wrap is simply there when the sweep lands.
+function sweepX(W) {
+  const left = el.wrap.scrollLeft;
+  const band = Math.max(1, Math.min(W, left + el.wrap.clientWidth) - left);
+  return left + sweepProgress() * band;
+}
+
+// startSweep runs the reveal over `ms`, calling repaint() every frame — the last
+// of them with sweeping() already false, which is the renderers' cue to strike
+// whatever scaffolding the sweep put up.
+function startSweep(ms, repaint) {
+  const started = performance.now();
+  sweepP = 0;
+  const frame = (now) => {
+    const linear = Math.min(1, (now - started) / ms);
+    sweepP = sweepEase(linear);
+    sweepRaf = linear < 1 ? requestAnimationFrame(frame) : 0;
+    repaint();
+  };
+  sweepRaf = requestAnimationFrame(frame);
+}
+
+// cancelSweep drops a sweep in flight and settles the progress, so a fast
+// double-flip of the view switcher never leaves two tickers painting one chart.
+function cancelSweep() {
+  if (sweepRaf) cancelAnimationFrame(sweepRaf);
+  sweepRaf = 0;
+  sweepP = 1;
+  moveSweepCurtain(); // settled: strike the sessions curtain if one is still up
+}
+
+// armChartEnter starts the entry animation for the view being ENTERED. Call it
+// BEFORE the render that draws that view: the time views read the progress while
+// drawing, and arming first is what keeps the first frame from flashing the
+// finished chart. The projects grow-in is the exception — its CSS class needs
+// the rows on the page, so setView stamps that one after the render.
+function armChartEnter(view) {
+  cancelSweep();
+  if (view === "projects" || reduceMotion.matches) return;
+  startSweep(SWEEP_MS[view], view === "line" ? repaintAloft : moveSweepCurtain);
+}
+
 // The projects view's grow-in is a CSS animation gated on .enter being present
 // on the container, so this arms its removal. The class must outlive the LAST
 // row's run, and style.css staggers each row's animation-delay by --row-i, so
@@ -670,7 +757,7 @@ function startProjectsEnter() {
 // renderTimeline un-hides it, so both other views re-hide it on entry.
 function setView(view) {
   view = normalizeView(view) || "sessions";
-  const entering = view === "projects" && currentView !== "projects";
+  const entering = view !== currentView;
   currentView = view;
   try { localStorage.setItem(VIEW_KEY, view); } catch (e) {}
   el.section.classList.toggle("view-line", view === "line");
@@ -681,12 +768,23 @@ function setView(view) {
   positionViewGlider();
   hideTip();
   if (view !== "sessions") el.empty.hidden = true; // line + projects draw their own empty state
+  // Entry animations run only when the view is newly ENTERED — the 3s poll, the
+  // zoom, a resize and a theme flip all repaint silently. The time views arm
+  // BEFORE the render so it draws at the sweep's opening reveal...
+  if (entering) armChartEnter(view);
   if (lastData) renderChartArea(lastData);
-  // Arm the grow-in only when the view is newly ENTERED (live re-renders must
-  // not restart it), and only after the render above, so the hold is sized to
-  // the rows that just landed. The animation starts when .enter is applied, so
-  // stamping it after the rows exist is what makes them all run together.
-  if (entering) startProjectsEnter();
+  // ...while the projects grow-in arms AFTER it, so the hold is sized to the
+  // rows that just landed. Its animation starts when .enter is applied, so
+  // stamping it once the rows exist is what makes them all run together.
+  if (entering && view === "projects") startProjectsEnter();
+}
+
+// activeViewButton is the segment standing for the view on screen — the glider's
+// target, and where focus follows to when the keyboard drives the switcher.
+function activeViewButton() {
+  return currentView === "line" ? el.viewLine
+    : currentView === "projects" ? el.viewProjects
+    : el.viewSessions;
 }
 
 // positionViewGlider slides the view switcher's green thumb under the active
@@ -694,11 +792,88 @@ function setView(view) {
 // clientLeft corrects for the container border (offsetLeft spans it, the
 // absolutely-positioned glider doesn't).
 function positionViewGlider() {
-  const btn = currentView === "line" ? el.viewLine
-    : currentView === "projects" ? el.viewProjects
-    : el.viewSessions;
+  const btn = activeViewButton();
   el.viewGlider.style.width = btn.offsetWidth + "px";
   el.viewGlider.style.transform = "translateX(" + (btn.offsetLeft - el.viewseg.clientLeft) + "px)";
+}
+
+// isTypingTarget reports whether a keystroke belongs to a field the user is
+// editing. The BARE keys below are claimed page-wide, but claiming them inside
+// a text field or the date input would eat the user's typing (c) or trap focus
+// with no way out (Tab), so a field in hand keeps the browser's behavior. Ctrl
+// chords are exempt — see handleShortcutKey.
+function isTypingTarget(node) {
+  if (!node || node.nodeType !== 1) return false;
+  if (node.isContentEditable) return true;
+  const tag = node.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+}
+
+// toggleControl flips a footer checkbox from the keyboard and then lets the
+// control's own change listener do the rest — the keymap must not become a
+// second place where "what this toggle does" is written down.
+//
+// Each of these toggles belongs to one view (the 30-min average to the aloft
+// chart; focus and context switches to the swimlanes), and a key that silently
+// changed something invisible would read as a dead key. So the shortcut takes
+// you to the view that owns the toggle, which is what asking to see the thing
+// meant in the first place.
+function toggleControl(input, owningView) {
+  if (currentView !== owningView) setView(owningView);
+  input.checked = !input.checked;
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+// handleShortcutKey is the page's whole keymap:
+//
+//   Tab / Shift+Tab   cycle the plot forward / back through the three views
+//   Ctrl+← / Ctrl+→   step the window one day back / forward
+//   c                 open the date popover
+//   3                 toggle the 30-minute average (aloft chart)
+//   Shift+C           toggle context switches (swimlanes)
+//   Shift+F           toggle the focus overlay (swimlanes)
+//
+// Tab's focus walk is overridden because the three views ARE this page's
+// windows. Alt and Meta chords are left alone wholesale — those are the window
+// manager's and the OS's — and so is Ctrl+Shift, which is where browsers keep
+// their own second tier.
+//
+// The Ctrl chords fire even from inside a field: they are never text input, so
+// nothing is lost by letting them through, and the day arrows stay live
+// wherever focus happens to be. Bare keys yield to a field being edited.
+function handleShortcutKey(ev) {
+  if (ev.defaultPrevented || ev.altKey || ev.metaKey) return;
+  const key = ev.key.length === 1 ? ev.key.toLowerCase() : ev.key;
+
+  if (ev.ctrlKey) {
+    if (ev.shiftKey) return;
+    if (key === "ArrowLeft") { ev.preventDefault(); stepDay(-1); return; }
+    if (key === "ArrowRight") { ev.preventDefault(); stepDay(+1); return; }
+    return;
+  }
+
+  if (isTypingTarget(ev.target)) return;
+
+  // Focus follows the view only when it was already inside the switcher —
+  // moving it there from anywhere else would yank the ring across the page on
+  // every press.
+  if (key === "Tab") {
+    ev.preventDefault();
+    const focusFollows = el.viewseg.contains(document.activeElement);
+    setView(stepView(currentView, ev.shiftKey ? -1 : +1));
+    if (focusFollows) activeViewButton().focus();
+    return;
+  }
+
+  // c opens the calendar; Shift+C is a different key entirely (the swimlanes'
+  // context switches), which is why the shift state is read, not ignored.
+  if (key === "c") {
+    ev.preventDefault();
+    if (ev.shiftKey) toggleControl(el.optCtxSwitches, "sessions"); else toggleCalendar();
+    return;
+  }
+  if (key === "f" && ev.shiftKey) { ev.preventDefault(); toggleControl(el.optFocus, "sessions"); return; }
+  if (key === "3") { ev.preventDefault(); toggleControl(el.optSmooth, "line"); }
 }
 
 // renderTopline: three dominant figures framing AI's payoff, gross → net → rate.
@@ -1122,6 +1297,48 @@ function renderTimeline(data) {
       }));
     }
   }
+  // on view entry, the sweep's curtain rides on top of everything drawn above
+  drawSweepCurtain(W, H, GEO.PLOT_TOP, plotBottom);
+}
+
+// The sessions reveal is a CURTAIN, not a clip: one rect in the wrap's own
+// background parked over the stretch the sweep hasn't reached, with a hairline
+// at its leading edge. Painting over the top costs a single element and leaves
+// every draw function above untouched — no clip-path threaded through the whole
+// SVG. renderTimeline re-appends it while a sweep is in flight, so a live
+// repaint landing mid-reveal doesn't tear it off; the settling frame strikes it.
+let sweepCurtain = null;                          // <g>: cover rect + hairline
+let sweepGeo = { W: 0, H: 0, top: 0, bottom: 0 }; // from the render being revealed
+
+function drawSweepCurtain(W, H, top, bottom) {
+  if (!sweeping()) return;
+  if (!sweepCurtain) {
+    sweepCurtain = svgEl("g", { class: "tl-sweep", "aria-hidden": "true" });
+    sweepCurtain.appendChild(svgEl("rect", { class: "tl-sweep-cover", y: 0 }));
+    sweepCurtain.appendChild(svgEl("line", { class: "tl-sweep-edge" }));
+  }
+  sweepGeo = { W, H, top, bottom };
+  el.svg.appendChild(sweepCurtain); // last child, so it covers everything drawn
+  moveSweepCurtain();
+}
+
+// moveSweepCurtain parks the curtain at the current progress — the sessions
+// view's whole per-frame cost — and takes it off the page once the sweep rests.
+function moveSweepCurtain() {
+  if (!sweepCurtain) return;
+  if (!sweeping()) { sweepCurtain.remove(); return; }
+  const p = sweepProgress();
+  const x = sweepX(sweepGeo.W);
+  const cover = sweepCurtain.firstElementChild;
+  const edge = sweepCurtain.lastElementChild;
+  cover.setAttribute("x", x);
+  cover.setAttribute("width", Math.max(0, sweepGeo.W - x));
+  cover.setAttribute("height", sweepGeo.H);
+  edge.setAttribute("x1", x);
+  edge.setAttribute("x2", x);
+  edge.setAttribute("y1", sweepGeo.top);
+  edge.setAttribute("y2", sweepGeo.bottom);
+  edge.setAttribute("opacity", 1 - ramp(p, 0.8, 1)); // out before it runs off the end
 }
 
 // groupByProject buckets lanes by lane.project, preserving lane order within a
@@ -1674,6 +1891,18 @@ function renderConcurrencyChart(data) {
       return;
     }
 
+    // Entry sweep: everything below is drawn clipped to the revealed band, so an
+    // unrevealed mark costs nothing to rasterize and the per-pixel smoothing
+    // loop can stop at the reveal instead of walking the full width every frame.
+    // Settled (reveal 1) the clip is skipped entirely and every path below draws
+    // exactly as it always has.
+    const reveal = sweepProgress();
+    const revealX = reveal < 1 ? sweepX(W) : W; // settled, the whole plot is in
+    if (reveal < 1) {
+      ctx.save();
+      ctx.beginPath(); ctx.rect(0, 0, revealX, H); ctx.clip();
+    }
+
     // y gridlines + integer labels
     const yStep = niceIntStep(yTop);
     ctx.font = "11px " + MONO;
@@ -1765,8 +1994,11 @@ function renderConcurrencyChart(data) {
 
     // smoothed 30-min rolling average (sampled per pixel)
     if (smoothOn) {
+      // sampled only as far as the sweep has come — past the reveal the clip
+      // would throw the work away (pxMax is plotW once settled)
+      const pxMax = Math.min(plotW, Math.ceil(revealX - CGEO.LEFT));
       ctx.beginPath();
-      for (let px = 0; px <= plotW; px++) {
+      for (let px = 0; px <= pxMax; px++) {
         const t = t0 + (px / plotW) * span;
         const yy = Y(windowedAvg(t)), xx = CGEO.LEFT + px;
         if (px === 0) ctx.moveTo(xx, yy); else ctx.lineTo(xx, yy);
@@ -1778,13 +2010,29 @@ function renderConcurrencyChart(data) {
     if (prof.avgActive != null) {
       const yy = Y(prof.avgActive);
       ctx.save();
+      // the reference settles in behind the trace rather than racing alongside it
+      ctx.globalAlpha = ramp(reveal, 0.55, 1);
       ctx.setLineDash([6, 4]);
       ctx.strokeStyle = C.avg; ctx.lineWidth = 1.5;
       ctx.beginPath(); ctx.moveTo(CGEO.LEFT, yy); ctx.lineTo(CGEO.LEFT + plotW, yy); ctx.stroke();
-      ctx.restore();
       ctx.fillStyle = C.avg; ctx.font = "11px " + MONO;
       ctx.textAlign = "left"; ctx.textBaseline = "bottom";
       ctx.fillText("avg " + prof.avgActive.toFixed(1) + "×", CGEO.LEFT + 6, yy - 3);
+      ctx.restore();
+    }
+
+    // the sweep's leading hairline — the plotter head, drawn over the unclipped
+    // canvas and run out before it reaches the end (mirrors .tl-sweep-edge in
+    // the sessions view, which fades on the same ramp)
+    if (reveal < 1) {
+      ctx.restore(); // reveal clip
+      ctx.globalAlpha = 1 - ramp(reveal, 0.8, 1);
+      ctx.strokeStyle = C.inst; ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(Math.round(revealX) + 0.5, plotTop);
+      ctx.lineTo(Math.round(revealX) + 0.5, plotBottom);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
     }
 
     // crosshair + value dots on hover
@@ -1806,6 +2054,10 @@ function renderConcurrencyChart(data) {
   paint(null);
   chartHover = { paint, t0, t1, span, plotW, plotLeft: CGEO.LEFT, prof, levelAt, windowedAvg, smoothOn };
 }
+
+// repaintAloft re-runs the last render's paint closure, which reads the sweep
+// progress on its own — the aloft view's whole per-frame cost during a reveal.
+function repaintAloft() { if (chartHover) chartHover.paint(null); }
 
 // updateChartStats fills the line-view caption readout (peak / average / active).
 function updateChartStats(prof) {
@@ -2520,13 +2772,165 @@ function todayLocal() {
   const d = new Date();
   return new Date(d - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 }
-function shiftDay(base, delta) {
-  const d = new Date((base || todayLocal()) + "T00:00:00");
-  d.setDate(d.getDate() + delta);
-  return new Date(d - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
-}
+// The day arithmetic itself is model.js's, in UTC — see stepISODate. A blank
+// field means "today", which is the one thing the pure helper won't invent.
+function shiftDay(base, delta) { return stepISODate(base || todayLocal(), delta); }
 
 function reloadNow() { hidePopout(); loadTimeline(); }
+
+// stepDay walks the window a day in either direction: move the value, relabel,
+// refetch. Shared by the topbar arrows and their keyboard equivalents
+// (Ctrl+← / Ctrl+→) so neither path can drift from the other. Those chords
+// stay live while the calendar is open, so the grid follows the day out.
+function stepDay(delta) {
+  el.day.value = shiftDay(el.day.value, delta);
+  syncDayDisplay();
+  if (calendarOpen()) { calCursor = el.day.value; renderCalendar(); focusCursorCell(); }
+  reloadNow();
+}
+
+// ---------------------------------------------------------------------------
+// date popover
+//
+// Our own calendar rather than the native <input type="date"> picker: that one
+// cannot be themed to match anything, renders the date in the browser locale
+// where this page speaks ISO throughout, and — the reason it had to go — takes
+// the keyboard away from the page entirely while it is up, so every shortcut
+// below died the moment it opened.
+//
+// The grid comes from model.js's monthGrid (pure, six fixed weeks). The
+// keyboard cursor IS the browser's focus, moved from cell to cell over a
+// roving tabindex, so the focus ring, screen-reader announcement and our own
+// idea of "where the keyboard is" can never disagree.
+// ---------------------------------------------------------------------------
+
+const MONTH_NAMES = ["january", "february", "march", "april", "may", "june",
+  "july", "august", "september", "october", "november", "december"];
+
+let calCursor = null; // ISO day under the keyboard; null while closed
+
+function calendarOpen() { return !el.calendar.hidden; }
+
+function openCalendar() {
+  if (calendarOpen()) return;
+  calCursor = Number.isFinite(parseISODate(el.day.value)) ? el.day.value : todayLocal();
+  // The topbar doesn't stick, so `c` pressed from halfway down the page would
+  // anchor the panel to a trigger that isn't on screen. Bring the trigger back
+  // first — the popover belongs to it, and a floating panel with no visible
+  // anchor is worse than a small scroll.
+  const a = el.dateField.getBoundingClientRect();
+  if (a.top < 0 || a.bottom > window.innerHeight) {
+    el.dateField.scrollIntoView({ block: "nearest" });
+  }
+  el.calendar.hidden = false;
+  el.dateField.setAttribute("aria-expanded", "true");
+  renderCalendar();
+  placeCalendar();
+  focusCursorCell();
+}
+
+// closeCalendar hands focus back to the trigger, which is where the keyboard
+// came from — dropping it on <body> instead would cost a keyboard user their
+// place on the page. Skipped for an outside click, where focus is already
+// wherever the user just clicked.
+function closeCalendar(restoreFocus) {
+  if (!calendarOpen()) return;
+  el.calendar.hidden = true;
+  el.dateField.setAttribute("aria-expanded", "false");
+  calCursor = null;
+  if (restoreFocus) el.dateField.focus();
+}
+
+function toggleCalendar() {
+  if (calendarOpen()) closeCalendar(true); else openCalendar();
+}
+
+// placeCalendar centers the panel under the field, flipping above it when there
+// is no room below. Both axes are clamped to the viewport as the last step, so
+// the panel is on screen whatever the anchor is doing — a fixed-position panel
+// hung off a scrolled-away trigger would otherwise render half out of frame.
+function placeCalendar() {
+  const pad = 8, anchor = el.dateField.getBoundingClientRect();
+  const r = el.calendar.getBoundingClientRect();
+  let top = anchor.bottom + 6;
+  if (top + r.height > window.innerHeight - pad) top = anchor.top - r.height - 6;
+  const clamp = (v, max) => Math.max(pad, Math.min(v, Math.max(pad, max)));
+  el.calendar.style.left = clamp(anchor.left + anchor.width / 2 - r.width / 2,
+    window.innerWidth - r.width - pad) + "px";
+  el.calendar.style.top = clamp(top, window.innerHeight - r.height - pad) + "px";
+}
+
+// renderCalendar stamps the month the cursor is in. Every arrow press re-stamps
+// rather than patching classes: 42 buttons is nothing, and one code path for
+// "what the grid looks like" is worth more than the diff it saves.
+function renderCalendar() {
+  const grid = monthGrid(calCursor) || monthGrid(todayLocal());
+  const today = todayLocal();
+  el.calYm.textContent = grid.year + "-" + String(grid.month + 1).padStart(2, "0");
+  el.calMonthName.textContent = MONTH_NAMES[grid.month];
+  const frag = document.createDocumentFragment();
+  for (const cell of grid.cells) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "cal-day";
+    b.textContent = String(cell.day);
+    b.dataset.iso = cell.iso;
+    b.setAttribute("role", "gridcell");
+    b.setAttribute("aria-label", cell.iso);
+    if (!cell.inMonth) b.classList.add("out");
+    // ISO days sort as strings, so this is just "hasn't happened yet"
+    if (cell.iso > today) b.classList.add("future");
+    if (cell.iso === today) b.classList.add("today");
+    if (cell.iso === el.day.value) { b.classList.add("sel"); b.setAttribute("aria-selected", "true"); }
+    // roving tabindex: exactly one cell is in the tab order at a time
+    b.tabIndex = cell.iso === calCursor ? 0 : -1;
+    frag.appendChild(b);
+  }
+  el.calGrid.replaceChildren(frag);
+}
+
+function focusCursorCell() {
+  const cell = el.calGrid.querySelector('[data-iso="' + calCursor + '"]');
+  if (cell) cell.focus();
+}
+
+// moveCursor walks the keyboard cursor without committing anything. Landing
+// outside the month on display pages the grid to follow it.
+function moveCursor(iso) {
+  if (!Number.isFinite(parseISODate(iso))) return;
+  calCursor = iso;
+  renderCalendar();
+  focusCursorCell();
+}
+
+// commitDay is the only path that changes the day the page is showing.
+function commitDay(iso) {
+  if (!Number.isFinite(parseISODate(iso))) return;
+  el.day.value = iso;
+  syncDayDisplay();
+  closeCalendar(true);
+  reloadNow();
+}
+
+// handleCalendarKey: while the popover is up it owns the keyboard, the way the
+// native picker did — minus the dead end. Ctrl chords pass through (Ctrl+←/→
+// keeps stepping the day underneath, grid and all), function keys are left to
+// the browser, and every remaining printable key is swallowed so the page's
+// shortcuts can't fire from behind a modal dialog.
+function handleCalendarKey(ev) {
+  if (ev.altKey || ev.metaKey || ev.ctrlKey) return;
+  const k = ev.key;
+  if (k === "Escape") { ev.preventDefault(); closeCalendar(true); return; }
+  if (k === "Enter" || k === " ") { ev.preventDefault(); commitDay(calCursor); return; }
+  const days = k === "ArrowLeft" ? -1 : k === "ArrowRight" ? 1
+    : k === "ArrowUp" ? -7 : k === "ArrowDown" ? 7 : 0;
+  if (days) { ev.preventDefault(); moveCursor(stepISODate(calCursor, days)); return; }
+  if (k === "PageUp") { ev.preventDefault(); moveCursor(stepISOMonth(calCursor, -1)); return; }
+  if (k === "PageDown") { ev.preventDefault(); moveCursor(stepISOMonth(calCursor, +1)); return; }
+  if (k === "t") { ev.preventDefault(); moveCursor(todayLocal()); return; }
+  if (k === "Tab") { ev.preventDefault(); return; } // focus stays in the dialog
+  if (k.length === 1) ev.preventDefault();
+}
 
 function applyUrlParams() {
   const q = new URLSearchParams(window.location.search);
@@ -2538,9 +2942,9 @@ function applyUrlParams() {
   syncDayDisplay();
 }
 
-// syncDayDisplay mirrors the picker's ISO value (YYYY-MM-DD) into the visible
-// label. The native <input type="date"> renders in the browser locale, so we
-// hide it behind this label to keep the date reading as ISO everywhere.
+// syncDayDisplay mirrors the held ISO value (YYYY-MM-DD) into the visible
+// label on the trigger. The value lives in a hidden input so every reader can
+// still ask for el.day.value; this is the only thing that renders it.
 function syncDayDisplay() {
   el.dayDisplay.textContent = el.day.value || "—";
 }
@@ -2599,11 +3003,22 @@ function init() {
   el.themeToggle.addEventListener("click", toggleTheme);
   themeMql.addEventListener("change", () => { if (!storedTheme()) applyTheme(); });
 
-  el.day.addEventListener("change", () => { syncDayDisplay(); reloadNow(); });
-  el.prevDay.addEventListener("click", () => { el.day.value = shiftDay(el.day.value, -1); syncDayDisplay(); reloadNow(); });
-  el.nextDay.addEventListener("click", () => { el.day.value = shiftDay(el.day.value, +1); syncDayDisplay(); reloadNow(); });
-  // open the native calendar on click (the transparent picker overlays the field)
-  el.dateField.addEventListener("click", () => { try { el.day.showPicker(); } catch (_) {} });
+  el.prevDay.addEventListener("click", () => stepDay(-1));
+  el.nextDay.addEventListener("click", () => stepDay(+1));
+
+  // date popover: the field is its trigger, the grid commits on click, and the
+  // panel's own keydown owns the keyboard while it is up.
+  el.dateField.addEventListener("click", toggleCalendar);
+  el.calendar.addEventListener("keydown", handleCalendarKey);
+  el.calGrid.addEventListener("click", (ev) => {
+    const cell = ev.target.closest(".cal-day");
+    if (cell) commitDay(cell.dataset.iso);
+  });
+  // Paging keeps the panel open and commits nothing — it moves the cursor, and
+  // the cursor is what the grid is drawn around.
+  el.calPrev.addEventListener("click", () => moveCursor(stepISOMonth(calCursor, -1)));
+  el.calNext.addEventListener("click", () => moveCursor(stepISOMonth(calCursor, +1)));
+  el.calToday.addEventListener("click", () => commitDay(todayLocal()));
   el.optCtxSwitches.addEventListener("change", () => { if (lastData) renderTimeline(lastData); });
   el.optFocus.addEventListener("change", () => { if (lastData) renderTimeline(lastData); });
   el.optSmooth.addEventListener("change", () => {
@@ -2616,6 +3031,8 @@ function init() {
   el.viewSessions.addEventListener("click", () => setView("sessions"));
   el.viewLine.addEventListener("click", () => setView("line"));
   el.viewProjects.addEventListener("click", () => setView("projects"));
+  // …and the same walk from the keyboard, alongside the day and calendar keys.
+  document.addEventListener("keydown", handleShortcutKey);
   el.section.classList.toggle("view-line", currentView === "line");
   el.section.classList.toggle("view-projects", currentView === "projects");
   el.viewSessions.setAttribute("aria-pressed", String(currentView === "sessions"));
@@ -2635,10 +3052,13 @@ function init() {
   updateZoomReadout();
 
   // line-chart crosshair: repaint the hovered vertical + value dots and show a
-  // readout. Cheap — reuses the last render's paint closure, no profile recompute.
+  // readout. Cheap — reuses the last render's paint closure, no profile
+  // recompute. The entry sweep owns the canvas until it settles, so a cursor
+  // already sitting over the plot waits it out rather than fighting the reveal
+  // for the paint; the next move after it lands picks the crosshair back up.
   el.canvas.addEventListener("mousemove", (ev) => {
     const h = chartHover;
-    if (!h) return;
+    if (!h || sweeping()) return;
     const rect = el.canvas.getBoundingClientRect();
     const px = ev.clientX - rect.left;
     if (px < h.plotLeft || px > h.plotLeft + h.plotW) { h.paint(null); hideTip(); return; }
@@ -2646,16 +3066,30 @@ function init() {
     h.paint(t);
     showTip(concurrencyTipHTML(h, t), ev);
   });
-  el.canvas.addEventListener("mouseleave", () => { if (chartHover) chartHover.paint(null); hideTip(); });
+  el.canvas.addEventListener("mouseleave", () => { if (chartHover && !sweeping()) chartHover.paint(null); hideTip(); });
 
-  // dismiss popout on outside click / Escape
+  // dismiss popout and calendar on outside click / Escape. The trigger is
+  // excluded from the calendar's outside test: its own click already toggles,
+  // and closing here too would make opening by click impossible.
   document.addEventListener("click", (ev) => {
     if (!el.popout.hidden && !el.popout.contains(ev.target)) hidePopout();
+    if (calendarOpen() && !el.calendar.contains(ev.target) && !el.dateField.contains(ev.target)) {
+      closeCalendar(false);
+    }
   });
   document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") hidePopout(); });
 
+  // The panel is anchored to the topbar, which scrolls away with the page: keep
+  // it seated while the trigger is still in frame, and let it go once it isn't.
+  window.addEventListener("scroll", () => {
+    if (!calendarOpen()) return;
+    const a = el.dateField.getBoundingClientRect();
+    if (a.bottom < 0 || a.top > window.innerHeight) closeCalendar(false); else placeCalendar();
+  }, { passive: true });
+
   let resizeTimer = null;
   window.addEventListener("resize", () => {
+    if (calendarOpen()) placeCalendar(); // the panel is anchored to a field that just moved
     if (resizeTimer) clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => { if (lastData) renderChartArea(lastData); }, 120);
   });
