@@ -468,6 +468,16 @@ main { padding: 16px 18px 36px; }
   .projects.enter .proj-seg { animation: none; }
 }
 
+/* entry sweep (sessions view): a curtain in the wrap's own background parked
+   over the stretch the reveal hasn't reached, with a hairline in the identity
+   green at its leading edge — the same left→right gesture the aloft trace and
+   the project bars use. Geometry and the hairline's fade-out are set per frame
+   by app.js ("chart entry: the sweep"), which is also where reduced motion is
+   honoured: one JS ticker drives both time views, since the aloft chart is a
+   canvas with no element to keyframe. */
+.tl-sweep-cover { fill: var(--bg-elev); }
+.tl-sweep-edge { stroke: var(--c-working); stroke-width: 1; }
+
 /* svg elements */
 .idle-band { fill: rgba(110, 118, 129, 0.08); }
 .lane-bg { fill: transparent; }

@@ -628,6 +628,74 @@ function renderChartArea(data) {
   updateZoomReadout();
 }
 
+// ---------------------------------------------------------------------------
+// chart entry: the sweep
+//
+// All three views reveal left→right along the axis they measure. The projects
+// bars already grow that way in CSS (proj-grow, below); the two TIME views
+// replay the day from t0 under this ticker rather than a keyframe each, because
+// the aloft chart is a canvas with no DOM to hang a keyframe on — one driver
+// keeps the easing, the durations and the "on view ENTRY only" rule in a single
+// place.
+//
+// The ticker owns one number: how much of the plot is revealed. Both time views
+// read sweepProgress() as they draw, so a repaint that lands mid-sweep (the 3s
+// poll, a theme flip) redraws at the reveal already on screen instead of
+// snapping to the finished chart. Per frame the ticker then re-runs only the
+// cheap part — four attributes on the sessions curtain, one repaint of the
+// canvas.
+// ---------------------------------------------------------------------------
+
+const SWEEP_MS = { sessions: 380, line: 560 };
+// fast off the mark, gently arriving — a plotter head that knows where it stops
+const sweepEase = (p) => 1 - Math.pow(1 - p, 3);
+// ramp re-maps progress through [a,b] onto 0..1. The sweep's internal beats —
+// the average line settling in behind the trace, the leading hairline running
+// out before the end — are all expressed with it, and nothing else.
+const ramp = (p, a, b) => Math.min(1, Math.max(0, (p - a) / (b - a)));
+const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)");
+
+let sweepP = 1;   // revealed fraction of the plot; 1 = settled
+let sweepRaf = 0; // rAF handle, 0 when no sweep is in flight
+
+function sweepProgress() { return sweepP; }
+function sweeping() { return sweepRaf !== 0; }
+
+// startSweep runs the reveal over `ms`, calling repaint() every frame — the last
+// of them with sweeping() already false, which is the renderers' cue to strike
+// whatever scaffolding the sweep put up.
+function startSweep(ms, repaint) {
+  const started = performance.now();
+  sweepP = 0;
+  const frame = (now) => {
+    const linear = Math.min(1, (now - started) / ms);
+    sweepP = sweepEase(linear);
+    sweepRaf = linear < 1 ? requestAnimationFrame(frame) : 0;
+    repaint();
+  };
+  sweepRaf = requestAnimationFrame(frame);
+}
+
+// cancelSweep drops a sweep in flight and settles the progress, so a fast
+// double-flip of the view switcher never leaves two tickers painting one chart.
+function cancelSweep() {
+  if (sweepRaf) cancelAnimationFrame(sweepRaf);
+  sweepRaf = 0;
+  sweepP = 1;
+  moveSweepCurtain(); // settled: strike the sessions curtain if one is still up
+}
+
+// armChartEnter starts the entry animation for the view being ENTERED. Call it
+// BEFORE the render that draws that view: the time views read the progress while
+// drawing, and arming first is what keeps the first frame from flashing the
+// finished chart. The projects grow-in is the exception — its CSS class needs
+// the rows on the page, so setView stamps that one after the render.
+function armChartEnter(view) {
+  cancelSweep();
+  if (view === "projects" || reduceMotion.matches) return;
+  startSweep(SWEEP_MS[view], view === "line" ? repaintAloft : moveSweepCurtain);
+}
+
 // The projects view's grow-in is a CSS animation gated on .enter being present
 // on the container, so this arms its removal. The class must outlive the LAST
 // row's run, and style.css staggers each row's animation-delay by --row-i, so
@@ -666,7 +734,7 @@ function startProjectsEnter() {
 // renderTimeline un-hides it, so both other views re-hide it on entry.
 function setView(view) {
   view = normalizeView(view) || "sessions";
-  const entering = view === "projects" && currentView !== "projects";
+  const entering = view !== currentView;
   currentView = view;
   try { localStorage.setItem(VIEW_KEY, view); } catch (e) {}
   el.section.classList.toggle("view-line", view === "line");
@@ -677,12 +745,15 @@ function setView(view) {
   positionViewGlider();
   hideTip();
   if (view !== "sessions") el.empty.hidden = true; // line + projects draw their own empty state
+  // Entry animations run only when the view is newly ENTERED — the 3s poll, the
+  // zoom, a resize and a theme flip all repaint silently. The time views arm
+  // BEFORE the render so it draws at the sweep's opening reveal...
+  if (entering) armChartEnter(view);
   if (lastData) renderChartArea(lastData);
-  // Arm the grow-in only when the view is newly ENTERED (live re-renders must
-  // not restart it), and only after the render above, so the hold is sized to
-  // the rows that just landed. The animation starts when .enter is applied, so
-  // stamping it after the rows exist is what makes them all run together.
-  if (entering) startProjectsEnter();
+  // ...while the projects grow-in arms AFTER it, so the hold is sized to the
+  // rows that just landed. Its animation starts when .enter is applied, so
+  // stamping it once the rows exist is what makes them all run together.
+  if (entering && view === "projects") startProjectsEnter();
 }
 
 // positionViewGlider slides the view switcher's green thumb under the active
@@ -1118,6 +1189,48 @@ function renderTimeline(data) {
       }));
     }
   }
+  // on view entry, the sweep's curtain rides on top of everything drawn above
+  drawSweepCurtain(W, H, GEO.PLOT_TOP, plotBottom);
+}
+
+// The sessions reveal is a CURTAIN, not a clip: one rect in the wrap's own
+// background parked over the stretch the sweep hasn't reached, with a hairline
+// at its leading edge. Painting over the top costs a single element and leaves
+// every draw function above untouched — no clip-path threaded through the whole
+// SVG. renderTimeline re-appends it while a sweep is in flight, so a live
+// repaint landing mid-reveal doesn't tear it off; the settling frame strikes it.
+let sweepCurtain = null;                          // <g>: cover rect + hairline
+let sweepGeo = { W: 0, H: 0, top: 0, bottom: 0 }; // from the render being revealed
+
+function drawSweepCurtain(W, H, top, bottom) {
+  if (!sweeping()) return;
+  if (!sweepCurtain) {
+    sweepCurtain = svgEl("g", { class: "tl-sweep", "aria-hidden": "true" });
+    sweepCurtain.appendChild(svgEl("rect", { class: "tl-sweep-cover", y: 0 }));
+    sweepCurtain.appendChild(svgEl("line", { class: "tl-sweep-edge" }));
+  }
+  sweepGeo = { W, H, top, bottom };
+  el.svg.appendChild(sweepCurtain); // last child, so it covers everything drawn
+  moveSweepCurtain();
+}
+
+// moveSweepCurtain parks the curtain at the current progress — the sessions
+// view's whole per-frame cost — and takes it off the page once the sweep rests.
+function moveSweepCurtain() {
+  if (!sweepCurtain) return;
+  if (!sweeping()) { sweepCurtain.remove(); return; }
+  const p = sweepProgress();
+  const x = p * sweepGeo.W;
+  const cover = sweepCurtain.firstElementChild;
+  const edge = sweepCurtain.lastElementChild;
+  cover.setAttribute("x", x);
+  cover.setAttribute("width", Math.max(0, sweepGeo.W - x));
+  cover.setAttribute("height", sweepGeo.H);
+  edge.setAttribute("x1", x);
+  edge.setAttribute("x2", x);
+  edge.setAttribute("y1", sweepGeo.top);
+  edge.setAttribute("y2", sweepGeo.bottom);
+  edge.setAttribute("opacity", 1 - ramp(p, 0.8, 1)); // out before it runs off the end
 }
 
 // groupByProject buckets lanes by lane.project, preserving lane order within a
@@ -1670,6 +1783,18 @@ function renderConcurrencyChart(data) {
       return;
     }
 
+    // Entry sweep: everything below is drawn clipped to the revealed band, so an
+    // unrevealed mark costs nothing to rasterize and the per-pixel smoothing
+    // loop can stop at the reveal instead of walking the full width every frame.
+    // Settled (reveal 1) the clip is skipped entirely and every path below draws
+    // exactly as it always has.
+    const reveal = sweepProgress();
+    const revealX = reveal * W;
+    if (reveal < 1) {
+      ctx.save();
+      ctx.beginPath(); ctx.rect(0, 0, revealX, H); ctx.clip();
+    }
+
     // y gridlines + integer labels
     const yStep = niceIntStep(yTop);
     ctx.font = "11px " + MONO;
@@ -1761,8 +1886,11 @@ function renderConcurrencyChart(data) {
 
     // smoothed 30-min rolling average (sampled per pixel)
     if (smoothOn) {
+      // sampled only as far as the sweep has come — past the reveal the clip
+      // would throw the work away (pxMax is plotW once settled)
+      const pxMax = Math.min(plotW, Math.ceil(revealX - CGEO.LEFT));
       ctx.beginPath();
-      for (let px = 0; px <= plotW; px++) {
+      for (let px = 0; px <= pxMax; px++) {
         const t = t0 + (px / plotW) * span;
         const yy = Y(windowedAvg(t)), xx = CGEO.LEFT + px;
         if (px === 0) ctx.moveTo(xx, yy); else ctx.lineTo(xx, yy);
@@ -1774,13 +1902,29 @@ function renderConcurrencyChart(data) {
     if (prof.avgActive != null) {
       const yy = Y(prof.avgActive);
       ctx.save();
+      // the reference settles in behind the trace rather than racing alongside it
+      ctx.globalAlpha = ramp(reveal, 0.55, 1);
       ctx.setLineDash([6, 4]);
       ctx.strokeStyle = C.avg; ctx.lineWidth = 1.5;
       ctx.beginPath(); ctx.moveTo(CGEO.LEFT, yy); ctx.lineTo(CGEO.LEFT + plotW, yy); ctx.stroke();
-      ctx.restore();
       ctx.fillStyle = C.avg; ctx.font = "11px " + MONO;
       ctx.textAlign = "left"; ctx.textBaseline = "bottom";
       ctx.fillText("avg " + prof.avgActive.toFixed(1) + "×", CGEO.LEFT + 6, yy - 3);
+      ctx.restore();
+    }
+
+    // the sweep's leading hairline — the plotter head, drawn over the unclipped
+    // canvas and run out before it reaches the end (mirrors .tl-sweep-edge in
+    // the sessions view, which fades on the same ramp)
+    if (reveal < 1) {
+      ctx.restore(); // reveal clip
+      ctx.globalAlpha = 1 - ramp(reveal, 0.8, 1);
+      ctx.strokeStyle = C.inst; ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(Math.round(revealX) + 0.5, plotTop);
+      ctx.lineTo(Math.round(revealX) + 0.5, plotBottom);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
     }
 
     // crosshair + value dots on hover
@@ -1802,6 +1946,10 @@ function renderConcurrencyChart(data) {
   paint(null);
   chartHover = { paint, t0, t1, span, plotW, plotLeft: CGEO.LEFT, prof, levelAt, windowedAvg, smoothOn };
 }
+
+// repaintAloft re-runs the last render's paint closure, which reads the sweep
+// progress on its own — the aloft view's whole per-frame cost during a reveal.
+function repaintAloft() { if (chartHover) chartHover.paint(null); }
 
 // updateChartStats fills the line-view caption readout (peak / average / active).
 function updateChartStats(prof) {
@@ -2621,10 +2769,13 @@ function init() {
   updateZoomReadout();
 
   // line-chart crosshair: repaint the hovered vertical + value dots and show a
-  // readout. Cheap — reuses the last render's paint closure, no profile recompute.
+  // readout. Cheap — reuses the last render's paint closure, no profile
+  // recompute. The entry sweep owns the canvas until it settles, so a cursor
+  // already sitting over the plot waits it out rather than fighting the reveal
+  // for the paint; the next move after it lands picks the crosshair back up.
   el.canvas.addEventListener("mousemove", (ev) => {
     const h = chartHover;
-    if (!h) return;
+    if (!h || sweeping()) return;
     const rect = el.canvas.getBoundingClientRect();
     const px = ev.clientX - rect.left;
     if (px < h.plotLeft || px > h.plotLeft + h.plotW) { h.paint(null); hideTip(); return; }
@@ -2632,7 +2783,7 @@ function init() {
     h.paint(t);
     showTip(concurrencyTipHTML(h, t), ev);
   });
-  el.canvas.addEventListener("mouseleave", () => { if (chartHover) chartHover.paint(null); hideTip(); });
+  el.canvas.addEventListener("mouseleave", () => { if (chartHover && !sweeping()) chartHover.paint(null); hideTip(); });
 
   // dismiss popout on outside click / Escape
   document.addEventListener("click", (ev) => {
