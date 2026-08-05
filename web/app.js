@@ -664,10 +664,23 @@ const PREFETCH_DELAY_MS = 400;
 let prefetchTimer = null;
 let prefetchRun = 0;
 
+// scheduleNeighborPrefetch yields to the visible day. The delay alone is not
+// enough: a cold day takes 0.5-1.1s to compile, so a prefetch armed 400ms in
+// would start a SECOND ctl on the same core while the user is still waiting on
+// the first. While anything is in flight for the day on screen the walk re-arms
+// instead of firing.
+//
+// Honest note on the evidence: this was added on the strength of a cold-walk
+// benchmark that looked like contention, and the follow-up did not confirm it —
+// per-request latency is the same on both builds, and ctl's own run-to-run
+// spread (450-1100ms for the same day) swamps whatever this is worth. It stays
+// because not competing with the fetch the user is waiting on is right whether
+// or not it is measurable, and because a re-armed timer costs nothing.
 function scheduleNeighborPrefetch(day) {
   if (prefetchTimer) clearTimeout(prefetchTimer);
   prefetchTimer = setTimeout(async () => {
     prefetchTimer = null;
+    if (inflightDay !== null) { scheduleNeighborPrefetch(day); return; }
     const run = ++prefetchRun;
     const today = todayLocal();
     for (const d of [shiftDay(day, -1), shiftDay(day, 1)]) {
