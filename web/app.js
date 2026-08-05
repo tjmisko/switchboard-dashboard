@@ -661,6 +661,18 @@ let sweepRaf = 0; // rAF handle, 0 when no sweep is in flight
 function sweepProgress() { return sweepP; }
 function sweeping() { return sweepRaf !== 0; }
 
+// sweepX is the reveal's leading edge, in plot coordinates, right now. It runs
+// across the VISIBLE band rather than the full plot: both time views scroll, and
+// at the default density barely half the plot is on screen (zoomed in, a tenth),
+// so pacing the reveal by total width would run the part you can actually see
+// off in a fraction of the duration — a flicker instead of a sweep. Whatever
+// lies beyond the wrap is simply there when the sweep lands.
+function sweepX(W) {
+  const left = el.wrap.scrollLeft;
+  const band = Math.max(1, Math.min(W, left + el.wrap.clientWidth) - left);
+  return left + sweepProgress() * band;
+}
+
 // startSweep runs the reveal over `ms`, calling repaint() every frame — the last
 // of them with sweeping() already false, which is the renderers' cue to strike
 // whatever scaffolding the sweep put up.
@@ -1220,7 +1232,7 @@ function moveSweepCurtain() {
   if (!sweepCurtain) return;
   if (!sweeping()) { sweepCurtain.remove(); return; }
   const p = sweepProgress();
-  const x = p * sweepGeo.W;
+  const x = sweepX(sweepGeo.W);
   const cover = sweepCurtain.firstElementChild;
   const edge = sweepCurtain.lastElementChild;
   cover.setAttribute("x", x);
@@ -1789,7 +1801,7 @@ function renderConcurrencyChart(data) {
     // Settled (reveal 1) the clip is skipped entirely and every path below draws
     // exactly as it always has.
     const reveal = sweepProgress();
-    const revealX = reveal * W;
+    const revealX = reveal < 1 ? sweepX(W) : W; // settled, the whole plot is in
     if (reveal < 1) {
       ctx.save();
       ctx.beginPath(); ctx.rect(0, 0, revealX, H); ctx.clip();
