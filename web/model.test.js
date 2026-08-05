@@ -12,6 +12,7 @@ const {
   aloftSpans, workIntervalsMs, concurrencyProfile, alignLiveTail,
   projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs,
   suspectTailMs, normalizeView, VIEW_ORDER, stepView, scaleGeometry,
+  parseISODate, stepISODate, stepISOMonth, monthGrid,
   fmtBytes, spawnedBytes, laneMemory, memoryWindow, pressureWindow,
   summaryTasks, summaryBodyHTML, summaryHintText, summaryCardHasContent,
 } = require("./model.js");
@@ -1013,6 +1014,118 @@ test("normalizeView should return null when the view is unknown or missing", () 
   assert.equal(normalizeView(undefined), null);
   assert.equal(normalizeView(""), null);
   assert.equal(normalizeView("foo"), null);
+});
+
+// ---------------------------------------------------------------------------
+// ISO calendar arithmetic — the date popover's grid and paging
+// ---------------------------------------------------------------------------
+
+test("parseISODate should reject anything that is not a whole ISO day", () => {
+  // Date.parse takes "2026", an RFC3339 instant and even 2026-02-31 (rolling it
+  // into March). Any of those reaching the grid would move the calendar to a
+  // day the caller never named.
+  assert.ok(Number.isFinite(parseISODate("2026-08-05")));
+  assert.ok(Number.isNaN(parseISODate("2026-02-31")));
+  assert.ok(Number.isNaN(parseISODate("2026-08-05T12:00:00Z")));
+  assert.ok(Number.isNaN(parseISODate("2026-8-5")));
+  assert.ok(Number.isNaN(parseISODate("2026")));
+  assert.ok(Number.isNaN(parseISODate("")));
+  assert.ok(Number.isNaN(parseISODate(null)));
+});
+
+test("stepISODate should move one day in either direction", () => {
+  assert.equal(stepISODate("2026-08-05", +1), "2026-08-06");
+  assert.equal(stepISODate("2026-08-05", -1), "2026-08-04");
+  assert.equal(stepISODate("2026-08-05", 0), "2026-08-05");
+});
+
+test("stepISODate should cross month, year and leap-day boundaries", () => {
+  assert.equal(stepISODate("2026-08-31", +1), "2026-09-01");
+  assert.equal(stepISODate("2026-01-01", -1), "2025-12-31");
+  assert.equal(stepISODate("2024-02-28", +1), "2024-02-29"); // leap year
+  assert.equal(stepISODate("2026-02-28", +1), "2026-03-01"); // common year
+});
+
+test("stepISODate should hold a day across a DST transition", () => {
+  // The whole reason the arithmetic runs in UTC: US DST springs forward on
+  // 2026-03-08 and falls back on 2026-11-01. Local-midnight math lands on the
+  // wrong day in zones whose transition happens AT midnight, and a date string
+  // has no hour to absorb the shift.
+  assert.equal(stepISODate("2026-03-07", +1), "2026-03-08");
+  assert.equal(stepISODate("2026-03-08", +1), "2026-03-09");
+  assert.equal(stepISODate("2026-11-01", -1), "2026-10-31");
+});
+
+test("stepISODate should return a non-date unchanged", () => {
+  // Stepping a blank field must not manufacture a day out of nothing.
+  assert.equal(stepISODate("", +1), "");
+  assert.equal(stepISODate("nope", +1), "nope");
+});
+
+test("stepISOMonth should page a month while holding the day of the month", () => {
+  assert.equal(stepISOMonth("2026-08-05", +1), "2026-09-05");
+  assert.equal(stepISOMonth("2026-08-05", -1), "2026-07-05");
+  assert.equal(stepISOMonth("2026-01-15", -1), "2025-12-15");
+  assert.equal(stepISOMonth("2026-12-15", +1), "2027-01-15");
+});
+
+test("stepISOMonth should clamp to the last day when the target month is shorter", () => {
+  // Clamping, not rolling over: 31 Mar back a month is 28 Feb. Rolling into
+  // 3 Mar would make paging non-reversible.
+  assert.equal(stepISOMonth("2026-03-31", -1), "2026-02-28");
+  assert.equal(stepISOMonth("2024-03-31", -1), "2024-02-29"); // leap year
+  assert.equal(stepISOMonth("2026-05-31", +1), "2026-06-30");
+});
+
+test("monthGrid should return six Monday-first weeks covering the month", () => {
+  const g = monthGrid("2026-08-05");
+  assert.equal(g.year, 2026);
+  assert.equal(g.month, 7); // 0-based: August
+  assert.equal(g.cells.length, 42);
+  // August 2026 starts on a Saturday, so the grid opens on Mon 27 Jul
+  assert.equal(g.cells[0].iso, "2026-07-27");
+  assert.equal(g.cells[0].inMonth, false);
+  assert.equal(g.cells[41].iso, "2026-09-06");
+  // consecutive days throughout, no gaps or repeats
+  for (let i = 1; i < g.cells.length; i++) {
+    assert.equal(g.cells[i].iso, stepISODate(g.cells[i - 1].iso, 1), `cell ${i}`);
+  }
+});
+
+test("monthGrid should mark exactly the days belonging to the month on display", () => {
+  const g = monthGrid("2026-08-05");
+  const inMonth = g.cells.filter((c) => c.inMonth);
+  assert.equal(inMonth.length, 31);
+  assert.equal(inMonth[0].iso, "2026-08-01");
+  assert.equal(inMonth[30].iso, "2026-08-31");
+  assert.equal(g.cells.find((c) => c.iso === "2026-08-05").day, 5);
+});
+
+test("monthGrid should open on Monday for every month of a year", () => {
+  // Six rows always, whatever the month's shape — the popover must not change
+  // height (or move the day under the cursor) as the user pages through.
+  for (let m = 1; m <= 12; m++) {
+    const iso = `2026-${String(m).padStart(2, "0")}-15`;
+    const g = monthGrid(iso);
+    assert.equal(g.cells.length, 42, iso);
+    assert.equal(new Date(g.cells[0].iso + "T00:00:00Z").getUTCDay(), 1, `${iso} opens Monday`);
+    assert.ok(g.cells.some((c) => c.iso === iso && c.inMonth), `${iso} is in its own grid`);
+  }
+});
+
+test("monthGrid should include a whole month that begins on a Monday", () => {
+  // The tight case: a 31-day month starting Monday fills 31 of 42 cells with
+  // no lead, and must still not clip the tail.
+  const g = monthGrid("2026-06-15"); // June 2026 starts Monday
+  assert.equal(g.cells[0].iso, "2026-06-01");
+  assert.equal(g.cells.filter((c) => c.inMonth).length, 30);
+  assert.equal(g.cells[41].iso, "2026-07-12");
+});
+
+test("monthGrid should return null for a non-date", () => {
+  assert.equal(monthGrid(""), null);
+  assert.equal(monthGrid("2026-13-01"), null);
+  assert.equal(monthGrid(undefined), null);
 });
 
 // ---------------------------------------------------------------------------
