@@ -53,6 +53,29 @@ interval is statusless (30 that day) are processes that died before transitionin
 at all; they are short, median 14s. The investigator's prompt says so explicitly,
 because the shape is common enough to invite a confident wrong diagnosis.
 
+### The second worked example: declining to repair
+
+The 2026-07-22 episode — a 9h54m arachne lane, `pid` 1236334, no session id, no
+transition ever recorded — looks like the same defect and is not. Flagged, the
+investigation returned **`correct-data` / `none` at medium confidence**, which
+parks at `pending_review` and changes nothing.
+
+It was right to. The pid has exactly one event in the whole retained history (a
+`session_start`), and the investigation cross-referenced switchboard's own
+`docs/session-lifecycle-hazards.md` — the daemon was SIGKILLed at `14:09:23`
+that day, 3m22s after this pid was discovered — then observed that this pid is
+absent from the rediscovery burst of five other live pids at `14:09:26`. Its
+conclusion: an already-fixed daemon defect (the F1–F4 class), already backstopped
+by the producer's `suspect` check, and *not* the `session_end`-precedes-transition
+race that produced the 08-05 ghost. There is no `session_end` here to race
+against.
+
+Two things worth taking from it. A verdict of "the data is what it is" is a
+successful investigation, not a failed one — and the case that most looks like a
+known bug is exactly where a repair would have been wrong. And the citations in
+that verdict were checked and are verbatim, which is what the
+don't-cite-what-you-haven't-read instruction bought.
+
 ## Where things live
 
 ```

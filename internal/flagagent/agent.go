@@ -161,7 +161,11 @@ Decide between these repairs, and be conservative:
   Never merge a synthesized lane into a real one — that imports the artifact into
   a lane that was fine.
 - clip-at: the lane's head is real and its tail is synthesized. Give the instant
-  the evidence stops in clip_at.
+  the evidence stops in clip_at. It MUST fall strictly inside the lane — after
+  lane_start and before lane_end. A clip at the lane start is not a clip: it
+  removes everything, and "the whole lane is synthesized" is suppress-lane. A
+  clip at the lane end changes nothing. Either will be refused and left for a
+  human, so choose suppress-lane when that is what you actually mean.
 - none: the data is correct, or you cannot tell. "correct-data" and "unknown" are
   respectable answers and are much better than a guess.
 
@@ -187,6 +191,9 @@ func BuildPrompt(record flags.Record) string {
 		}
 	}
 	field("session_id", record.SessionID)
+	if record.PID != 0 {
+		fmt.Fprintf(&sb, "pid: %d\n", record.PID)
+	}
 	field("lane_start", record.LaneStart)
 	field("lane_end", record.LaneEnd)
 	field("project", record.Project)
@@ -196,8 +203,48 @@ func BuildPrompt(record flags.Record) string {
 	} else {
 		sb.WriteString("\nThe operator flagged it without saying why.\n")
 	}
+
+	// Name the day-files. Day-files are keyed by LOCAL calendar day and the
+	// timestamps carry their local offset, so the date is simply the first ten
+	// characters. Without this the agent has to find its own evidence, and on a
+	// lane with no session id that means grepping by pid across every file in the
+	// directory — tens of megabytes — which is how one investigation spent five
+	// minutes and got killed before reaching a verdict.
+	if days := dayFiles(record); len(days) > 0 {
+		sb.WriteString("\nThe events are in:\n")
+		for _, day := range days {
+			fmt.Fprintf(&sb, "  ~/.local/state/switchboard/history/%s.jsonl\n", day)
+		}
+		sb.WriteString("Read those, not the whole directory.\n")
+	}
+	if record.SessionID == "" && record.PID != 0 {
+		fmt.Fprintf(&sb, "\nThis lane has NO session_id — it never got far enough to be assigned one.\n"+
+			"Group it by \"pid\":%d instead. Remember a pid is reused where a session id is not,\n"+
+			"so check that what you find is really one process's life and not two.\n", record.PID)
+	}
 	sb.WriteString("\nWork out what actually happened, from the raw events.\n")
 	return sb.String()
+}
+
+// dayFiles names the day-file(s) a lane's events live in: the day it started,
+// plus the day it ended when a lane ran across midnight.
+func dayFiles(record flags.Record) []string {
+	var days []string
+	add := func(ts string) {
+		if len(ts) < 10 {
+			return
+		}
+		day := ts[:10]
+		for _, seen := range days {
+			if seen == day {
+				return
+			}
+		}
+		days = append(days, day)
+	}
+	add(record.LaneStart)
+	add(record.LaneEnd)
+	return days
 }
 
 // ParseVerdict extracts the verdict from a model response.
@@ -222,6 +269,38 @@ func ParseVerdict(out string) (flags.Verdict, error) {
 		return flags.Verdict{}, err
 	}
 	return verdict, nil
+}
+
+// summarizeFailure turns a failed run's stdout into something readable on a flag
+// record. `claude -p --output-format json` fails with a full result envelope —
+// token counts, per-iteration usage, the lot — and pasting that raw puts a
+// kilobyte of accounting where the reason should be.
+//
+// The case worth naming is running out of money: an investigation stopped by
+// --max-budget-usd looks identical to a crash unless the cost is read out, and
+// the fix for it (raise the ceiling) is nothing like the fix for a crash. Note
+// the cap is a stopping rule rather than a hard limit — a run notices it has
+// overshot, so the reported spend is normally a little over the ceiling.
+func summarizeFailure(out []byte) string {
+	trimmed := strings.TrimSpace(string(out))
+	var envelope struct {
+		IsError    bool    `json:"is_error"`
+		StopReason string  `json:"stop_reason"`
+		NumTurns   int     `json:"num_turns"`
+		CostUSD    float64 `json:"total_cost_usd"`
+		Result     string  `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(trimmed), &envelope); err != nil || !envelope.IsError {
+		return trimmed
+	}
+	if envelope.CostUSD > 0 {
+		return fmt.Sprintf("investigation stopped after %d turns having spent $%.2f (stop reason %q); raise --investigate-budget if this lane needs a longer look",
+			envelope.NumTurns, envelope.CostUSD, envelope.StopReason)
+	}
+	if envelope.Result != "" {
+		return envelope.Result
+	}
+	return trimmed
 }
 
 // maxDetail bounds how much of a failed run's output rides along in the error.
@@ -309,7 +388,7 @@ func ClaudeRunner(model, dir, historyDir string, maxUSD string) Runner {
 			// stderr alone yields a bare "exit status 1" that says nothing. Both
 			// streams go into the message, trimmed, or a failed investigation is
 			// undebuggable from the flag record it lands in.
-			detail := strings.TrimSpace(string(out))
+			detail := summarizeFailure(out)
 			var exitErr *exec.ExitError
 			if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
 				if detail != "" {

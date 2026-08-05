@@ -2833,10 +2833,15 @@ const FLAG_STATUS_TEXT = {
   pending: "flagged — investigation queued",
   investigating: "investigating…",
   applied: "repaired — the overlay is in force",
-  pending_review: "diagnosed, but not confident enough to apply on its own",
-  failed: "the investigation could not explain it",
+  pending_review: "diagnosed, but not applied on its own",
+  failed: "the investigation did not finish — try again",
   reverted: "flag withdrawn — the lane is drawn as the producer reported it",
 };
+
+// inFlightStatus mirrors the server's own idempotency rule: while a flag is
+// pending or investigating, a repeat POST is absorbed rather than acted on, so
+// offering "investigate again" then would be a button that does nothing.
+function inFlightStatus(status) { return status === "pending" || status === "investigating"; }
 
 function hideMenu() { el.ctxmenu.hidden = true; }
 function menuOpen() { return !el.ctxmenu.hidden; }
@@ -2852,8 +2857,13 @@ function openLaneMenu(lane, ev) {
 
   if (flag) {
     const status = FLAG_STATUS_TEXT[flag.status] || flag.status;
+    // `blocked` is the confident-but-inapplicable case, and it is the one the
+    // operator most needs spelled out: the diagnosis is trusted, the proposed
+    // repair simply does not fit this lane, and nothing changed.
     rows.push(`<div class="cm-status"><b>${escapeHTML(status)}</b>${
-      flag.root_cause ? `<br>${escapeHTML(flag.root_cause)}` : ""
+      flag.blocked ? `<br>${escapeHTML(flag.blocked)}` : ""
+    }${
+      flag.root_cause ? `<br>${escapeHTML(truncate(flag.root_cause, 240))}` : ""
     }</div>`);
     if (flag.root_cause || flag.verdict) {
       rows.push(`<button data-act="details">Investigation details…</button>`);
@@ -2861,10 +2871,18 @@ function openLaneMenu(lane, ev) {
     if (flag.status === "pending_review") {
       rows.push(`<button class="cm-flag" data-act="apply">Apply the proposed repair</button>`);
     }
+    // Any SETTLED flag can be looked at again — the server treats re-flagging a
+    // settled lane as "look again" and re-opens it. That has to be reachable:
+    // a failed investigation usually just ran out of budget, and a wrong or
+    // inapplicable verdict is worth a second pass rather than a discard. Only a
+    // flag currently in flight has nothing to offer here.
+    if (flag.status === "reverted") {
+      rows.push(`<button class="cm-flag" data-act="flag">Flag again</button>`);
+    } else if (!inFlightStatus(flag.status)) {
+      rows.push(`<button class="cm-flag" data-act="flag">Investigate again</button>`);
+    }
     if (flag.status !== "reverted") {
       rows.push(`<button data-act="revert">Revert this flag</button>`);
-    } else {
-      rows.push(`<button class="cm-flag" data-act="flag">Flag again</button>`);
     }
   } else {
     rows.push(`<input class="cm-note" type="text" placeholder="what looks wrong? (optional)">`);
@@ -2971,6 +2989,9 @@ function placeAtCursor(node, ev) {
 async function fileFlag(lane, note) {
   await postFlags("/api/flags", {
     session_id: lane.session_id || "",
+    // The pid is not part of the key, but for a lane that died before its first
+    // hook it is the only identifier the investigation has to search on.
+    pid: lane.pid || 0,
     lane_start: lane.start,
     lane_end: lane.end,
     provider: lane.provider || "",

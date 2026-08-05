@@ -104,6 +104,11 @@ type AgentRun struct {
 // must be flagged without touching its sibling.
 type Record struct {
 	SessionID string `json:"session_id"`
+	// PID identifies the process behind the lane. It is not part of the key —
+	// pids are reused and session ids are not — but it is often the ONLY handle
+	// an investigation has: a lane that died before its first hook never got a
+	// session id at all, and without the pid the agent has nothing to grep for.
+	PID       int    `json:"pid,omitempty"`
 	LaneStart string `json:"lane_start"`
 	LaneEnd   string `json:"lane_end,omitempty"`
 	Provider  string `json:"provider,omitempty"`
@@ -118,10 +123,15 @@ type Record struct {
 	RootCause  string   `json:"root_cause,omitempty"`
 	Evidence   []string `json:"evidence,omitempty"`
 
-	Action     Action    `json:"action"`
-	Upstream   *Upstream `json:"upstream,omitempty"`
-	Agent      *AgentRun `json:"agent,omitempty"`
-	ResolvedAt string    `json:"resolved_at,omitempty"`
+	Action   Action    `json:"action"`
+	Upstream *Upstream `json:"upstream,omitempty"`
+	Agent    *AgentRun `json:"agent,omitempty"`
+	// Blocked explains why a confident verdict was NOT applied — it was
+	// well-formed but could not act on this lane. Set only alongside
+	// StatusPendingReview, and it is the difference between "we are unsure" and
+	// "we are sure, but the proposed repair does not fit".
+	Blocked    string `json:"blocked,omitempty"`
+	ResolvedAt string `json:"resolved_at,omitempty"`
 }
 
 // Key is the record's stable identity, and its filename stem.

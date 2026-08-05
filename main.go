@@ -30,7 +30,11 @@ func main() {
 	settingsPath := flag.String("settings", DefaultSettingsPath(), "operator-model settings JSON (away threshold, switch recovery); missing file means defaults")
 	flagsDir := flag.String("flags-dir", defaultFlagsDir(), "store for operator data-quality flags and their reversible overlays; empty disables flagging")
 	investigate := flag.String("investigate", "sonnet", "model for the `claude -p` investigation a flag spawns; empty records flags without investigating them")
-	investigateBudget := flag.String("investigate-budget", "0.50", "dollar ceiling for a single investigation (claude --max-budget-usd)")
+	// $0.50 was the first guess and it was too low: a lane with no session id
+	// makes the agent search by pid across day-files, and one such investigation
+	// stopped mid-tool-use having spent $0.67. The ceiling has to clear the hard
+	// cases, not the easy ones — a cheap lane still costs what it costs.
+	investigateBudget := flag.String("investigate-budget", "1.50", "dollar ceiling for a single investigation (claude --max-budget-usd)")
 	flag.Parse()
 
 	settings, err := LoadSettings(*settingsPath)

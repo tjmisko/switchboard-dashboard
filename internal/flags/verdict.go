@@ -1,8 +1,11 @@
 package flags
 
 import (
+	"errors"
 	"fmt"
 	"time"
+
+	"github.com/tjmisko/switchboard-dashboard/internal/timeline"
 )
 
 // Verdict is what an investigation concluded about a flagged lane. It is the
@@ -76,8 +79,46 @@ func (v Verdict) AutoApplicable() bool {
 	return v.Validate() == nil && v.Confidence == "high"
 }
 
+// ApplicableTo reports why this verdict's action cannot actually repair the lane
+// it was written for, or nil when it can.
+//
+// Validate checks the verdict against itself; this checks it against the lane.
+// The two are separate because a verdict can be perfectly well-formed and still
+// be a no-op here — and a no-op that is recorded as "applied" is the worst
+// outcome available, because the record then claims a repair the operator can
+// see did not happen.
+//
+// Observed: an investigation of a lane holding one observed instant and nine
+// hours of inference returned clip-at *at the lane start*. Reasonable in intent
+// — everything after that instant is synthesis — but as a clip it removes the
+// whole lane, which is what suppress-lane is for. Rather than reinterpret the
+// verdict (the same coercion the closed enum exists to prevent), the mismatch is
+// surfaced and the operator decides.
+func (v Verdict) ApplicableTo(record Record) error {
+	switch v.Action.Type {
+	case ActionClipAt:
+		cut, ok := timeline.ParseNanos(v.Action.ClipAt)
+		if !ok {
+			return fmt.Errorf("clip_at %q is not a timestamp", v.Action.ClipAt)
+		}
+		if start, ok := timeline.ParseNanos(record.LaneStart); ok && cut <= start {
+			return errors.New("clip_at is at or before the lane start, so it would remove the whole lane; " +
+				"suppress-lane is the repair for a lane that is entirely synthesized")
+		}
+		if end, ok := timeline.ParseNanos(record.LaneEnd); ok && cut >= end {
+			return errors.New("clip_at is at or after the lane end, so it would change nothing")
+		}
+	case ActionMergeInto:
+		if v.Action.MergeIntoLaneStart == record.LaneStart {
+			return errors.New("merge_into_lane_start names the flagged lane itself")
+		}
+	}
+	return nil
+}
+
 // Resolve records a verdict on the flag and settles its status: applied when the
-// verdict is confident enough to act on, pending_review when it is not.
+// verdict is confident enough to act on AND can actually act on this lane,
+// pending_review otherwise.
 func (r *Record) Resolve(v Verdict, run *AgentRun, now time.Time) {
 	r.Verdict = v.Verdict
 	r.Confidence = v.Confidence
@@ -87,11 +128,17 @@ func (r *Record) Resolve(v Verdict, run *AgentRun, now time.Time) {
 	r.Upstream = v.Upstream
 	r.Agent = run
 	r.ResolvedAt = now.UTC().Format(time.RFC3339)
-	if v.AutoApplicable() {
-		r.Status = StatusApplied
+	r.Blocked = ""
+	if !v.AutoApplicable() {
+		r.Status = StatusPendingReview
 		return
 	}
-	r.Status = StatusPendingReview
+	if err := v.ApplicableTo(*r); err != nil {
+		r.Status = StatusPendingReview
+		r.Blocked = err.Error()
+		return
+	}
+	r.Status = StatusApplied
 }
 
 // Fail records an investigation that produced no usable verdict. The flag stays

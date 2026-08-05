@@ -19,9 +19,19 @@ type Investigator interface {
 	Investigate(ctx context.Context, record flags.Record) (flags.Verdict, error)
 }
 
-// investigationTimeout bounds one investigation, matching the ceiling
-// cmd/session-digest puts on its own `claude -p` calls.
-const investigationTimeout = 5 * time.Minute
+// investigationTimeout bounds one investigation.
+//
+// It started at the 5 minutes cmd/session-digest allows its own `claude -p`
+// calls, which was wrong by analogy: the digester condenses a prepared digest in
+// one turn, while this reads megabytes of raw log across many. A real
+// investigation of a lane with no session id took 3m24s to succeed and was
+// killed at 5m on two later attempts — right at the edge, which is the worst
+// place for a limit to sit, since it turns a slow answer into no answer and
+// invites a retry that costs the same again.
+//
+// The dollar ceiling is the real bound on a runaway; this only needs to be
+// generous enough not to throw away work that was nearly done.
+const investigationTimeout = 10 * time.Minute
 
 // flagRequest is the POST body for filing or reverting a flag. The lane is
 // identified the same way the store keys it — session id plus lane start —
@@ -29,6 +39,7 @@ const investigationTimeout = 5 * time.Minute
 // exactly one of them.
 type flagRequest struct {
 	SessionID string `json:"session_id"`
+	PID       int    `json:"pid,omitempty"`
 	LaneStart string `json:"lane_start"`
 	LaneEnd   string `json:"lane_end,omitempty"`
 	Provider  string `json:"provider,omitempty"`
@@ -122,6 +133,7 @@ func (s *Server) handleFlagCreate(w http.ResponseWriter, r *http.Request) {
 
 	record := flags.Record{
 		SessionID: req.SessionID,
+		PID:       req.PID,
 		LaneStart: req.LaneStart,
 		LaneEnd:   req.LaneEnd,
 		Provider:  req.Provider,
