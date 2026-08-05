@@ -1087,7 +1087,23 @@ test("tokenRowsHTML should show output, billed input, and the cache split", () =
   assert.match(html, /35M read/, "the cache read is broken out — it is a tenth the price");
   assert.match(html, /260k written/);
   assert.match(html, /peak ctx<\/span> 237k/);
-  assert.match(html, /over 236 turns/);
+  assert.match(html, /236 turns/);
+});
+
+test("tokenRowsHTML should keep every row inside the tooltip's width", () => {
+  // The tooltip is ~44 monospace columns; a row that wraps reads as two ragged
+  // half-facts, which is what the three-row split exists to prevent.
+  const html = tokenRowsHTML(tokensFixture({
+    sidechain: { responses: 55, output: 14546, cacheRead: 2646005, peakTurnInput: 97105 },
+    byModel: {
+      "claude-opus-5": { responses: 236, output: 104821, cacheRead: 34532761 },
+      "claude-haiku-4-5-20251001": { responses: 55, output: 14546, cacheRead: 2646005 },
+    },
+  }));
+  for (const row of html.split("</div>").filter((r) => r.trim())) {
+    const text = row.replace(/<[^>]*>/g, "");
+    assert.ok(text.length <= 44, `row is ${text.length} columns and will wrap: ${text}`);
+  }
 });
 
 test("tokenRowsHTML should break out the models only when a session used several", () => {

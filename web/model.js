@@ -992,11 +992,15 @@
     const row = (html) => `<div class="${cls}">${html}</div>`;
     const turns = (n) => `${n} turn${n === 1 ? "" : "s"}`;
 
-    let html = row(`tokens <b>${fmtTokens(t.output)}</b> out · <b>${fmtTokens(t.billedInput)}</b> in`
-      + ` <span class="dim">over ${turns(t.responses)}</span>`);
+    // Three short rows rather than two long ones: the tooltip is ~44 monospace
+    // columns wide, and a row that wraps reads as two ragged half-facts. Each
+    // row is a pair that belongs together — volume, then the cache split that
+    // explains it, then the shape of the session.
+    let html = row(`tokens <b>${fmtTokens(t.output)}</b> out · <b>${fmtTokens(t.billedInput)}</b> in`);
     html += row(`<span class="dim">cache</span> ${fmtTokens(t.cacheRead)} read`
-      + ` · ${fmtTokens(t.cacheCreation)} written`
-      + ` · <span class="dim">peak ctx</span> ${fmtTokens(t.peakContext)}`);
+      + ` · ${fmtTokens(t.cacheCreation)} written`);
+    html += row(`<span class="dim">peak ctx</span> ${fmtTokens(t.peakContext)}`
+      + ` · <span class="dim">${turns(t.responses)}</span>`);
     if (t.delegatedOutput > 0) {
       html += row(`<span class="dim">delegated</span> ${fmtTokens(t.delegatedOutput)} out`
         + ` <span class="dim">over ${turns(t.delegatedResponses)}</span>`);
