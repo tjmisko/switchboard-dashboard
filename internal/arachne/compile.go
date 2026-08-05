@@ -12,8 +12,10 @@ import (
 // CompileOptions windows and stamps the compiled envelope.
 type CompileOptions struct {
 	// Now is the clock used to close still-open sessions and subagents (their
-	// end is "now"). Required. Compile truncates it onto timeline.LiveBoundQuantum
-	// before it reaches any field, so callers pass the raw wall clock.
+	// end is "now"). Required. Compile and CompileMemory each truncate it onto
+	// timeline.LiveBoundQuantum before it reaches any field, so callers pass the
+	// raw wall clock — and the two must keep deriving the same bound from it, or
+	// a hover contradicts the bar it is drawn inside.
 	Now time.Time
 	// Window is the display label for the envelope.
 	Window string
