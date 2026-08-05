@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/tjmisko/switchboard-dashboard/internal/flagagent"
 	"github.com/tjmisko/switchboard-dashboard/internal/flags"
 	"github.com/tjmisko/switchboard-dashboard/internal/provider"
 )
@@ -28,6 +29,8 @@ func main() {
 	providers := flag.String("providers", "", "providers config JSON; when set, replaces the default single claude provider with a merged adapter set")
 	settingsPath := flag.String("settings", DefaultSettingsPath(), "operator-model settings JSON (away threshold, switch recovery); missing file means defaults")
 	flagsDir := flag.String("flags-dir", defaultFlagsDir(), "store for operator data-quality flags and their reversible overlays; empty disables flagging")
+	investigate := flag.String("investigate", "sonnet", "model for the `claude -p` investigation a flag spawns; empty records flags without investigating them")
+	investigateBudget := flag.String("investigate-budget", "0.50", "dollar ceiling for a single investigation (claude --max-budget-usd)")
 	flag.Parse()
 
 	settings, err := LoadSettings(*settingsPath)
@@ -38,6 +41,15 @@ func main() {
 	srv := &Server{
 		Ctl: *ctl, Dir: *dir, PlanPath: *plan, SummariesDir: *summaries,
 		Settings: settings, Flags: flags.NewStore(*flagsDir),
+	}
+	if *flagsDir != "" && *investigate != "" {
+		// The investigation runs rooted at the flag store, which keeps its own
+		// transcripts out of the projects session-digest scans — the same trick
+		// sessiondigest.ClaudeRunner uses to avoid summarizing itself.
+		runner := flagagent.ClaudeRunner(*investigate, *flagsDir, historyDir(*dir), *investigateBudget)
+		srv.Investigator = flagagent.Limit(flagagent.New(runner, *investigate), maxConcurrentInvestigations)
+		log.Printf("switchboard-dashboard investigating flags with %q (max $%s each, %d at a time)",
+			*investigate, *investigateBudget, maxConcurrentInvestigations)
 	}
 	if *providers != "" {
 		cfg, err := provider.LoadConfig(*providers)
@@ -71,6 +83,29 @@ func defaultSummariesDir() string {
 		return ""
 	}
 	return filepath.Join(home, ".local", "share", "switchboard", "summaries")
+}
+
+// maxConcurrentInvestigations caps the agents in flight. Flags arrive in bursts
+// — an operator who notices one bad lane usually notices three — and each
+// investigation is a whole Claude Code process reading a multi-megabyte log.
+const maxConcurrentInvestigations = 2
+
+// historyDir resolves the directory the investigation is granted read access to
+// (claude --add-dir). It is the dashboard's configured --dir when set, and
+// otherwise the location switchboard-ctl itself defaults to, because the
+// evidence lives outside the agent's working directory either way.
+func historyDir(configured string) string {
+	if configured != "" {
+		return configured
+	}
+	if state := os.Getenv("XDG_STATE_HOME"); state != "" {
+		return filepath.Join(state, "switchboard", "history")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".local", "state", "switchboard", "history")
 }
 
 // defaultFlagsDir is where the dashboard keeps its own flag records. It lives

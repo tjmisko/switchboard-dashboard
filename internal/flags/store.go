@@ -178,20 +178,20 @@ func (s *Store) Update(key string, mutate func(*Record) bool) (Record, error) {
 // line that referred out to a record would lose its meaning the moment that
 // record changed.
 type IssueEntry struct {
-	TS        string    `json:"ts"`
-	Event     string    `json:"event"` // flagged | resolved | reverted
-	Key       string    `json:"key"`
-	SessionID string    `json:"session_id,omitempty"`
-	LaneStart string    `json:"lane_start,omitempty"`
-	Project   string    `json:"project,omitempty"`
-	Note      string    `json:"note,omitempty"`
-	Verdict   string    `json:"verdict,omitempty"`
-	Confidence string   `json:"confidence,omitempty"`
-	RootCause string    `json:"root_cause,omitempty"`
-	Evidence  []string  `json:"evidence,omitempty"`
-	Action    Action    `json:"action,omitzero"`
-	Upstream  *Upstream `json:"upstream,omitempty"`
-	Agent     *AgentRun `json:"agent,omitempty"`
+	TS         string    `json:"ts"`
+	Event      string    `json:"event"` // flagged | resolved | reverted
+	Key        string    `json:"key"`
+	SessionID  string    `json:"session_id,omitempty"`
+	LaneStart  string    `json:"lane_start,omitempty"`
+	Project    string    `json:"project,omitempty"`
+	Note       string    `json:"note,omitempty"`
+	Verdict    string    `json:"verdict,omitempty"`
+	Confidence string    `json:"confidence,omitempty"`
+	RootCause  string    `json:"root_cause,omitempty"`
+	Evidence   []string  `json:"evidence,omitempty"`
+	Action     Action    `json:"action,omitzero"`
+	Upstream   *Upstream `json:"upstream,omitempty"`
+	Agent      *AgentRun `json:"agent,omitempty"`
 }
 
 // AppendIssue adds one line to issues.jsonl. Append-only: the file is opened
