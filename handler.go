@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/tjmisko/switchboard-dashboard/internal/provider"
+	"github.com/tjmisko/switchboard-dashboard/internal/sessiondigest"
 	"github.com/tjmisko/switchboard-dashboard/internal/timeline"
 )
 
@@ -328,18 +329,25 @@ func (s *Server) handlePlan(w http.ResponseWriter, r *http.Request) {
 }
 
 // summaryEntry is the per-session slice of a session-digest record the UI
-// needs for hover enrichment: the generated identity, not the full digest.
+// needs for hover enrichment: the generated identity and the token spend, not
+// the full digest. Description is omitempty because an entry may now carry
+// tokens alone; see readSummaries.
 type summaryEntry struct {
 	Name        string   `json:"name,omitempty"`
-	Description string   `json:"description"`
+	Description string   `json:"description,omitempty"`
 	Tasks       []string `json:"tasks,omitempty"`
 	Summary     string   `json:"summary,omitempty"`
 	GeneratedAt string   `json:"generated_at,omitempty"`
+	// Tokens is the digest's token spend, forwarded verbatim. It rides this
+	// endpoint rather than the timeline for the same reason the summaries do:
+	// it is read only inside a hover closure, so a refresh costs no repaint.
+	Tokens *sessiondigest.TokenUsage `json:"tokens,omitempty"`
 }
 
-// summariesResponse maps session id → generated summary. Sessions without a
-// generated summary (digest-only records) are omitted — the UI already shows
-// digest-level identity from the timeline itself.
+// summariesResponse maps session id → what the UI knows about that session
+// beyond the timeline. A record contributes when it has a generated summary, or
+// token counts, or both; one with neither is omitted, since the timeline
+// already carries digest-level identity.
 type summariesResponse struct {
 	Sessions map[string]summaryEntry `json:"sessions"`
 }
@@ -349,6 +357,10 @@ type summariesResponse struct {
 type summaryRecord struct {
 	Digest struct {
 		SessionID string `json:"sessionId"`
+		// Tokens uses the producer's own type so the two cannot drift; unlike
+		// the summary fields below it is all ints, so there is no malformed
+		// shape to guard against beyond a failed Unmarshal of the whole record.
+		Tokens *sessiondigest.TokenUsage `json:"tokens"`
 	} `json:"digest"`
 	Summary *struct {
 		Name        string `json:"name"`
@@ -412,20 +424,33 @@ func readSummaries(dir string) map[string]summaryEntry {
 				continue
 			}
 			var rec summaryRecord
-			if json.Unmarshal(raw, &rec) != nil || rec.Summary == nil || rec.Summary.Description == "" {
+			if json.Unmarshal(raw, &rec) != nil {
+				continue
+			}
+			entry := summaryEntry{Tokens: rec.Digest.Tokens}
+			// A summary with no description is treated as no summary at all, as
+			// it always has been: description is the field every consumer
+			// renders, and the rest without it is not a card.
+			if rec.Summary != nil && rec.Summary.Description != "" {
+				entry.Name = rec.Summary.Name
+				entry.Description = rec.Summary.Description
+				entry.Tasks = summaryTasks(rec.Summary.Tasks)
+				entry.Summary = rec.Summary.Summary
+				entry.GeneratedAt = rec.GeneratedAt
+			}
+			// Digest-only records used to be dropped here, on the grounds that
+			// the timeline already shows what they hold. Token counts change
+			// that: they exist for every session that called the API, including
+			// the thin ones the condenser deliberately never summarizes, so
+			// gating them behind an LLM summary would hide data we already have.
+			if entry.Description == "" && entry.Tokens == nil {
 				continue
 			}
 			id := rec.Digest.SessionID
 			if id == "" {
 				id = strings.TrimSuffix(f.Name(), ".json")
 			}
-			out[id] = summaryEntry{
-				Name:        rec.Summary.Name,
-				Description: rec.Summary.Description,
-				Tasks:       summaryTasks(rec.Summary.Tasks),
-				Summary:     rec.Summary.Summary,
-				GeneratedAt: rec.GeneratedAt,
-			}
+			out[id] = entry
 		}
 	}
 	return out

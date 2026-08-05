@@ -40,15 +40,27 @@ invocation, so it loads instantly and runs offline.
   | key | does |
   | --- | --- |
   | <kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd> | cycle the plot forward / back through sessions → agents aloft → projects, wrapping at both ends |
-  | <kbd>Ctrl</kbd>+<kbd>L</kbd> / <kbd>Ctrl</kbd>+<kbd>R</kbd> | step the window one day back / forward |
-  | <kbd>c</kbd> | focus the date field and open the calendar |
+  | <kbd>Ctrl</kbd>+<kbd>←</kbd> / <kbd>Ctrl</kbd>+<kbd>→</kbd> | step the window one day back / forward |
+  | <kbd>c</kbd> | open the date popover |
+  | <kbd>3</kbd> | toggle the 30-minute average |
+  | <kbd>Shift</kbd>+<kbd>C</kbd> | toggle context switches |
+  | <kbd>Shift</kbd>+<kbd>F</kbd> | toggle the focus overlay |
 
-  The bare keys (<kbd>Tab</kbd>, <kbd>c</kbd>) stand down while a field has
-  focus, so the date input can still be typed in and tabbed out of; the
-  <kbd>Ctrl</kbd> chords work everywhere. <kbd>Alt</kbd> and <kbd>Meta</kbd>
-  chords are never intercepted. While the browser's own calendar popup is open
-  it owns the keyboard outright and the page sees no keys at all — dismiss it
-  with <kbd>Esc</kbd> to get the shortcuts back.
+  Each toggle belongs to one view — the 30-minute average to the aloft chart,
+  focus and context switches to the swimlanes — so its key takes you to that
+  view rather than changing something you can't see.
+
+  The bare keys stand down while a field is being edited; the <kbd>Ctrl</kbd>
+  chords work everywhere. <kbd>Alt</kbd>, <kbd>Meta</kbd> and
+  <kbd>Ctrl</kbd>+<kbd>Shift</kbd> chords are never intercepted.
+
+  Inside the date popover: <kbd>←</kbd><kbd>↑</kbd><kbd>↓</kbd><kbd>→</kbd> move
+  the cursor a day or a week, <kbd>PgUp</kbd>/<kbd>PgDn</kbd> page a month,
+  <kbd>t</kbd> jumps to today, <kbd>Enter</kbd> commits and <kbd>Esc</kbd>
+  closes. Nothing is loaded until you commit. It is the page's own calendar
+  rather than the native picker, which can't be themed, renders the date in the
+  browser locale where this page speaks ISO, and takes the keyboard away from
+  the page entirely while it is open.
 - **Live by default**: polls `/api/timeline` every ~3s and repaints on change,
   with a freshness indicator.
 
@@ -229,11 +241,61 @@ summarizer's own `claude -p` transcripts are excluded from scanning. To keep the
 archive current automatically, wire `scripts/session-summary-hook` into a
 `SessionEnd` hook in `~/.claude/settings.json` (instructions in the script).
 
+### Token counts
+
+The digest also carries `tokens` — what the session actually spent, summed from
+the `message.usage` block every assistant record already holds. No API call, no
+estimate, and a full historical backfill for free: `session-digest -force`
+(without `-condense`) rebuilds every digest at zero `claude -p` cost, because
+token counts are not prompt-visible and so do not change a digest's hash.
+
+```json
+"tokens": {
+  "main":      {"responses": 236, "inputFresh": 646, "cacheCreation": 259595,
+                "cacheRead": 34532761, "output": 104821, "peakTurnInput": 236518},
+  "sidechain": {"responses": 55, "output": 14546, "…": 0},
+  "byModel":   {"claude-opus-5": {"…": 0}}
+}
+```
+
+`main` is the session's own turns and `sidechain` its subagents'; the two
+partition the same responses as `byModel` does, so `main + sidechain` equals the
+sum over `byModel`. Three things the raw transcript forces, each of which
+produces wrong numbers if ignored:
+
+- **Responses are deduplicated on `message.id`.** One API response is written as
+  one record per content block, each repeating a byte-identical `usage` — 413
+  records for 236 responses on a real transcript, a ~75% overcount if summed.
+- **`inputFresh` is the uncached remainder, not the input.** It is frequently
+  literally `2`. A turn's real size is `inputFresh + cacheCreation + cacheRead`
+  (billed input, since every turn resends the conversation); `peakTurnInput` is
+  the largest single turn, which is what "how big did this session get" means.
+- **Subagent spend lives in its own files.** Current releases write delegated
+  turns to `<session-id>/subagents/agent-*.jsonl` rather than inlining them in
+  the parent transcript flagged `isSidechain`; the digest reads both shapes, so
+  a delegation-heavy session reports the subagents' tokens rather than only its
+  own orchestration.
+
+**Thinking tokens cannot be broken out.** They are billed inside `output` and
+there is nothing on disk to separate them with: the API's `usage` block has no
+thinking field, and the thinking text that might support an estimate is not
+persisted (`thinking.display` defaults to `omitted`, leaving signature-only
+blocks with empty text). Claude Code does compute a running estimate from
+`thinking_delta` stream events, but flags those messages `ephemeral` and the
+transcript writer skips them. The only path to a real number is consuming
+`--output-format stream-json`, which works solely for sessions the dashboard
+launches itself — a metric present on some sessions and absent on others.
+
+Cost estimation is deliberately out of scope: it needs a per-model rate table
+that has to be maintained, and `byModel` is what a consumer needs to build one.
+
 The dashboard serves the archive at `/api/summaries` (see `--summaries`) and
 surfaces it on the timeline: hovering a session's name band shows the generated
 one-line description (and how many steps the card holds), and clicking pins a
 card with the full name / description / task bullets / narrative — the same
-interaction subagent sub-bars already have.
+interaction subagent sub-bars already have. Token counts ride the same hover,
+below the description: output and billed input, the cache split, peak context,
+the delegated share, and a per-model breakdown when a session spanned several.
 
 ## HTTP API
 
@@ -243,11 +305,15 @@ interaction subagent sub-bars already have.
   adapter in parallel and returns the merged envelope; per-provider failures land
   in `provider_errors` and only an all-failed request is a `502`.
 - **`GET /api/summaries`** — returns `{sessions: {<session_id>: {name,
-  description, tasks, summary, generated_at}}}` from the `--summaries` store,
-  omitting digest-only records. `tasks` is the (optional, at most six) list of
-  distinct work items the pinned card renders as bullets; it is absent for
-  single-task sessions and for records generated before the field existed.
-  Always `200`; a missing store yields an empty set.
+  description, tasks, summary, generated_at, tokens}}}` from the `--summaries`
+  store. `tasks` is the (optional, at most six) list of distinct work items the
+  pinned card renders as bullets; it is absent for single-task sessions and for
+  records generated before the field existed. `tokens` is the digest's token
+  spend (`{main, sidechain?, byModel?}`, see above). An entry may carry `tokens`
+  and no summary — counts exist for every session that called the API, including
+  the thin ones the condenser never summarizes — so every summary field is
+  `omitempty` and a record with neither a summary nor tokens is omitted
+  entirely. Always `200`; a missing store yields an empty set.
 - **`GET /api/memory`** — returns `{sessions: {<session_id>: {peak_agent_bytes,
   avg_agent_bytes, peak_tree_bytes, avg_tree_bytes, mem}}, pressure}` for the
   same window, from each provider's `memory --json`. Bytes throughout; `mem` is

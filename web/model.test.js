@@ -12,8 +12,10 @@ const {
   aloftSpans, workIntervalsMs, concurrencyProfile, alignLiveTail,
   projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs,
   suspectTailMs, normalizeView, VIEW_ORDER, stepView, scaleGeometry,
+  parseISODate, stepISODate, stepISOMonth, monthGrid,
   fmtBytes, spawnedBytes, laneMemory, memoryWindow, pressureWindow,
   summaryTasks, summaryBodyHTML, summaryHintText, summaryCardHasContent,
+  fmtTokens, shortModel, tokenBilled, tokenTotals, tokenRowsHTML,
 } = require("./model.js");
 
 // ms helper: a fixed base instant + offset minutes, as RFC3339 with offset.
@@ -938,8 +940,9 @@ test("summaryCardHasContent should pin nothing when the record has no tasks and 
 
 test("summaryCardHasContent should pin nothing when a description is all the record carries", () => {
   // The case tjmisko/switchboard-dashboard#7 item 2 describes, and the one the
-  // backend can actually serve — handler.go drops a record whose description is
-  // empty, so this is the empty record as the browser sees it. The tooltip
+  // backend can actually serve — handler.go serves no summary fields at all
+  // when the description is empty (a tokens-only entry carries tokens and
+  // nothing else), so this is the fullest empty record. The tooltip
   // already prints the description; all the card would add is the archival name
   // and the id footer. Losing that name from the UI is the accepted cost of not
   // having a bar that pins a card it never advertised.
@@ -991,6 +994,165 @@ test("summaryCardHasContent should pin a card exactly when the tooltip advertise
 });
 
 // ---------------------------------------------------------------------------
+// token spend — digest.tokens as /api/summaries serves it
+// ---------------------------------------------------------------------------
+
+// A record in the shape internal/sessiondigest writes, with the real numbers
+// from one switchboard-dashboard session (236 responses across 413 records).
+function tokensFixture(overrides) {
+  return Object.assign({
+    main: {
+      responses: 236, inputFresh: 646, cacheCreation: 259595, cacheCreation1h: 259595,
+      cacheRead: 34532761, output: 104821, peakTurnInput: 236518,
+    },
+    byModel: {
+      "claude-opus-5": {
+        responses: 236, inputFresh: 646, cacheCreation: 259595,
+        cacheRead: 34532761, output: 104821, peakTurnInput: 236518,
+      },
+    },
+  }, overrides);
+}
+
+test("fmtTokens should scale a count to the unit a reader can hold", () => {
+  assert.equal(fmtTokens(2), "2");
+  assert.equal(fmtTokens(999), "999");
+  assert.equal(fmtTokens(1000), "1k");
+  assert.equal(fmtTokens(9500), "9.5k");
+  assert.equal(fmtTokens(104821), "105k");
+  assert.equal(fmtTokens(34532761), "35M");
+  assert.equal(fmtTokens(2400000000), "2.4B");
+  assert.equal(fmtTokens(undefined), "—", "an absent count must not render as 0");
+});
+
+test("shortModel should drop the constant prefix and the dated suffix", () => {
+  assert.equal(shortModel("claude-opus-5"), "opus-5");
+  assert.equal(shortModel("claude-haiku-4-5-20251001"), "haiku-4-5");
+  assert.equal(shortModel(""), "");
+});
+
+test("tokenBilled should sum all three input components, not input_tokens alone", () => {
+  // The trap the whole feature turns on: inputFresh is the UNCACHED REMAINDER,
+  // here 646 against 34.8M actually sent. Reporting it as "input" is off by
+  // four orders of magnitude.
+  const main = tokensFixture().main;
+  assert.equal(tokenBilled(main), 646 + 259595 + 34532761);
+  assert.notEqual(tokenBilled(main), main.inputFresh);
+  assert.equal(tokenBilled(null), 0);
+});
+
+test("tokenTotals should fold delegated spend into the headline while keeping the split", () => {
+  // A subagent's tokens are still this session's spend, so the headline sums
+  // both; the delegated share stays separately readable.
+  const t = tokenTotals(tokensFixture({
+    sidechain: {
+      responses: 55, inputFresh: 101, cacheCreation: 352990,
+      cacheRead: 2646005, output: 14546, peakTurnInput: 97105,
+    },
+  }));
+  assert.equal(t.output, 104821 + 14546);
+  assert.equal(t.responses, 236 + 55);
+  assert.equal(t.cacheRead, 34532761 + 2646005);
+  assert.equal(t.delegatedOutput, 14546);
+  assert.equal(t.delegatedResponses, 55);
+});
+
+test("tokenTotals should report peak context from the main chain alone", () => {
+  // A subagent runs its own conversation in its own window. Folding its peak in
+  // — by summing, or by taking a max that could come from the subagent — would
+  // report a context size that never existed on either side.
+  const t = tokenTotals(tokensFixture({
+    sidechain: { responses: 3, output: 10, cacheRead: 5, peakTurnInput: 999999 },
+  }));
+  assert.equal(t.peakContext, 236518, "peak context is the session's own high-water mark");
+});
+
+test("tokenTotals should report nothing when no response was ever recorded", () => {
+  assert.equal(tokenTotals(null), null);
+  assert.equal(tokenTotals({}), null);
+  assert.equal(tokenTotals({ main: { responses: 0 } }), null);
+});
+
+test("tokenRowsHTML should render nothing when the session never called the API", () => {
+  // A lane with no record must render exactly as it did before the feature.
+  assert.equal(tokenRowsHTML(null), "");
+  assert.equal(tokenRowsHTML(undefined), "");
+  assert.equal(tokenRowsHTML({ main: { responses: 0 } }), "");
+});
+
+test("tokenRowsHTML should show output, billed input, and the cache split", () => {
+  const html = tokenRowsHTML(tokensFixture());
+  assert.match(html, /105k<\/b> out/, "output leads");
+  assert.match(html, /35M<\/b> in/, "billed input, not the 646-token remainder");
+  assert.ok(!html.includes("646"), "the uncached remainder is never shown as the input figure");
+  assert.match(html, /35M read/, "the cache read is broken out — it is a tenth the price");
+  assert.match(html, /260k written/);
+  assert.match(html, /peak ctx<\/span> 237k/);
+  assert.match(html, /236 turns/);
+});
+
+test("tokenRowsHTML should keep every row inside the tooltip's width", () => {
+  // The tooltip is ~44 monospace columns; a row that wraps reads as two ragged
+  // half-facts, which is what the three-row split exists to prevent.
+  const html = tokenRowsHTML(tokensFixture({
+    sidechain: { responses: 55, output: 14546, cacheRead: 2646005, peakTurnInput: 97105 },
+    byModel: {
+      "claude-opus-5": { responses: 236, output: 104821, cacheRead: 34532761 },
+      "claude-haiku-4-5-20251001": { responses: 55, output: 14546, cacheRead: 2646005 },
+    },
+  }));
+  for (const row of html.split("</div>").filter((r) => r.trim())) {
+    const text = row.replace(/<[^>]*>/g, "");
+    assert.ok(text.length <= 44, `row is ${text.length} columns and will wrap: ${text}`);
+  }
+});
+
+test("tokenRowsHTML should break out the models only when a session used several", () => {
+  const single = tokenRowsHTML(tokensFixture());
+  assert.ok(!single.includes("opus-5"), "one model needs no breakdown");
+
+  const mixed = tokenRowsHTML(tokensFixture({
+    byModel: {
+      "claude-opus-5": { responses: 200, output: 90000, cacheRead: 30000000 },
+      "claude-fable-5": { responses: 36, output: 14821, cacheRead: 4532761 },
+    },
+  }));
+  assert.match(mixed, /opus-5<\/span> 90k/);
+  assert.match(mixed, /fable-5<\/span> 15k/);
+  // heaviest first: a session total is not convertible to cost without knowing
+  // which model spent the bulk of it.
+  assert.ok(mixed.indexOf("opus-5") < mixed.indexOf("fable-5"), "sorted by output, heaviest first");
+});
+
+test("tokenRowsHTML should omit the delegated row when the session delegated nothing", () => {
+  assert.ok(!tokenRowsHTML(tokensFixture()).includes("delegated"));
+  const delegated = tokenRowsHTML(tokensFixture({
+    sidechain: { responses: 55, output: 14546, cacheRead: 2646005, peakTurnInput: 97105 },
+  }));
+  assert.match(delegated, /delegated<\/span> 15k out/);
+  assert.match(delegated, /over 55 turns/);
+});
+
+test("tokenRowsHTML should use the caller's row class so both surfaces are styled", () => {
+  // .tooltip .t-row and .popout .po-row are scoped separately, so a hardcoded
+  // class renders unstyled rows on whichever surface it does not match.
+  assert.match(tokenRowsHTML(tokensFixture()), /class="t-row"/);
+  assert.match(tokenRowsHTML(tokensFixture(), "po-row"), /class="po-row"/);
+  assert.ok(!tokenRowsHTML(tokensFixture(), "po-row").includes(`class="t-row"`));
+});
+
+test("tokenRowsHTML should escape a model name before interpolating it", () => {
+  const html = tokenRowsHTML(tokensFixture({
+    byModel: {
+      "claude-<img src=x onerror=alert(1)>": { responses: 1, output: 10 },
+      "claude-opus-5": { responses: 1, output: 20 },
+    },
+  }));
+  assert.ok(!html.includes("<img"), "markup in a model id must not reach innerHTML");
+  assert.match(html, /&lt;img/);
+});
+
+// ---------------------------------------------------------------------------
 // normalizeView — the chart-view name, incl. the pre-rename "bars" spelling
 // ---------------------------------------------------------------------------
 
@@ -1013,6 +1175,118 @@ test("normalizeView should return null when the view is unknown or missing", () 
   assert.equal(normalizeView(undefined), null);
   assert.equal(normalizeView(""), null);
   assert.equal(normalizeView("foo"), null);
+});
+
+// ---------------------------------------------------------------------------
+// ISO calendar arithmetic — the date popover's grid and paging
+// ---------------------------------------------------------------------------
+
+test("parseISODate should reject anything that is not a whole ISO day", () => {
+  // Date.parse takes "2026", an RFC3339 instant and even 2026-02-31 (rolling it
+  // into March). Any of those reaching the grid would move the calendar to a
+  // day the caller never named.
+  assert.ok(Number.isFinite(parseISODate("2026-08-05")));
+  assert.ok(Number.isNaN(parseISODate("2026-02-31")));
+  assert.ok(Number.isNaN(parseISODate("2026-08-05T12:00:00Z")));
+  assert.ok(Number.isNaN(parseISODate("2026-8-5")));
+  assert.ok(Number.isNaN(parseISODate("2026")));
+  assert.ok(Number.isNaN(parseISODate("")));
+  assert.ok(Number.isNaN(parseISODate(null)));
+});
+
+test("stepISODate should move one day in either direction", () => {
+  assert.equal(stepISODate("2026-08-05", +1), "2026-08-06");
+  assert.equal(stepISODate("2026-08-05", -1), "2026-08-04");
+  assert.equal(stepISODate("2026-08-05", 0), "2026-08-05");
+});
+
+test("stepISODate should cross month, year and leap-day boundaries", () => {
+  assert.equal(stepISODate("2026-08-31", +1), "2026-09-01");
+  assert.equal(stepISODate("2026-01-01", -1), "2025-12-31");
+  assert.equal(stepISODate("2024-02-28", +1), "2024-02-29"); // leap year
+  assert.equal(stepISODate("2026-02-28", +1), "2026-03-01"); // common year
+});
+
+test("stepISODate should hold a day across a DST transition", () => {
+  // The whole reason the arithmetic runs in UTC: US DST springs forward on
+  // 2026-03-08 and falls back on 2026-11-01. Local-midnight math lands on the
+  // wrong day in zones whose transition happens AT midnight, and a date string
+  // has no hour to absorb the shift.
+  assert.equal(stepISODate("2026-03-07", +1), "2026-03-08");
+  assert.equal(stepISODate("2026-03-08", +1), "2026-03-09");
+  assert.equal(stepISODate("2026-11-01", -1), "2026-10-31");
+});
+
+test("stepISODate should return a non-date unchanged", () => {
+  // Stepping a blank field must not manufacture a day out of nothing.
+  assert.equal(stepISODate("", +1), "");
+  assert.equal(stepISODate("nope", +1), "nope");
+});
+
+test("stepISOMonth should page a month while holding the day of the month", () => {
+  assert.equal(stepISOMonth("2026-08-05", +1), "2026-09-05");
+  assert.equal(stepISOMonth("2026-08-05", -1), "2026-07-05");
+  assert.equal(stepISOMonth("2026-01-15", -1), "2025-12-15");
+  assert.equal(stepISOMonth("2026-12-15", +1), "2027-01-15");
+});
+
+test("stepISOMonth should clamp to the last day when the target month is shorter", () => {
+  // Clamping, not rolling over: 31 Mar back a month is 28 Feb. Rolling into
+  // 3 Mar would make paging non-reversible.
+  assert.equal(stepISOMonth("2026-03-31", -1), "2026-02-28");
+  assert.equal(stepISOMonth("2024-03-31", -1), "2024-02-29"); // leap year
+  assert.equal(stepISOMonth("2026-05-31", +1), "2026-06-30");
+});
+
+test("monthGrid should return six Monday-first weeks covering the month", () => {
+  const g = monthGrid("2026-08-05");
+  assert.equal(g.year, 2026);
+  assert.equal(g.month, 7); // 0-based: August
+  assert.equal(g.cells.length, 42);
+  // August 2026 starts on a Saturday, so the grid opens on Mon 27 Jul
+  assert.equal(g.cells[0].iso, "2026-07-27");
+  assert.equal(g.cells[0].inMonth, false);
+  assert.equal(g.cells[41].iso, "2026-09-06");
+  // consecutive days throughout, no gaps or repeats
+  for (let i = 1; i < g.cells.length; i++) {
+    assert.equal(g.cells[i].iso, stepISODate(g.cells[i - 1].iso, 1), `cell ${i}`);
+  }
+});
+
+test("monthGrid should mark exactly the days belonging to the month on display", () => {
+  const g = monthGrid("2026-08-05");
+  const inMonth = g.cells.filter((c) => c.inMonth);
+  assert.equal(inMonth.length, 31);
+  assert.equal(inMonth[0].iso, "2026-08-01");
+  assert.equal(inMonth[30].iso, "2026-08-31");
+  assert.equal(g.cells.find((c) => c.iso === "2026-08-05").day, 5);
+});
+
+test("monthGrid should open on Monday for every month of a year", () => {
+  // Six rows always, whatever the month's shape — the popover must not change
+  // height (or move the day under the cursor) as the user pages through.
+  for (let m = 1; m <= 12; m++) {
+    const iso = `2026-${String(m).padStart(2, "0")}-15`;
+    const g = monthGrid(iso);
+    assert.equal(g.cells.length, 42, iso);
+    assert.equal(new Date(g.cells[0].iso + "T00:00:00Z").getUTCDay(), 1, `${iso} opens Monday`);
+    assert.ok(g.cells.some((c) => c.iso === iso && c.inMonth), `${iso} is in its own grid`);
+  }
+});
+
+test("monthGrid should include a whole month that begins on a Monday", () => {
+  // The tight case: a 31-day month starting Monday fills 31 of 42 cells with
+  // no lead, and must still not clip the tail.
+  const g = monthGrid("2026-06-15"); // June 2026 starts Monday
+  assert.equal(g.cells[0].iso, "2026-06-01");
+  assert.equal(g.cells.filter((c) => c.inMonth).length, 30);
+  assert.equal(g.cells[41].iso, "2026-07-12");
+});
+
+test("monthGrid should return null for a non-date", () => {
+  assert.equal(monthGrid(""), null);
+  assert.equal(monthGrid("2026-13-01"), null);
+  assert.equal(monthGrid(undefined), null);
 });
 
 // ---------------------------------------------------------------------------

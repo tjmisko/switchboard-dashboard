@@ -902,6 +902,119 @@
     return Boolean(summary) && summaryBodyHTML(summary) !== "";
   }
 
+  // -------------------------------------------------------------------------
+  // token spend rendering (digest.tokens from /api/summaries)
+  //
+  // A record is {main, sidechain?, byModel?}, each bucket carrying raw counts:
+  // inputFresh (the UNCACHED REMAINDER of the prompt, not the prompt),
+  // cacheCreation, cacheRead, output, peakTurnInput, responses. The components
+  // are raw on purpose — see TokenCounts in internal/sessiondigest/tokens.go —
+  // so forming the two figures a reader wants is this layer's job.
+  // -------------------------------------------------------------------------
+
+  // fmtTokens renders a count compactly. A busy session reads tens of millions
+  // of cached tokens, so the raw integer is unscannable and the exact digits
+  // carry no decision.
+  function fmtTokens(n) {
+    if (!Number.isFinite(n)) return "—";
+    if (n < 1e3) return String(Math.round(n));
+    if (n < 1e6) return (n / 1e3).toFixed(n < 1e4 ? 1 : 0).replace(/\.0$/, "") + "k";
+    if (n < 1e9) return (n / 1e6).toFixed(n < 1e7 ? 1 : 0).replace(/\.0$/, "") + "M";
+    return (n / 1e9).toFixed(1).replace(/\.0$/, "") + "B";
+  }
+
+  // shortModel drops the parts of a model id that are constant across the whole
+  // breakdown: every model here is a Claude one, and the dated suffix
+  // distinguishes releases nobody is comparing in a tooltip.
+  function shortModel(model) {
+    return String(model == null ? "" : model).replace(/^claude-/, "").replace(/-\d{8}$/, "");
+  }
+
+  // tokenBilled is what a bucket actually paid for on the input side: the
+  // uncached remainder PLUS the cache write PLUS the cache read, because every
+  // turn genuinely resends the whole conversation. Reporting inputFresh as
+  // "input" would be off by three orders of magnitude — it is frequently 2.
+  function tokenBilled(counts) {
+    if (!counts) return 0;
+    return (counts.inputFresh || 0) + (counts.cacheCreation || 0) + (counts.cacheRead || 0);
+  }
+
+  // tokenTotals folds a record into the figures the UI shows, or null when
+  // there is nothing to show. Main and sidechain are summed for the headline —
+  // a subagent's tokens are still this session's spend — with the delegated
+  // share kept separately so the split stays visible.
+  function tokenTotals(tokens) {
+    const main = tokens && tokens.main;
+    if (!main) return null;
+    const side = (tokens && tokens.sidechain) || null;
+    const responses = (main.responses || 0) + (side ? side.responses || 0 : 0);
+    if (responses === 0) return null;
+
+    const byModel = (tokens && tokens.byModel) || {};
+    const models = Object.keys(byModel).map((model) => ({
+      model,
+      label: shortModel(model),
+      output: byModel[model].output || 0,
+      billedInput: tokenBilled(byModel[model]),
+    })).sort((a, b) => b.output - a.output || (a.label < b.label ? -1 : 1));
+
+    return {
+      responses,
+      output: (main.output || 0) + (side ? side.output || 0 : 0),
+      billedInput: tokenBilled(main) + (side ? tokenBilled(side) : 0),
+      cacheRead: (main.cacheRead || 0) + (side ? side.cacheRead || 0 : 0),
+      cacheCreation: (main.cacheCreation || 0) + (side ? side.cacheCreation || 0 : 0),
+      inputFresh: (main.inputFresh || 0) + (side ? side.inputFresh || 0 : 0),
+      // Peak context is the MAIN chain's high-water mark alone. A subagent runs
+      // its own conversation in its own window, so folding its peak in here
+      // would report a context size that never existed.
+      peakContext: main.peakTurnInput || 0,
+      delegatedOutput: side ? side.output || 0 : 0,
+      delegatedResponses: side ? side.responses || 0 : 0,
+      models,
+    };
+  }
+
+  // tokenRowsHTML renders a record as rows. Output leads because it is the
+  // expensive half; billed input follows with the cache split beneath it, since
+  // cache reads are roughly a tenth the price and dominate the raw input number
+  // — one undifferentiated "input" figure would read as a bill ten times the
+  // real one. Returns "" for no data, so a session that never called the API
+  // renders exactly as before.
+  //
+  // rowClass is the caller's row style: the tooltip and the pinned card scope
+  // their row rules separately (.tooltip .t-row, .popout .po-row), so an
+  // unstyled row is what a hardcoded class would buy on the other surface.
+  function tokenRowsHTML(tokens, rowClass) {
+    const t = tokenTotals(tokens);
+    if (!t) return "";
+    const cls = rowClass || "t-row";
+    const row = (html) => `<div class="${cls}">${html}</div>`;
+    const turns = (n) => `${n} turn${n === 1 ? "" : "s"}`;
+
+    // Three short rows rather than two long ones: the tooltip is ~44 monospace
+    // columns wide, and a row that wraps reads as two ragged half-facts. Each
+    // row is a pair that belongs together — volume, then the cache split that
+    // explains it, then the shape of the session.
+    let html = row(`tokens <b>${fmtTokens(t.output)}</b> out · <b>${fmtTokens(t.billedInput)}</b> in`);
+    html += row(`<span class="dim">cache</span> ${fmtTokens(t.cacheRead)} read`
+      + ` · ${fmtTokens(t.cacheCreation)} written`);
+    html += row(`<span class="dim">peak ctx</span> ${fmtTokens(t.peakContext)}`
+      + ` · <span class="dim">${turns(t.responses)}</span>`);
+    if (t.delegatedOutput > 0) {
+      html += row(`<span class="dim">delegated</span> ${fmtTokens(t.delegatedOutput)} out`
+        + ` <span class="dim">over ${turns(t.delegatedResponses)}</span>`);
+    }
+    // One model needs no breakdown; several do, because a session total is not
+    // convertible to a cost figure without knowing which model spent what.
+    if (t.models.length > 1) {
+      html += row(t.models
+        .map((m) => `<span class="dim">${escapeHTML(m.label)}</span> ${fmtTokens(m.output)}`)
+        .join(" · "));
+    }
+    return html;
+  }
+
   // normalizeView validates a chart-view name, resolving "bars" — the sessions
   // view's pre-rename spelling — so persisted `sb-view` choices and old ?view=
   // links keep working. Returns null for anything that isn't a view, which both
@@ -910,6 +1023,75 @@
     if (view === "bars") return "sessions";
     if (view === "sessions" || view === "line" || view === "projects") return view;
     return null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // ISO calendar arithmetic (the date popover)
+  //
+  // A day here is a plain YYYY-MM-DD string, and the string is the truth — not
+  // an instant. So every step below runs in UTC on the parsed parts: local
+  // midnight plus setDate() lands on the wrong day in any zone whose DST
+  // transition falls at midnight, and there is no clock in a calendar grid to
+  // absorb the hour. UTC has no transitions, so day arithmetic is exact ms.
+  // ---------------------------------------------------------------------------
+
+  const DAY_MS = 86400e3;
+
+  // parseISODate returns the UTC epoch ms of a YYYY-MM-DD day, or NaN. Strict
+  // about shape: Date.parse would happily take "2026" or an RFC3339 instant,
+  // and either would silently move the grid to a day the caller never named.
+  function parseISODate(iso) {
+    if (typeof iso !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(iso)) return NaN;
+    const t = Date.parse(iso + "T00:00:00Z");
+    // round-trip check: Date.parse accepts 2026-02-31 and rolls it into March
+    return Number.isFinite(t) && new Date(t).toISOString().slice(0, 10) === iso ? t : NaN;
+  }
+
+  // stepISODate walks a day forward or back. Returns the input unchanged when
+  // it isn't a date, so a caller stepping a blank field can't manufacture one.
+  function stepISODate(iso, days) {
+    const t = parseISODate(iso);
+    if (!Number.isFinite(t)) return iso;
+    return new Date(t + days * DAY_MS).toISOString().slice(0, 10);
+  }
+
+  // stepISOMonth pages a month at a time, holding the day of the month where it
+  // fits and CLAMPING where it doesn't: 31 Mar back a month is 28 Feb, not 3
+  // Mar. Rolling over instead would make paging non-reversible — page back then
+  // forward and you would land in a different month than you started in.
+  function stepISOMonth(iso, months) {
+    const t = parseISODate(iso);
+    if (!Number.isFinite(t)) return iso;
+    const d = new Date(t);
+    const target = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + months, 1));
+    const y = target.getUTCFullYear(), m = target.getUTCMonth();
+    const lastDay = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+    return new Date(Date.UTC(y, m, Math.min(d.getUTCDate(), lastDay))).toISOString().slice(0, 10);
+  }
+
+  // monthGrid lays out the month containing `iso` the way a calendar draws it:
+  // 42 cells, Monday-first — the page speaks ISO dates everywhere, so it keeps
+  // ISO weeks too. Always six rows, even when five would hold the month, so the
+  // popover never changes height (and never moves the day under the cursor)
+  // as the user pages through months. Returns null for a non-date.
+  function monthGrid(iso) {
+    const t = parseISODate(iso);
+    if (!Number.isFinite(t)) return null;
+    const anchor = new Date(t);
+    const year = anchor.getUTCFullYear(), month = anchor.getUTCMonth();
+    const first = Date.UTC(year, month, 1);
+    // getUTCDay is Sunday-based (0=Sun); Monday-first puts Sunday last.
+    const lead = (new Date(first).getUTCDay() + 6) % 7;
+    const cells = [];
+    for (let i = 0; i < 42; i++) {
+      const d = new Date(first - lead * DAY_MS + i * DAY_MS);
+      cells.push({
+        iso: d.toISOString().slice(0, 10),
+        day: d.getUTCDate(),
+        inMonth: d.getUTCFullYear() === year && d.getUTCMonth() === month,
+      });
+    }
+    return { year, month, cells };
   }
 
   // VIEW_ORDER is the left-to-right order of the footer's view switcher, and so
@@ -965,6 +1147,8 @@
     projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs, suspectTailMs,
     fmtBytes, spawnedBytes, laneMemory, memoryWindow, pressureWindow,
     summaryTasks, summaryBodyHTML, summaryHintText, summaryCardHasContent, normalizeView,
+    fmtTokens, shortModel, tokenBilled, tokenTotals, tokenRowsHTML,
     VIEW_ORDER, stepView,
+    parseISODate, stepISODate, stepISOMonth, monthGrid,
   };
 });

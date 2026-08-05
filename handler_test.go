@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tjmisko/switchboard-dashboard/internal/provider"
+	"github.com/tjmisko/switchboard-dashboard/internal/sessiondigest"
 )
 
 const fixtureJSON = `{"window":"2026-06-20","lanes":null,"summary":{"from":"2026-06-20T09:00:00Z","to":"2026-06-20T09:48:00Z","sessions":0,"by_status":{},"attention_union":0,"attention_per_session":0,"attention_fanout":0},"totals":{"tok_in":1,"tok_out":2,"tok_cache_read":3,"tok_cache_create":4,"subagents":0}}`
@@ -456,11 +457,22 @@ func mustContainPair(t *testing.T, args []string, flag, val string) {
 // digest-only record).
 func writeSummaryRecord(t *testing.T, dir, slug, id, summaryJSON string) {
 	t.Helper()
+	writeSummaryRecordWithTokens(t, dir, slug, id, summaryJSON, "")
+}
+
+// writeSummaryRecordWithTokens is writeSummaryRecord plus a digest.tokens
+// fragment ("" for a record written before token counts existed).
+func writeSummaryRecordWithTokens(t *testing.T, dir, slug, id, summaryJSON, tokensJSON string) {
+	t.Helper()
 	slugDir := filepath.Join(dir, slug)
 	if err := os.MkdirAll(slugDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	body := `{"digest":{"sessionId":"` + id + `"}`
+	body := `{"digest":{"sessionId":"` + id + `"`
+	if tokensJSON != "" {
+		body += `,"tokens":` + tokensJSON
+	}
+	body += `}`
 	if summaryJSON != "" {
 		body += `,"summary":` + summaryJSON + `,"generatedAt":"2026-07-31T22:00:00Z"`
 	}
@@ -470,10 +482,12 @@ func writeSummaryRecord(t *testing.T, dir, slug, id, summaryJSON string) {
 	}
 }
 
-func TestSummariesShouldServeGeneratedRecordsAndOmitDigestOnlyOnes(t *testing.T) {
+func TestSummariesShouldServeGeneratedRecordsAndOmitRecordsThatCarryNothing(t *testing.T) {
 	dir := t.TempDir()
 	writeSummaryRecord(t, dir, "-home-u-proj", "sess-summarized",
 		`{"name":"fix-flaky-test","description":"Fixed the flaky auth test","summary":"The session fixed a race."}`)
+	// No summary AND no token counts: everything this record holds is already on
+	// the timeline, so it stays omitted.
 	writeSummaryRecord(t, dir, "-home-u-proj", "sess-digest-only", "")
 
 	srv := &Server{SummariesDir: dir}
@@ -503,6 +517,85 @@ func TestSummariesShouldServeGeneratedRecordsAndOmitDigestOnlyOnes(t *testing.T)
 	}
 	if got.Name != "fix-flaky-test" || got.Description != "Fixed the flaky auth test" {
 		t.Errorf("entry = %+v, want summary fields verbatim", got)
+	}
+}
+
+// tokensFragment is a digest.tokens block in the shape sessiondigest writes.
+const tokensFragment = `{"main":{"responses":236,"inputFresh":646,"cacheCreation":259595,` +
+	`"cacheCreation1h":259595,"cacheRead":34532761,"output":104821,"peakTurnInput":236518},` +
+	`"sidechain":{"responses":55,"inputFresh":101,"cacheCreation":352990,"cacheRead":2646005,` +
+	`"output":14546,"peakTurnInput":97105},` +
+	`"byModel":{"claude-opus-5":{"responses":291,"inputFresh":747,"cacheCreation":612585,` +
+	`"cacheRead":37178766,"output":119367,"peakTurnInput":236518}}}`
+
+func TestSummariesShouldServeTokenCountsWhenTheRecordCarriesThem(t *testing.T) {
+	dir := t.TempDir()
+	writeSummaryRecordWithTokens(t, dir, "-home-u-proj", "sess-spendy",
+		`{"name":"big-one","description":"Burned a lot","summary":"Long session."}`, tokensFragment)
+
+	srv := &Server{SummariesDir: dir}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/summaries", nil)
+	srv.Handler().ServeHTTP(rec, req)
+
+	var resp struct {
+		Sessions map[string]struct {
+			Description string                    `json:"description"`
+			Tokens      *sessiondigest.TokenUsage `json:"tokens"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	got := resp.Sessions["sess-spendy"]
+	if got.Tokens == nil {
+		t.Fatal("tokens absent; want the digest's counts forwarded")
+	}
+	if got.Tokens.Main.Output != 104821 || got.Tokens.Main.PeakTurnInput != 236518 {
+		t.Errorf("main = %#v, want the record's counts verbatim", got.Tokens.Main)
+	}
+	if got.Tokens.Sidechain == nil || got.Tokens.Sidechain.Output != 14546 {
+		t.Errorf("sidechain = %#v, want the delegated spend forwarded", got.Tokens.Sidechain)
+	}
+	if got.Tokens.ByModel["claude-opus-5"].Responses != 291 {
+		t.Errorf("byModel = %#v, want the per-model bucket forwarded", got.Tokens.ByModel)
+	}
+	if got.Description != "Burned a lot" {
+		t.Errorf("description = %q, want the summary still served alongside", got.Description)
+	}
+}
+
+func TestSummariesShouldServeDigestOnlyRecordsWhenTheyCarryTokenCounts(t *testing.T) {
+	// Token counts exist for every session that called the API, including the
+	// thin ones the condenser never summarizes. Gating them behind an LLM
+	// summary would hide data already on disk.
+	dir := t.TempDir()
+	writeSummaryRecordWithTokens(t, dir, "-home-u-proj", "sess-thin", "", tokensFragment)
+
+	srv := &Server{SummariesDir: dir}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/summaries", nil)
+	srv.Handler().ServeHTTP(rec, req)
+
+	var resp struct {
+		Sessions map[string]struct {
+			Description string                    `json:"description"`
+			Name        string                    `json:"name"`
+			Tokens      *sessiondigest.TokenUsage `json:"tokens"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := resp.Sessions["sess-thin"]
+	if !ok {
+		t.Fatalf("sess-thin omitted; sessions = %v", resp.Sessions)
+	}
+	if got.Tokens == nil || got.Tokens.Main.Output != 104821 {
+		t.Errorf("tokens = %#v, want the counts served without a summary", got.Tokens)
+	}
+	if got.Description != "" || got.Name != "" {
+		t.Errorf("entry = %+v, want no fabricated summary fields", got)
 	}
 }
 
