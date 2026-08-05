@@ -74,6 +74,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/timeline", s.handleTimeline)
 	mux.HandleFunc("/api/plan", s.handlePlan)
 	mux.HandleFunc("/api/summaries", s.handleSummaries)
+	mux.HandleFunc("/api/memory", s.handleMemory)
 	mux.HandleFunc("/api/settings", s.handleSettings)
 	mux.Handle("/", s.staticHandler())
 	return mux
@@ -435,4 +436,165 @@ func readSummaries(dir string) map[string]summaryEntry {
 func (s *Server) handleSummaries(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(summariesResponse{Sessions: readSummaries(s.SummariesDir)})
+}
+
+// --- /api/memory ---
+//
+// Memory rides its own endpoint rather than the timeline envelope, for two
+// reasons documented in README's Memory section: a live sample series would
+// change the timeline bytes on every poll and defeat the unchanged→no-repaint
+// check, and on the producer side memory samples are kept out of lane routing so
+// they cannot mask a lost-session death. Like /api/summaries this is pure hover
+// enrichment — always 200, best effort, never an error surface.
+
+// memorySample is one reading of a session's memory series: bytes resident for
+// the agent process alone and for its whole process tree (Pss + SwapPss).
+// `agent` is null for a provider with no meaningful inner boundary — an arachne
+// container reports a tree figure only.
+type memorySample struct {
+	TS    string `json:"ts"`
+	Agent *int64 `json:"agent"`
+	Tree  *int64 `json:"tree"`
+}
+
+// memoryEntry is one session's memory, in bytes throughout. `tree − agent` is
+// what spawned work cost: subagents have no PIDs of their own, so the tree is
+// the only unit that captures them. Averages are time-weighted by the producer.
+// Every scalar is nullable and emitted explicitly as null when the provider has
+// no figure for it — 0 is a legal value, so the UI must test for null rather
+// than falsiness.
+type memoryEntry struct {
+	PeakAgentBytes *int64         `json:"peak_agent_bytes"`
+	AvgAgentBytes  *int64         `json:"avg_agent_bytes"`
+	PeakTreeBytes  *int64         `json:"peak_tree_bytes"`
+	AvgTreeBytes   *int64         `json:"avg_tree_bytes"`
+	Mem            []memorySample `json:"mem,omitempty"`
+}
+
+// pressurePoint is one machine-wide memory-pressure reading. psi_stall_us is the
+// delta between adjacent samples, not the raw monotonic counter.
+type pressurePoint struct {
+	TS         string   `json:"ts"`
+	AvailBytes *int64   `json:"avail_bytes"`
+	PSIAvg10   *float64 `json:"psi_avg10"`
+	PSIStallUS *int64   `json:"psi_stall_us"`
+}
+
+// memoryResponse is the /api/memory body. Sessions is always present (empty when
+// nothing is known); the two series are omitted when empty.
+type memoryResponse struct {
+	Sessions map[string]memoryEntry `json:"sessions"`
+	Pressure []pressurePoint        `json:"pressure,omitempty"`
+}
+
+// memoryDoc is one provider's `memory --json` output. Note the shape difference
+// from the response: a producer emits sessions as a LIST (each record carrying
+// its own id), and this endpoint keys them into a map so the UI can look a
+// session up by the lane id it already holds.
+type memoryDoc struct {
+	Sessions []memoryRecord  `json:"sessions"`
+	Pressure []pressurePoint `json:"pressure"`
+}
+
+// memoryRecord is a producer's per-session record: the entry plus its identity.
+// pid/agent/project are also emitted by the producer but deliberately dropped —
+// the UI has them from the lane, and the frozen response shape carries figures
+// only.
+type memoryRecord struct {
+	SessionID string `json:"session_id"`
+	memoryEntry
+}
+
+// memorySource pairs a provider id with its parsed memory document (nil when
+// that provider contributed nothing). The slice is kept in configured provider
+// order, which is what makes the pressure rule below deterministic.
+type memorySource struct {
+	provider string
+	doc      *memoryDoc
+}
+
+// mergeMemory folds the per-provider documents into the response.
+//
+// Sessions are keyed by lane identity so a hover can look one up directly, and
+// namespaced "<provider>:<id>" exactly as timeline.Merge namespaces lane
+// session_ids — but only when merging, since the single-provider timeline path
+// is a verbatim proxy that leaves lane ids raw. Getting that wrong would key
+// every entry to a lane id that does not exist. A record with no session_id is
+// unkeyable and dropped.
+//
+// PRESSURE IS NOT SUMMED, AND NOT CONCATENATED. It is a machine-wide reading, so
+// two providers on one host observe the same physical memory and report the same
+// series twice; adding or appending them would double the reported stall time and
+// halve the apparent available bytes. The rule is first-provider-wins: the first
+// provider (in configured order) that supplies a non-empty series defines it and
+// the rest are discarded. Configured order therefore means "most authoritative
+// host observer first" — which is already true, since the host's own
+// switchboard-ctl leads and container providers follow.
+func mergeMemory(sources []memorySource, namespace bool) memoryResponse {
+	out := memoryResponse{Sessions: map[string]memoryEntry{}}
+	for _, src := range sources {
+		if src.doc == nil {
+			continue
+		}
+		for _, rec := range src.doc.Sessions {
+			if rec.SessionID == "" {
+				continue
+			}
+			key := rec.SessionID
+			if namespace {
+				key = src.provider + ":" + key
+			}
+			if _, seen := out.Sessions[key]; seen {
+				continue
+			}
+			out.Sessions[key] = rec.memoryEntry
+		}
+		if len(out.Pressure) == 0 {
+			out.Pressure = src.doc.Pressure
+		}
+	}
+	return out
+}
+
+// handleMemory serves the merged memory view for the requested window. Always
+// 200: a provider that fails, lacks the subcommand, or prints something
+// unreadable contributes nothing rather than erroring, so hovers simply go
+// unenriched instead of the endpoint 502-ing the way /api/timeline does.
+func (s *Server) handleMemory(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	ps := s.providerList()
+
+	params := provider.Params{Day: q.Get("day"), Since: q.Get("since"), Until: q.Get("until")}
+	if len(ps) == 1 {
+		// Mirrors handleTimeline: the query dir is single-source and does not map
+		// across providers, so it is only forwarded to a lone provider.
+		params.Dir = q.Get("dir")
+	}
+
+	sources := make([]memorySource, len(ps))
+	var wg sync.WaitGroup
+	for i, p := range ps {
+		sources[i] = memorySource{provider: p.ID()}
+		mp, ok := p.(provider.MemoryProvider)
+		if !ok {
+			continue
+		}
+		wg.Add(1)
+		go func(i int, mp provider.MemoryProvider) {
+			defer wg.Done()
+			raw, err := mp.FetchMemory(r.Context(), params)
+			if err != nil {
+				return
+			}
+			var doc memoryDoc
+			if json.Unmarshal(raw, &doc) != nil {
+				return
+			}
+			sources[i].doc = &doc
+		}(i, mp)
+	}
+	wg.Wait()
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(mergeMemory(sources, len(ps) > 1))
 }

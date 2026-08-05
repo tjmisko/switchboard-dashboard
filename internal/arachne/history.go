@@ -21,13 +21,30 @@ import (
 )
 
 // Event kinds in the append-only history log.
+//
+// Adding a kind is purely additive: ReadEvents skips what it cannot parse, and
+// aggregate/Reconstruct switch on Type with no default, so an older binary
+// reading a newer log ignores the kinds it does not know instead of breaking.
 const (
 	EventSessionStart  = "session_start"
 	EventSessionEnd    = "session_end"
 	EventSubagentSpawn = "subagent_spawn"
 	EventSubagentStop  = "subagent_stop"
 	EventUsageSample   = "usage_sample"
+	EventMemorySample  = "memory_sample"
+	EventOOMKill       = "oom_kill"
 )
+
+// IsMemoryEvent reports whether a kind is one the memory sampler emits.
+//
+// These are the only events the recorder produces on a timer rather than in
+// response to something the agent did, which is why they are held apart from
+// lane routing: a sample fires whether or not the session is doing anything, so
+// counting one as evidence of life would mask exactly the lost-session death
+// the suspect check exists to catch.
+func IsMemoryEvent(kind string) bool {
+	return kind == EventMemorySample || kind == EventOOMKill
+}
 
 // Session-end reasons.
 const (
@@ -68,6 +85,26 @@ type Event struct {
 	TokCacheRead   int64   `json:"tok_cache_read,omitempty"`
 	TokCacheCreate int64   `json:"tok_cache_create,omitempty"`
 	CostUSD        float64 `json:"cost_usd,omitempty"`
+
+	// memory_sample (and repeated on oom_kill, where they are the diagnostic
+	// context for why the cage fired): the container's cgroup v2 figures as of
+	// TS, in bytes. Unlike the token fields these are an instantaneous gauge, not
+	// a cumulative tally, so they are a series to be read pointwise rather than
+	// last-wins. MemPeakBytes is the exception — the kernel's own high-water
+	// mark, monotonic over the container's life.
+	MemTreeBytes         int64 `json:"mem_tree_bytes,omitempty"`
+	MemPeakBytes         int64 `json:"mem_peak_bytes,omitempty"`
+	MemMaxBytes          int64 `json:"mem_max_bytes,omitempty"`
+	MemSwapBytes         int64 `json:"mem_swap_bytes,omitempty"`
+	MemInactiveFileBytes int64 `json:"mem_inactive_file_bytes,omitempty"`
+
+	// oom_kill: OOMKills is the kernel's cumulative memory.events counter after
+	// the increment; OOMKillDelta is how many kills this event actually reports.
+	// The delta is the load-bearing one — the counter does not reset when the
+	// recorder restarts, so diffing the cumulative figure across a restart would
+	// over-report.
+	OOMKills     int64 `json:"oom_kills,omitempty"`
+	OOMKillDelta int64 `json:"oom_kill_delta,omitempty"`
 }
 
 // WriteEvent appends one JSON event line to w.

@@ -12,6 +12,7 @@ const {
   aloftSpans, workIntervalsMs, concurrencyProfile, alignLiveTail,
   projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs,
   suspectTailMs, normalizeView, scaleGeometry,
+  fmtBytes, spawnedBytes, laneMemory, memoryWindow, pressureWindow,
   summaryTasks, summaryBodyHTML, summaryHintText, summaryCardHasContent,
 } = require("./model.js");
 
@@ -1012,6 +1013,440 @@ test("normalizeView should return null when the view is unknown or missing", () 
   assert.equal(normalizeView(undefined), null);
   assert.equal(normalizeView(""), null);
   assert.equal(normalizeView("foo"), null);
+});
+
+// ---------------------------------------------------------------------------
+// memory (/api/memory) — byte formatting, the agent-vs-spawned split, the
+// per-session accessor, and the pressure lookup behind the interval tooltip.
+// ---------------------------------------------------------------------------
+
+const MB = 1024 * 1024;
+const GB = 1024 * MB;
+
+test("fmtBytes should read in MB and GB when the figure is process-sized", () => {
+  assert.equal(fmtBytes(812 * MB), "812 MB");
+  assert.equal(fmtBytes(1 * MB), "1 MB");
+  assert.equal(fmtBytes(1024 * MB), "1 GB", "a full 1024 MB rolls over to GB");
+  assert.equal(fmtBytes(2 * GB), "2 GB", "a whole GB drops the trailing .0");
+  assert.equal(fmtBytes(1.4 * GB), "1.4 GB");
+  assert.equal(fmtBytes(11.25 * GB), "11.3 GB", "one decimal at GB scale, no more");
+});
+
+test("fmtBytes should distinguish absent from zero at the small end", () => {
+  // The whole point of the null/0 split: "—" means nothing was measured, while
+  // "0 MB" is a real reading. A sub-MB figure is real too, just not worth
+  // decimals — it follows fmtUSD's "<$0.01" rather than printing 0.
+  assert.equal(fmtBytes(null), "—");
+  assert.equal(fmtBytes(undefined), "—");
+  assert.equal(fmtBytes(NaN), "—");
+  assert.equal(fmtBytes(0), "0 MB");
+  assert.equal(fmtBytes(1), "<1 MB");
+  assert.equal(fmtBytes(MB - 1), "<1 MB");
+});
+
+test("spawnedBytes should be the tree minus the agent when both were sampled", () => {
+  assert.equal(spawnedBytes(1500 * MB, 400 * MB), 1100 * MB);
+  assert.equal(spawnedBytes(400 * MB, 400 * MB), 0, "a lone agent spawned nothing");
+});
+
+test("spawnedBytes should floor at zero when sampling skew inverts the pair", () => {
+  // agent and tree are read a moment apart, so a shrinking tree can sample
+  // below its own agent. A raw subtraction would render "-38 MB spawned".
+  assert.equal(spawnedBytes(362 * MB, 400 * MB), 0);
+});
+
+test("spawnedBytes should return nothing when either side was not measured", () => {
+  // A container provider reports a tree total with no agent split. Returning
+  // the tree here would credit the whole container to spawned work.
+  assert.equal(spawnedBytes(1500 * MB, null), null);
+  assert.equal(spawnedBytes(null, 400 * MB), null);
+  assert.equal(spawnedBytes(undefined, undefined), null);
+});
+
+function memoryPayload() {
+  return {
+    sessions: {
+      ghost: {
+        peak_agent_bytes: 400 * MB,
+        avg_agent_bytes: 250 * MB,
+        peak_tree_bytes: 1500 * MB,
+        avg_tree_bytes: 900 * MB,
+      },
+    },
+    pressure: [],
+  };
+}
+
+test("laneMemory should report the producer's peaks and averages when the lane is trusted", () => {
+  const lane = ghostLane();
+  lane.suspect = false;
+  const mem = laneMemory(lane, memoryPayload());
+  assert.equal(mem.peakAgentBytes, 400 * MB);
+  assert.equal(mem.avgAgentBytes, 250 * MB);
+  assert.equal(mem.peakTreeBytes, 1500 * MB);
+  assert.equal(mem.avgTreeBytes, 900 * MB);
+  assert.equal(mem.peakSpawnedBytes, 1100 * MB, "spawned is the tree above the agent");
+  assert.equal(mem.avgSpawnedBytes, 650 * MB);
+  assert.equal(mem.clipped, false);
+});
+
+test("laneMemory should return nothing when the session has no memory data", () => {
+  // NOTHING, not zero: the UI has to be able to say "not measured" (no memory
+  // support, a non-Linux host, a session older than sampling) rather than
+  // drawing a confident 0 MB.
+  const lane = ghostLane();
+  assert.equal(laneMemory(lane, null), null);
+  assert.equal(laneMemory(lane, {}), null);
+  assert.equal(laneMemory(lane, { sessions: {} }), null);
+  assert.equal(laneMemory(lane, { sessions: { other: { peak_tree_bytes: 900 * MB } } }), null);
+  assert.equal(laneMemory(lane, { sessions: { ghost: {} } }), null, "an empty record is no data");
+  assert.equal(laneMemory(lane, {
+    // the endpoint sends the scalars as explicit null rather than omitting them
+    sessions: { ghost: { peak_agent_bytes: null, avg_agent_bytes: null, peak_tree_bytes: null, avg_tree_bytes: null } },
+  }), null, "a record of explicit nulls is no data");
+  assert.equal(laneMemory(null, memoryPayload()), null);
+});
+
+test("laneMemory should keep a real zero apart from a missing figure", () => {
+  // 0 is a legal reading and must survive as 0 — `!= null`, never truthiness,
+  // or a genuinely idle tree renders as "—" (not measured).
+  const lane = ghostLane();
+  lane.suspect = false;
+  const mem = laneMemory(lane, {
+    sessions: { ghost: { peak_agent_bytes: 0, avg_agent_bytes: 0, peak_tree_bytes: 0, avg_tree_bytes: 0 } },
+  });
+  assert.equal(mem.peakTreeBytes, 0, "a zero record is data, not absence");
+  assert.equal(mem.peakSpawnedBytes, 0);
+  assert.equal(fmtBytes(mem.peakTreeBytes), "0 MB");
+});
+
+test("laneMemory should keep the tree alone when the provider reports no agent split", () => {
+  // arachne measures a container total, which has no meaningful inner boundary.
+  // The endpoint emits the agent side as explicit null, never as an absent key.
+  const lane = ghostLane();
+  lane.suspect = false;
+  const mem = laneMemory(lane, {
+    sessions: {
+      ghost: {
+        peak_agent_bytes: null, avg_agent_bytes: null,
+        peak_tree_bytes: 2 * GB, avg_tree_bytes: 1 * GB,
+        mem: [{ ts: at(0), agent: null, tree: 2 * GB }],
+      },
+    },
+  });
+  assert.equal(mem.peakTreeBytes, 2 * GB);
+  assert.equal(mem.peakAgentBytes, null, "absent, not zero");
+  assert.equal(mem.peakSpawnedBytes, null, "no split to report");
+  assert.equal(fmtBytes(mem.peakAgentBytes), "—");
+});
+
+test("laneMemory should re-derive the tree alone when a suspect container lane has no agent side", () => {
+  // The clip path has to survive a null agent series too: arachne's samples
+  // carry an explicit null agent, so seriesStats finds nothing on that key.
+  const mem = laneMemory(ghostLane(), {
+    sessions: {
+      ghost: {
+        peak_agent_bytes: null, avg_agent_bytes: null,
+        peak_tree_bytes: 4 * GB, avg_tree_bytes: 3 * GB,
+        mem: [
+          { ts: at(0), agent: null, tree: 1 * GB },
+          { ts: at(60), agent: null, tree: 2 * GB },
+          { ts: at(300), agent: null, tree: 4 * GB }, // synthesized tail
+        ],
+      },
+    },
+  });
+  assert.equal(mem.clipped, true);
+  assert.equal(mem.peakTreeBytes, 2 * GB, "the tail's 4 GB is not evidence");
+  assert.equal(mem.peakAgentBytes, null);
+  assert.equal(mem.peakSpawnedBytes, null);
+});
+
+// A suspect lane's samples run past the evidence bound because the sampler
+// keeps firing at a session nothing ever closed. Same hazard as laneActiveMs:
+// re-deriving over the synthesized tail disagrees with the producer.
+function ghostLaneMemory() {
+  return {
+    sessions: {
+      ghost: {
+        // the producer's own scalars cover the whole (partly synthesized) lane
+        peak_agent_bytes: 900 * MB,
+        avg_agent_bytes: 600 * MB,
+        peak_tree_bytes: 2000 * MB,
+        avg_tree_bytes: 1200 * MB,
+        mem: [
+          { ts: at(0), agent: 100 * MB, tree: 300 * MB },
+          { ts: at(30), agent: 200 * MB, tree: 500 * MB },
+          { ts: at(60), agent: 120 * MB, tree: 400 * MB }, // exactly at the bound
+          { ts: at(120), agent: 900 * MB, tree: 2000 * MB }, // synthesized tail
+          { ts: at(300), agent: 800 * MB, tree: 1900 * MB },
+        ],
+      },
+    },
+    pressure: [],
+  };
+}
+
+test("laneMemory should re-derive at the evidence bound when the lane is suspect", () => {
+  const mem = laneMemory(ghostLane(), ghostLaneMemory());
+  assert.equal(mem.clipped, true);
+  assert.equal(mem.samples.length, 3, "the sample at suspect_since is itself evidence");
+  assert.equal(mem.peakAgentBytes, 200 * MB, "the tail's 900 MB spike is not evidence");
+  assert.equal(mem.peakTreeBytes, 500 * MB);
+  assert.equal(mem.avgAgentBytes, 140 * MB, "time-weighted over the trusted prefix");
+  assert.equal(mem.avgTreeBytes, 400 * MB);
+  assert.equal(mem.peakSpawnedBytes, 300 * MB);
+});
+
+test("laneMemory should keep the producer's scalars when a suspect lane ships no series", () => {
+  // Fail open, exactly as suspectSinceMs does on an unusable timestamp: with
+  // nothing to clip, dropping the figures would erase a real measurement.
+  const mem = laneMemory(ghostLane(), memoryPayload());
+  assert.equal(mem.clipped, false);
+  assert.equal(mem.peakTreeBytes, 1500 * MB);
+});
+
+test("laneMemory should return nothing when every sample lands in the synthesized tail", () => {
+  const payload = ghostLaneMemory();
+  payload.sessions.ghost.mem = payload.sessions.ghost.mem.filter((s) => Date.parse(s.ts) > ms(60));
+  assert.equal(laneMemory(ghostLane(), payload), null, "no evidenced memory is no data");
+});
+
+test("laneMemory should join a namespaced lane id and fall back to the bare one", () => {
+  const lane = ghostLane();
+  lane.provider = "arachne";
+  lane.session_id = "arachne:ghost";
+  assert.equal(laneMemory(lane, { sessions: { "arachne:ghost": { peak_tree_bytes: 7 * MB } } }).peakTreeBytes, 7 * MB);
+  assert.equal(laneMemory(lane, { sessions: { ghost: { peak_tree_bytes: 7 * MB } } }).peakTreeBytes, 7 * MB);
+});
+
+test("laneMemory should join an unidentified lane to its pid-keyed memory", () => {
+  // A session emits memory samples from discovery but only gets its id at its
+  // first agent hook, so the producer keys that stretch "pid:<n>" — and an
+  // unidentified lane is keyed the same way. Without the fallback the two
+  // halves of one session never meet, which is the state a freshly started or
+  // long-idle session sits in, and exactly when its memory is worth seeing.
+  const lane = { pid: 4821, start: at(0), end: at(60), intervals: [] };
+  const mem = { sessions: { "pid:4821": { peak_agent_bytes: 500 * MB, peak_tree_bytes: 900 * MB } } };
+  assert.equal(laneMemory(lane, mem).peakTreeBytes, 900 * MB);
+  assert.equal(laneMemory(lane, mem).peakSpawnedBytes, 400 * MB);
+});
+
+test("laneMemory should not join an unidentified lane to an unrelated pid", () => {
+  const lane = { pid: 4821, start: at(0), end: at(60), intervals: [] };
+  assert.equal(laneMemory(lane, { sessions: { "pid:9999": { peak_tree_bytes: 900 * MB } } }), null);
+});
+
+// A session that ran across a daemon restart holds BOTH keys: the id it had
+// before, and "pid:<n>" for the stretch after, until its next agent hook hands
+// the id back. Taking the first match reported one stretch and hid the other —
+// observed live as 1 sample under the id against 18 under the pid.
+function splitPayload() {
+  return {
+    sessions: {
+      ghost: {
+        peak_agent_bytes: 300 * MB,
+        avg_agent_bytes: 300 * MB,
+        peak_tree_bytes: 400 * MB,
+        avg_tree_bytes: 400 * MB,
+        mem: [
+          { ts: at(0), agent: 300 * MB, tree: 400 * MB },
+          { ts: at(10), agent: 300 * MB, tree: 400 * MB },
+        ],
+      },
+      "pid:4821": {
+        peak_agent_bytes: 900 * MB,
+        avg_agent_bytes: 800 * MB,
+        peak_tree_bytes: 1200 * MB,
+        avg_tree_bytes: 1000 * MB,
+        mem: [
+          { ts: at(20), agent: 900 * MB, tree: 1200 * MB },
+          { ts: at(50), agent: 700 * MB, tree: 900 * MB },
+        ],
+      },
+    },
+    pressure: [],
+  };
+}
+
+function splitLane() {
+  return { session_id: "ghost", pid: 4821, start: at(0), end: at(60), intervals: [] };
+}
+
+test("laneMemory should join an identified lane to its pid-keyed memory too", () => {
+  const mem = laneMemory(splitLane(), splitPayload());
+  assert.equal(mem.peakTreeBytes, 1200 * MB, "the peak is the higher of the two stretches");
+  assert.equal(mem.peakAgentBytes, 900 * MB);
+  assert.equal(mem.samples.length, 4, "both series, not whichever key matched first");
+});
+
+test("laneMemory should weight a blended average by each stretch's own span", () => {
+  // 400 MB held over 10 min, then 1000 MB over 30 — the long stretch has to
+  // dominate. A plain mean of the two averages would say 700 MB.
+  const mem = laneMemory(splitLane(), splitPayload());
+  assert.equal(mem.avgTreeBytes, 850 * MB, "(400*10 + 1000*30) / 40");
+  assert.equal(mem.avgAgentBytes, 675 * MB, "(300*10 + 800*30) / 40");
+});
+
+test("laneMemory should leave a single record's scalars exactly as the producer sent them", () => {
+  // The blend must be a no-op on the ordinary one-record case: the producer's
+  // figures are computed over the full series before it is thinned, so anything
+  // re-derived here would be the less accurate number.
+  const lane = ghostLane();
+  lane.suspect = false;
+  const mem = laneMemory(lane, memoryPayload());
+  assert.equal(mem.avgTreeBytes, 900 * MB);
+  assert.equal(mem.avgAgentBytes, 250 * MB);
+});
+
+test("laneMemory should not credit a lane with a pid bucket outside its own span", () => {
+  // A pid outlives the session wearing it. Over a long window one bucket can
+  // hold the unidentified stretches of two sessions that held that pid in turn,
+  // and the later one's 4 GB must not land on this lane's hover. The id-keyed
+  // record needs no such bound; only the pid claim is an inference.
+  const payload = splitPayload();
+  payload.sessions["pid:4821"].mem.push({ ts: at(200), agent: 4000 * MB, tree: 4000 * MB });
+  payload.sessions["pid:4821"].peak_tree_bytes = 4000 * MB;
+  const mem = laneMemory(splitLane(), payload);
+  assert.equal(mem.peakTreeBytes, 1200 * MB, "the out-of-span sample belongs to whoever held the pid next");
+  assert.equal(mem.samples.length, 4);
+});
+
+test("memoryWindow should re-derive over both stretches of a split session", () => {
+  // The interval tooltip reads the same union; a window landing in the pid-keyed
+  // stretch must not come back empty because the lane carries an id.
+  const win = memoryWindow(splitLane(), splitPayload(), ms(20), ms(50));
+  assert.equal(win.samples.length, 2);
+  assert.equal(win.peakTreeBytes, 1200 * MB);
+});
+
+function pressureSeries() {
+  return [
+    { ts: at(0), avail_bytes: 8 * GB, psi_avg10: 0.4, psi_stall_us: 1200 },
+    { ts: at(30), avail_bytes: 2 * GB, psi_avg10: 12.5, psi_stall_us: 90000 },
+    { ts: at(60), avail_bytes: 5 * GB, psi_avg10: 3, psi_stall_us: 400 },
+  ];
+}
+
+test("memoryWindow should re-derive over only the samples inside the interval", () => {
+  const win = memoryWindow(ghostLane(), ghostLaneMemory(), ms(0), ms(30));
+  assert.equal(win.samples.length, 2);
+  assert.equal(win.peakAgentBytes, 200 * MB);
+  assert.equal(win.peakTreeBytes, 500 * MB);
+  assert.equal(win.peakSpawnedBytes, 300 * MB);
+});
+
+test("memoryWindow should return nothing when no sample falls in the interval", () => {
+  // Silence, not the session-wide figure: borrowing it would attribute a later
+  // balloon to an earlier interval, which is the misreading this view prevents.
+  assert.equal(memoryWindow(ghostLane(), ghostLaneMemory(), ms(200), ms(220)), null);
+});
+
+test("memoryWindow should stop at the evidence bound when the interval runs into a synthesized tail", () => {
+  const win = memoryWindow(ghostLane(), ghostLaneMemory(), ms(0), ms(300));
+  assert.equal(win.clipped, true);
+  assert.equal(win.samples.length, 3, "the sample at suspect_since is itself evidence");
+  assert.equal(win.peakAgentBytes, 200 * MB, "the tail's 900 MB spike is not evidence");
+});
+
+test("memoryWindow should return nothing when the whole interval sits past the evidence bound", () => {
+  assert.equal(memoryWindow(ghostLane(), ghostLaneMemory(), ms(120), ms(300)), null);
+});
+
+test("pressureWindow should total the stall and report the tightest headroom in the window", () => {
+  // psi_stall_us is a per-interval delta, so the deltas SUM into the window's
+  // total stall. They are never maxed: raw deltas are only comparable when the
+  // sampling intervals are equal, which a restart or a missed tick breaks.
+  // avail_bytes is a level, so its MINIMUM is how tight the window got.
+  const win = pressureWindow({ pressure: pressureSeries() }, ms(0), ms(60));
+  assert.equal(win.totalStallUs, 1200 + 90000 + 400);
+  assert.equal(win.minAvailBytes, 2 * GB);
+  assert.equal(win.peakPsiAvg10, 12.5);
+  assert.equal(win.samples, 3);
+  assert.equal(win.windowMs, 60 * MIN, "the window it was measured over travels with it");
+});
+
+test("pressureWindow should not let a missed tick masquerade as a stall spike", () => {
+  // The regression the sum exists to prevent. Both windows saw the SAME stall
+  // rate; the second just sampled once over 60s instead of twice over 30s,
+  // which is what a starved or restarted daemon looks like. A peak of raw
+  // deltas would rank the sparse window twice as bad. The sum ranks them equal,
+  // because the deltas tile the window whatever the spacing did.
+  const dense = pressureWindow({
+    pressure: [{ ts: at(0.5), psi_stall_us: 15e6 }, { ts: at(1), psi_stall_us: 15e6 }],
+  }, ms(0), ms(1));
+  const sparse = pressureWindow({
+    pressure: [{ ts: at(1), psi_stall_us: 30e6 }],
+  }, ms(0), ms(1));
+  assert.equal(dense.totalStallUs, sparse.totalStallUs, "same stall, different cadence");
+  assert.equal(dense.stallFraction, sparse.stallFraction);
+});
+
+test("pressureWindow should report the stalled fraction of the window's wall clock", () => {
+  // The intensity figure, comparable across windows of any length: 30s of
+  // stall spread over a 60s window is half that window spent stalled.
+  const win = pressureWindow({
+    pressure: [
+      { ts: at(0), psi_stall_us: 10e6 },
+      { ts: at(0.5), psi_stall_us: 10e6 },
+      { ts: at(1), psi_stall_us: 10e6 },
+    ],
+  }, ms(0), ms(1));
+  assert.equal(win.totalStallUs, 30e6);
+  assert.equal(win.stallFraction, 0.5);
+});
+
+test("pressureWindow should leave the leading-edge overhang uncorrected", () => {
+  // A known, accepted edge: the first sample's delta partially covers time
+  // before startMs, so a short window can total more stall than it has wall
+  // clock. Left uncorrected deliberately — clamping here would hide the tiling
+  // rather than fix it, so a renderer showing a percent caps it at display time.
+  const win = pressureWindow({
+    pressure: [{ ts: at(0), psi_stall_us: 60e6 }, { ts: at(1), psi_stall_us: 60e6 }],
+  }, ms(0), ms(1));
+  assert.equal(win.totalStallUs, 120e6);
+  assert.equal(win.stallFraction, 2, "reported honestly rather than saturated at 1");
+});
+
+test("pressureWindow should keep an absent PSI reading absent rather than reading zero", () => {
+  // A missing series and a genuinely unstalled machine are different claims.
+  // Coercing to 0 here would render "never stalled" over a window nobody measured.
+  const win = pressureWindow({ pressure: [{ ts: at(0), avail_bytes: 8 * GB }] }, ms(0), ms(60));
+  assert.equal(win.totalStallUs, null);
+  assert.equal(win.stallFraction, null);
+  assert.equal(win.peakPsiAvg10, null);
+  assert.equal(win.minAvailBytes, 8 * GB, "the reading that IS present still lands");
+  // a real zero stall is data and must survive as 0, not collapse to absent.
+  const calm = pressureWindow({ pressure: [{ ts: at(0), psi_stall_us: 0 }] }, ms(0), ms(60));
+  assert.equal(calm.totalStallUs, 0);
+  assert.equal(calm.stallFraction, 0);
+});
+
+test("pressureWindow should include only the samples inside the bounds", () => {
+  const mem = { pressure: pressureSeries() };
+  const late = pressureWindow(mem, ms(45), ms(90));
+  assert.equal(late.samples, 1);
+  assert.equal(late.totalStallUs, 400, "the earlier spike is outside this interval");
+  assert.equal(late.minAvailBytes, 5 * GB);
+  // both ends are inclusive, so a zero-width window still lands on its sample —
+  // but it has no wall clock to divide by, so the fraction is absent.
+  const instant = pressureWindow(mem, ms(30), ms(30));
+  assert.equal(instant.samples, 1);
+  assert.equal(instant.totalStallUs, 90000);
+  assert.equal(instant.windowMs, 0);
+  assert.equal(instant.stallFraction, null);
+});
+
+test("pressureWindow should return nothing when the series does not cover the window", () => {
+  // NOTHING, not a calm zero: sampling starts when it starts and old samples
+  // age out, so most of the timeline has no pressure reading behind it.
+  const mem = { pressure: pressureSeries() };
+  assert.equal(pressureWindow(mem, ms(120), ms(180)), null);
+  assert.equal(pressureWindow(mem, ms(-120), ms(-60)), null);
+  assert.equal(pressureWindow({ pressure: [] }, ms(0), ms(60)), null);
+  assert.equal(pressureWindow({}, ms(0), ms(60)), null);
+  assert.equal(pressureWindow(null, ms(0), ms(60)), null);
+  assert.equal(pressureWindow(mem, ms(60), ms(0)), null, "an inverted window matches nothing");
 });
 
 // ---------------------------------------------------------------------------

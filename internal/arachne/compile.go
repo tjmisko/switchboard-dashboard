@@ -130,30 +130,24 @@ func Compile(events []Event, opts CompileOptions) *timeline.Timeline {
 		// way timeline.trustedEndNanos does.
 		var trustedNs int64
 		clip := false
-		if unclosed {
-			evidenceTS := s.lastTS
-			if evidenceTS == "" {
-				evidenceTS = startRFC
-			}
-			if es, ee, ok := timeline.SpanNanos(evidenceTS, endRFC); ok && ee-es >= int64(timeline.DefaultSuspectTrailingCap) {
-				lane.Suspect = true
-				lane.SuspectSince = evidenceTS
-				// Everything up to and including "cap" is a contract with the
-				// daemon's internal/history/suspect.go, which words the same
-				// condition for its own lanes: in a merged day the two sentences sit
-				// in one list, and an operator must not be able to tell which
-				// provider wrote which. Leading with the cap comparison and trailing
-				// with the status is what makes that possible on the daemon's side —
-				// its status clause then has a noun slot to sit in and no "a
-				// unknown-status lane" to disagree with. Arachne appends no such
-				// clause: its lane is one synthesized "working" interval (see
-				// Intervals above), so a status is a constant and carries nothing.
-				lane.SuspectReason = fmt.Sprintf("unclosed lane stretched to now: silent %s >= %s cap",
-					roundSec(time.Duration(ee-es)), roundSec(timeline.DefaultSuspectTrailingCap))
-				trustedNs, clip = es, true
-				out.Summary.SuspectLanes++
-				out.Summary.SuspectDuration += ee - es
-			}
+		if sus, ok := suspectTrailing(s, startRFC, endRFC, unclosed); ok {
+			lane.Suspect = true
+			lane.SuspectSince = sus.evidenceTS
+			// Everything up to and including "cap" is a contract with the
+			// daemon's internal/history/suspect.go, which words the same
+			// condition for its own lanes: in a merged day the two sentences sit
+			// in one list, and an operator must not be able to tell which
+			// provider wrote which. Leading with the cap comparison and trailing
+			// with the status is what makes that possible on the daemon's side —
+			// its status clause then has a noun slot to sit in and no "a
+			// unknown-status lane" to disagree with. Arachne appends no such
+			// clause: its lane is one synthesized "working" interval (see
+			// Intervals above), so a status is a constant and carries nothing.
+			lane.SuspectReason = fmt.Sprintf("unclosed lane stretched to now: silent %s >= %s cap",
+				roundSec(time.Duration(sus.stretchNs)), roundSec(timeline.DefaultSuspectTrailingCap))
+			trustedNs, clip = sus.trustedNs, true
+			out.Summary.SuspectLanes++
+			out.Summary.SuspectDuration += sus.stretchNs
 		}
 		out.Lanes = append(out.Lanes, lane)
 
@@ -245,6 +239,12 @@ type sess struct {
 	// stretches the lane to is inference. See the suspect check in Compile.
 	lastTS string
 	lastNs int64
+
+	// mem holds this run's memory samples, in arrival order. Collected during
+	// aggregate rather than folded separately so a sample lands on the run that
+	// was open when it fired: a slug hosts a sequence of runs, so the slug alone
+	// no longer identifies who a sample belongs to.
+	mem []memPoint
 }
 
 // touch advances the run's last-evidence mark. A timestamp that will not parse
@@ -309,6 +309,26 @@ func aggregate(events []Event) []*sess {
 		if s == nil || s.endTS != "" {
 			continue
 		}
+
+		// Memory samples are collected here, where run ownership is known, so
+		// they land on the run that was open when the sample fired rather than on
+		// the slug — which now hosts a sequence of runs. They are deliberately not
+		// touched into the evidence bound: they fire on a timer, not in response
+		// to anything the agent did, so a container that died without a
+		// session_end would otherwise look alive right up to the bound, masking
+		// exactly the case the suspect check exists to catch.
+		if IsMemoryEvent(e.Type) {
+			if ns, ok := timeline.ParseNanos(e.TS); ok {
+				s.mem = append(s.mem, memPoint{
+					ts:     e.TS,
+					ns:     ns,
+					tree:   e.MemTreeBytes,
+					peak:   e.MemPeakBytes,
+					sample: e.Type == EventMemorySample,
+				})
+			}
+			continue
+		}
 		s.touch(e.TS)
 
 		switch e.Type {
@@ -349,6 +369,36 @@ func runID(slug string, run int) string {
 		return slug
 	}
 	return slug + "#" + strconv.Itoa(run)
+}
+
+// suspect is the outcome of the trailing-interval plausibility check.
+type suspect struct {
+	evidenceTS string // last instant backed by evidence
+	trustedNs  int64  // its parsed form; meaningful only when the check fired
+	stretchNs  int64  // how far past it the session was stretched
+}
+
+// suspectTrailing runs the trailing-interval check for a session nothing ever
+// closed: a lane stretched to the bound whose silence since its last real event
+// is longer than a session plausibly sits quiet. Both halves matter — a session
+// emitting events all along is long, not suspect, however long it runs.
+//
+// Compile and CompileMemory both call it so the timeline and the memory series
+// are clipped at exactly the same instant. A session that has one bound in the
+// envelope and another in its memory record would be worse than either alone.
+func suspectTrailing(s *sess, startRFC, endRFC string, unclosed bool) (suspect, bool) {
+	if !unclosed {
+		return suspect{}, false
+	}
+	evidenceTS := s.lastTS
+	if evidenceTS == "" {
+		evidenceTS = startRFC
+	}
+	es, ee, ok := timeline.SpanNanos(evidenceTS, endRFC)
+	if !ok || ee-es < int64(timeline.DefaultSuspectTrailingCap) {
+		return suspect{}, false
+	}
+	return suspect{evidenceTS: evidenceTS, trustedNs: es, stretchNs: ee - es}, true
 }
 
 // roundSec keeps the suspect reason strings readable (and identical in shape to

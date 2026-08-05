@@ -48,6 +48,7 @@ func NewClient() *Client { return &Client{Runner: ExecRunner{}} }
 // Container is the metadata an adapter extracts per session container.
 type Container struct {
 	Name      string
+	ID        string // .Id — the full 64-char id; the cgroup scope dirname derives from it
 	Slug      string // session identity: name minus the "arachne-agent-" prefix
 	Status    string // .State.Status (running/exited/…)
 	StartedAt string // .State.StartedAt (RFC3339) — accurate session start
@@ -57,6 +58,11 @@ type Container struct {
 	Brief     string // ARACHNE_BRIEF
 	Workspace string // WORKSPACE_PATH (worktree)
 	RepoRoot  string // REPO_ROOT
+
+	// Host-side cgroup/limit facts, from .HostConfig.
+	CgroupParent string // relocates the container's cgroup when non-empty
+	MemoryLimit  int64  // --memory, bytes (0 = unlimited)
+	MemorySwap   int64  // --memory-swap, bytes (0 = unset, -1 = unlimited)
 }
 
 // LogPath is the container's stream-json log inside its worktree.
@@ -111,6 +117,7 @@ func (c *Client) ListRunning(ctx context.Context) ([]Running, error) {
 }
 
 type inspectResult struct {
+	ID    string `json:"Id"`
 	Name  string `json:"Name"`
 	State struct {
 		Status    string `json:"Status"`
@@ -119,6 +126,11 @@ type inspectResult struct {
 	Config struct {
 		Env []string `json:"Env"`
 	} `json:"Config"`
+	HostConfig struct {
+		CgroupParent string `json:"CgroupParent"`
+		Memory       int64  `json:"Memory"`
+		MemorySwap   int64  `json:"MemorySwap"`
+	} `json:"HostConfig"`
 }
 
 // Inspect returns the metadata for one container.
@@ -137,16 +149,20 @@ func (c *Client) Inspect(ctx context.Context, name string) (Container, error) {
 	r := arr[0]
 	env := parseEnv(r.Config.Env)
 	return Container{
-		Name:      name,
-		Slug:      SlugOf(name),
-		Status:    r.State.Status,
-		StartedAt: r.State.StartedAt,
-		Agent:     env["AGENT_MODEL"],
-		TaskID:    env["ARACHNE_TASK_ID"],
-		Phase:     env["ARACHNE_PHASE"],
-		Brief:     env["ARACHNE_BRIEF"],
-		Workspace: env["WORKSPACE_PATH"],
-		RepoRoot:  env["REPO_ROOT"],
+		Name:         name,
+		ID:           r.ID,
+		Slug:         SlugOf(name),
+		Status:       r.State.Status,
+		StartedAt:    r.State.StartedAt,
+		Agent:        env["AGENT_MODEL"],
+		TaskID:       env["ARACHNE_TASK_ID"],
+		Phase:        env["ARACHNE_PHASE"],
+		Brief:        env["ARACHNE_BRIEF"],
+		Workspace:    env["WORKSPACE_PATH"],
+		RepoRoot:     env["REPO_ROOT"],
+		CgroupParent: r.HostConfig.CgroupParent,
+		MemoryLimit:  r.HostConfig.Memory,
+		MemorySwap:   r.HostConfig.MemorySwap,
 	}, nil
 }
 

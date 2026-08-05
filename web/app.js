@@ -21,6 +21,10 @@ const SVGNS = "http://www.w3.org/2000/svg";
 const POLL_MS = 3000;       // /api/timeline poll cadence
 const PLAN_POLL_MS = 15000; // /api/plan poll cadence (changes slowly)
 const SUMMARIES_POLL_MS = 120000; // /api/summaries cadence (grows on session end)
+// Memory refreshes faster than summaries (it moves continuously) but far slower
+// than the timeline: nothing repaints on it, so the only cost of a refresh is the
+// fetch, and the only benefit is how stale a tooltip can be when you open it.
+const MEMORY_POLL_MS = 30000;
 
 // Operator lane colors: green marks "free" time (≥1 agent running while you were
 // neither attending an agent window nor recovering from a context switch —
@@ -290,6 +294,7 @@ let lastTimelineText = ""; // raw timeline JSON (repaint-on-change guard)
 let lastPlan = null;       // parsed /api/plan
 let lastPlanText = "";
 let lastSummaries = {};    // /api/summaries session_id → {name, description, tasks, summary}
+let lastMemory = null;     // /api/memory {sessions, pressure} — read lazily at hover, never repainted
 let lastUpdatedAt = null;  // ms of last successful timeline fetch
 let fetchOK = false;
 let timelineTimer = null;
@@ -414,6 +419,23 @@ async function loadSummaries() {
 function sessionSummary(lane) {
   const id = rawSessionId(lane);
   return id ? lastSummaries[id] || null : null;
+}
+
+// loadMemory fetches per-session memory and machine-wide pressure. It rides its
+// own endpoint for the same reason summaries do, and the reason is worth stating
+// because it is what keeps this feature free: a live sample series changes the
+// response bytes on every poll, so carrying it on /api/timeline would defeat the
+// unchanged->no-repaint check and force a full re-render every few seconds. Here
+// the payload is only ever read inside a tooltip closure at hover time, so a
+// refresh costs nothing at all — no repaint, no reflow, no work until someone
+// actually looks. Best-effort throughout: a failed fetch leaves hovers
+// unenriched rather than breaking them.
+async function loadMemory() {
+  try {
+    const res = await fetch("/api/memory", { cache: "no-store" });
+    if (!res.ok) return;
+    lastMemory = await res.json();
+  } catch (_) { /* keep last known */ }
 }
 
 function showError(msg) { el.error.textContent = msg; el.error.hidden = false; }
@@ -1998,6 +2020,43 @@ function opSegTipHTML(kind, s, e) {
         : `You were attending an agent window, or within ${humanDurationMs(OP.switchRecoveryMs)} of a context switch, while agents ran.`}</div>`;
 }
 
+// memoryRowsHTML renders a memory readout as tooltip rows. Peak leads because
+// it is the figure that decides whether a machine survives; the average follows
+// as the dim qualifier. The spawned split only appears when the provider
+// actually reports one — a container total has no inner boundary, so an Arachne
+// lane shows a single tree figure rather than a fabricated 0 for subagents.
+// Returns "" for no data, so a lane without sampling renders exactly as before.
+function memoryRowsHTML(mem) {
+  if (!mem) return "";
+  const tree = mem.peakTreeBytes != null ? mem.peakTreeBytes : mem.peakAgentBytes;
+  if (tree == null) return "";
+  let html = `<div class="t-row">memory <b>${fmtBytes(tree)}</b> peak`
+    + (mem.avgTreeBytes != null ? ` <span class="dim">${fmtBytes(mem.avgTreeBytes)} avg</span>` : "")
+    + `</div>`;
+  if (mem.peakSpawnedBytes != null && mem.peakAgentBytes != null) {
+    html += `<div class="t-row"><span class="dim">agent</span> ${fmtBytes(mem.peakAgentBytes)}`
+      + ` · <span class="dim">spawned</span> ${fmtBytes(mem.peakSpawnedBytes)}</div>`;
+  }
+  return html;
+}
+
+// pressureRowHTML reports what the MACHINE was doing, not this session — the
+// question a fat interval actually raises. Shown only when there was measurable
+// stall: a healthy stretch says nothing rather than printing a reassuring zero,
+// and an absent reading (no PSI on this kernel) says nothing either, because
+// "not measured" must never render as "fine".
+function pressureRowHTML(p) {
+  if (!p || p.totalStallUs == null || p.totalStallUs <= 0) return "";
+  // stallFraction is uncorrected at the leading edge (the window's first delta
+  // reaches back before it started), so it can exceed 1 on a short interval.
+  // The model reports that honestly; capping belongs here, at display time.
+  const pct = p.stallFraction != null
+    ? ` <span class="dim">${(Math.min(1, p.stallFraction) * 100).toFixed(1)}% of the interval</span>`
+    : "";
+  const head = p.minAvailBytes != null ? ` <span class="dim">· ${fmtBytes(p.minAvailBytes)} free at worst</span>` : "";
+  return `<div class="t-row">machine stalled <b>${humanDurationMs(p.totalStallUs / 1000)}</b>${pct}${head}</div>`;
+}
+
 function intervalTipHTML(lane, iv) {
   const startMs = Date.parse(iv.start), endMs = Date.parse(iv.end);
   const durMs = endMs - startMs;
@@ -2007,7 +2066,9 @@ function intervalTipHTML(lane, iv) {
   return tipHead(`${statusLabel(iv.status)}${note}`, statusColor(iv.status),
       `${fmtClock(iv.start)} – ${fmtClock(iv.end)}`, durMs,
       intervalTaskHTML(lane, startMs, endMs))
-    + (sub > 0 ? `<div class="t-sub">${sub} subagent${sub === 1 ? "" : "s"} at start</div>` : "");
+    + (sub > 0 ? `<div class="t-sub">${sub} subagent${sub === 1 ? "" : "s"} at start</div>` : "")
+    + memoryRowsHTML(memoryWindow(lane, lastMemory, startMs, endMs))
+    + pressureRowHTML(pressureWindow(lastMemory, startMs, endMs));
 }
 
 function subagentTipHTML(sa) {
@@ -2083,6 +2144,7 @@ function nameSegTipHTML(lane, seg) {
       `${fmtClock(seg.start)} – ${fmtClock(seg.end)}`, durMs)
     + (sum ? `<div class="t-desc">${escapeHTML(sum.description)}</div>` : "")
     + (ineff != null ? `<div class="t-row">operator inefficiency ${Math.round(ineff * 100)}% <span class="dim">idle/waiting</span></div>` : "")
+    + memoryRowsHTML(laneMemory(lane, lastMemory))
     + `<div class="t-id">${escapeHTML(idBits.join(" · "))}</div>`
     + (lane.session_id ? `<div class="t-id">${escapeHTML(lane.session_id)}</div>` : "")
     + (hint ? `<div class="t-hint">${escapeHTML(hint)}</div>` : "");
@@ -2590,9 +2652,11 @@ function init() {
   loadSettings().then(loadTimeline);
   loadPlan();
   loadSummaries();
+  loadMemory();
   timelineTimer = setInterval(loadTimeline, POLL_MS);
   planTimer = setInterval(loadPlan, PLAN_POLL_MS);
   setInterval(loadSummaries, SUMMARIES_POLL_MS);
+  setInterval(loadMemory, MEMORY_POLL_MS);
   setInterval(tickLive, 1000);
 }
 

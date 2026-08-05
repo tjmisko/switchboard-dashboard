@@ -481,6 +481,343 @@
   }
 
   // -------------------------------------------------------------------------
+  // memory (/api/memory — its own surface, deliberately NOT the timeline
+  // envelope; see README "Memory"). Shape:
+  //
+  //   {sessions: {"<session_id>": {peak_agent_bytes, avg_agent_bytes,
+  //                                peak_tree_bytes, avg_tree_bytes,
+  //                                mem: [{ts, agent, tree}]}},
+  //    pressure: [{ts, avail_bytes, psi_avg10, psi_stall_us}]}
+  //
+  // Bytes are Pss + SwapPss; averages are TIME-WEIGHTED by the producer. The
+  // agent/tree split is what matters: subagents have no PIDs, so `tree − agent`
+  // is the only figure that captures what spawned work cost. Container
+  // providers (arachne) report the tree only — no agent split, because a
+  // container total has no meaningful inner boundary — so the agent-side
+  // figures are ABSENT there rather than zero, and every accessor below keeps
+  // absent distinguishable from zero all the way to the caller.
+  // -------------------------------------------------------------------------
+
+  // finiteOrNull normalizes a maybe-missing numeric field. Absent, null, and
+  // non-numeric all collapse to null, which reads as "no data" downstream;
+  // a real 0 survives as 0.
+  function finiteOrNull(v) {
+    return Number.isFinite(v) ? v : null;
+  }
+
+  // fmtBytes renders a memory figure at the scale an operator reads memory in.
+  // Terse like fmtUSD: null/absent is "—" (no data), a real zero is "0 MB", and
+  // anything under a megabyte is "<1 MB" rather than a run of decimal noise.
+  // Units are binary (MiB/GiB) with the customary MB/GB labels, matching what
+  // `free -h` and htop show for the same process on the same machine.
+  const BYTES_MB = 1024 * 1024;
+  const BYTES_GB = 1024 * BYTES_MB;
+  function fmtBytes(bytes) {
+    if (!Number.isFinite(bytes)) return "—";
+    if (bytes <= 0) return "0 MB";
+    if (bytes >= BYTES_GB) return (bytes / BYTES_GB).toFixed(1).replace(/\.0$/, "") + " GB";
+    if (bytes >= BYTES_MB) return Math.round(bytes / BYTES_MB) + " MB";
+    return "<1 MB";
+  }
+
+  // spawnedBytes is what the spawned work cost: the process tree minus the agent
+  // process itself. FLOORED AT 0 — agent and tree are read a moment apart, so a
+  // shrinking tree can sample below its own agent and a raw subtraction would
+  // render a negative "spawned" figure that is pure sampling skew. Null when
+  // either side is missing, so a tree-only (container) provider reads as "no
+  // split available" rather than falsely attributing the whole tree to subagents.
+  function spawnedBytes(treeBytes, agentBytes) {
+    if (!Number.isFinite(treeBytes) || !Number.isFinite(agentBytes)) return null;
+    return Math.max(0, treeBytes - agentBytes);
+  }
+
+  // memoryRecords joins a lane to its /api/memory entries. The merged endpoint
+  // namespaces session keys by provider exactly as lane.session_id is, so the
+  // lane's own id is the primary key; rawSessionId is tried for a single-provider
+  // payload that was never namespaced, and laneIdentity's "pid:<n>" for the
+  // stretch a session spends unidentified — it emits samples from the moment its
+  // process is discovered but receives its id only at its first agent hook, and a
+  // lane that has not been identified either is keyed the same way.
+  //
+  // ALL matching records, not the first — one session can hold two of them at
+  // once. The id arrives at an agent hook and does not survive a daemon restart,
+  // so a session running across one emits samples under its real id, then under
+  // "pid:<n>" until its next hook, then under its id again. Taking the first
+  // match reported whichever stretch happened to be looked up first: measured on
+  // a live machine after a restart, an idle session had 1 sample under its id and
+  // 18 under its pid, and the hover showed the 1.
+  //
+  // A claim is one record plus the samples of it this lane is entitled to. The
+  // id-keyed record names this session and nothing else, so the lane takes it
+  // whole. The pid bucket is claimed by inference and is bounded to the lane's
+  // own span: a pid outlives the session wearing it, so over a long enough window
+  // one bucket can hold the unidentified stretches of two sessions that ran on
+  // that pid in turn, and only the overlap is this lane's.
+  function memoryRecords(lane, memory) {
+    const sessions = memory && memory.sessions;
+    if (!lane || !sessions) return [];
+    // The pid key is built here rather than taken from laneIdentity, which yields
+    // the session id whenever there is one — the very case that has to reach for
+    // the pid bucket as well.
+    const byPid = lane.pid != null ? "pid:" + lane.pid : null;
+    const out = [];
+    const seen = new Set();
+    for (const key of [lane.session_id, rawSessionId(lane), byPid]) {
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      const record = sessions[key];
+      if (!record) continue;
+      // A record reached by two keys is one claim, not two: an unidentified
+      // lane's identity IS its pid key.
+      if (out.some((c) => c.record === record)) continue;
+      const inferred = key === byPid && key !== lane.session_id;
+      out.push({ record, samples: claimedSamples(record, lane, inferred), inferred });
+    }
+    return out;
+  }
+
+  // claimedSamples is a record's series as this lane may read it — whole for a
+  // record it owns by id, bounded to the lane's span for one it claims by pid.
+  // An unusable lane bound fails open rather than dropping the series.
+  function claimedSamples(record, lane, inferred) {
+    const samples = memSamples(record);
+    if (!inferred) return samples;
+    const from = Date.parse(lane && lane.start);
+    const to = Date.parse(lane && lane.end);
+    if (!Number.isFinite(from) || !Number.isFinite(to)) return samples;
+    return samples.filter((s) => s.ts >= from && s.ts <= to);
+  }
+
+  // mergedSamples is the union of the claims' series in time order.
+  function mergedSamples(claims) {
+    if (claims.length <= 1) return claims.length ? claims[0].samples : [];
+    const all = [];
+    for (const claim of claims) all.push(...claim.samples);
+    return all.sort((a, b) => a.ts - b.ts);
+  }
+
+  // claimStat combines one figure across the claims describing a single session.
+  // Peaks take the maximum, which is exact. Averages are re-weighted by each
+  // claim's span, which is what time-weighted averages compose to. A claim taken
+  // whole reports the producer's scalars, keeping the pre-thinning accuracy that
+  // reading them off a bounded series would lose; a claim the span actually cut
+  // has to be re-derived from what survived, since the producer's figures then
+  // describe more than this lane may count. Where nothing spans any time, a plain
+  // mean is the only thing left to say.
+  function claimStat(claims, peakKey, avgKey) {
+    let peak = null;
+    let weighted = 0, span = 0;
+    const flat = [];
+    for (const claim of claims) {
+      const stat = claimFigures(claim, peakKey, avgKey);
+      if (stat.peak != null && (peak == null || stat.peak > peak)) peak = stat.peak;
+      if (stat.avg == null) continue;
+      flat.push(stat.avg);
+      if (stat.span > 0) {
+        weighted += stat.avg * stat.span;
+        span += stat.span;
+      }
+    }
+    let avg = null;
+    if (span > 0) avg = Math.round(weighted / span);
+    else if (flat.length) avg = Math.round(flat.reduce((x, y) => x + y, 0) / flat.length);
+    return { peak, avg };
+  }
+
+  // claimFigures is one claim's {peak, avg, span}: the producer's scalars when
+  // the claim is whole, re-derived over the surviving samples when it was cut.
+  function claimFigures(claim, peakKey, avgKey) {
+    const { record, samples } = claim;
+    const span = samples.length > 1 ? samples[samples.length - 1].ts - samples[0].ts : 0;
+    const cut = samples.length !== memSamples(record).length;
+    if (cut) {
+      const key = avgKey.startsWith("avg_agent") ? "agent" : "tree";
+      const stat = seriesStats(samples, key) || { peak: null, avg: null };
+      return { peak: stat.peak, avg: stat.avg, span };
+    }
+    return { peak: finiteOrNull(record[peakKey]), avg: finiteOrNull(record[avgKey]), span };
+  }
+
+  // memSamples parses a record's mem[] series into sorted epoch-ms samples,
+  // dropping any whose timestamp is unusable. Missing agent/tree values survive
+  // as null (a container sample has no agent side) rather than as 0.
+  function memSamples(record) {
+    const raw = record && record.mem;
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .map((s) => ({
+        ts: Date.parse(s && s.ts),
+        agent: finiteOrNull(s && s.agent),
+        tree: finiteOrNull(s && s.tree),
+      }))
+      .filter((s) => Number.isFinite(s.ts))
+      .sort((a, b) => a.ts - b.ts);
+  }
+
+  // seriesStats re-derives {peak, avg} for one key over an already-clipped
+  // sample series, or null when no sample carries that key. The average is
+  // TIME-WEIGHTED to match how the producer computes its avg_* scalars: each
+  // sample is weighted by the gap to the next one, and the last sample inherits
+  // the preceding gap so a single-sample series still averages to its own value.
+  function seriesStats(samples, key) {
+    let peak = null, weighted = 0, weight = 0, sum = 0, count = 0;
+    for (let i = 0; i < samples.length; i++) {
+      const v = samples[i][key];
+      if (v == null) continue;
+      if (peak == null || v > peak) peak = v;
+      sum += v; count++;
+      const gap = i + 1 < samples.length ? samples[i + 1].ts - samples[i].ts
+        : i > 0 ? samples[i].ts - samples[i - 1].ts : 0;
+      if (gap > 0) { weighted += v * gap; weight += gap; }
+    }
+    if (!count) return null;
+    return { peak, avg: weight > 0 ? weighted / weight : sum / count };
+  }
+
+  // laneMemory is the per-session memory readout for a lane, or NULL when that
+  // session has no memory data at all. Null is the whole point: it lets the UI
+  // say "not measured" (a provider without memory support, a non-Linux host, a
+  // session that predates sampling) instead of drawing a confident 0 MB.
+  //
+  //   {peakAgentBytes, avgAgentBytes, peakTreeBytes, avgTreeBytes,
+  //    peakSpawnedBytes, avgSpawnedBytes, samples, clipped}
+  //
+  // The producer's scalars are used as-is — they are the authority, and their
+  // averages are time-weighted over the real sample cadence. The ONE exception
+  // is the laneActiveMs precedent: a SUSPECT lane's tail is synthesized, so any
+  // figure re-derived client-side has to stop at suspect_since or it disagrees
+  // with the producer. When such a lane ships its mem[] series we recompute
+  // peak/avg over the trusted prefix and flag `clipped`; with no series to clip
+  // we fail open and keep the scalars, exactly as suspectSinceMs fails open on
+  // an unusable timestamp. A lane whose every sample lands in the synthesized
+  // tail has nothing evidenced left and returns null.
+  function laneMemory(lane, memory) {
+    const records = memoryRecords(lane, memory);
+    if (!records.length) return null;
+
+    let agent = claimStat(records, "peak_agent_bytes", "avg_agent_bytes");
+    let tree = claimStat(records, "peak_tree_bytes", "avg_tree_bytes");
+    let samples = mergedSamples(records);
+
+    const cut = suspectSinceMs(lane);
+    const clipped = cut != null && samples.length > 0;
+    if (clipped) {
+      samples = samples.filter((s) => s.ts <= cut); // the bound is itself evidence
+      agent = seriesStats(samples, "agent") || { peak: null, avg: null };
+      tree = seriesStats(samples, "tree") || { peak: null, avg: null };
+    }
+    if (agent.peak == null && agent.avg == null && tree.peak == null && tree.avg == null) return null;
+
+    return {
+      peakAgentBytes: agent.peak,
+      avgAgentBytes: agent.avg,
+      peakTreeBytes: tree.peak,
+      avgTreeBytes: tree.avg,
+      peakSpawnedBytes: spawnedBytes(tree.peak, agent.peak),
+      avgSpawnedBytes: spawnedBytes(tree.avg, agent.avg),
+      samples,
+      clipped,
+    };
+  }
+
+  // memoryWindow is laneMemory narrowed to [startMs, endMs] — what a lane's
+  // memory did during ONE interval, for the interval tooltip. Same result shape
+  // minus the scalars' provenance: everything here is re-derived from the
+  // samples, because the producer's scalars describe the whole session and
+  // there is nothing per-interval to fall back on.
+  //
+  // NULL when the session has no series covering the window. That is the common
+  // case for a short interval and it must stay silent rather than borrowing the
+  // session-wide figure, which would quietly attribute a later balloon to an
+  // earlier interval — precisely the misreading this view exists to prevent.
+  //
+  // The window is clipped to the lane's trusted span for the same reason
+  // laneMemory clips: samples inside a synthesized tail are not evidence.
+  function memoryWindow(lane, memory, startMs, endMs) {
+    const records = memoryRecords(lane, memory);
+    if (!records.length || !(endMs >= startMs)) return null;
+    const cut = suspectSinceMs(lane);
+    const bound = cut != null && cut < endMs ? cut : endMs;
+    if (!(bound >= startMs)) return null;
+
+    const samples = mergedSamples(records).filter((s) => s.ts >= startMs && s.ts <= bound);
+    if (!samples.length) return null;
+    const agent = seriesStats(samples, "agent") || { peak: null, avg: null };
+    const tree = seriesStats(samples, "tree") || { peak: null, avg: null };
+    if (agent.peak == null && tree.peak == null) return null;
+
+    return {
+      peakAgentBytes: agent.peak,
+      avgAgentBytes: agent.avg,
+      peakTreeBytes: tree.peak,
+      avgTreeBytes: tree.avg,
+      peakSpawnedBytes: spawnedBytes(tree.peak, agent.peak),
+      avgSpawnedBytes: spawnedBytes(tree.avg, agent.avg),
+      samples,
+      clipped: bound !== endMs,
+    };
+  }
+
+  // pressureWindow summarizes machine-wide memory pressure over [startMs,
+  // endMs] (inclusive both ends) for an interval tooltip:
+  //
+  //   {totalStallUs, stallFraction, minAvailBytes, peakPsiAvg10, samples, windowMs}
+  //
+  // psi_stall_us is a DELTA over ONE SAMPLE'S INTERVAL — microseconds the
+  // machine spent stalled since the previous sample. The deltas TILE the
+  // window, so the fold is a SUM, never a peak. A peak of raw deltas is only
+  // comparable while every interval is the same length: a 30-second gap's delta
+  // dwarfs a 5-second tick's because it covers six times the wall clock, not
+  // because the machine was worse. And cadence goes irregular exactly when the
+  // daemon is starved, restarted, or the box is thrashing — the OOM
+  // neighbourhood this surface exists to explain — so a peak would spike on a
+  // MISSED TICK and read as "the machine stalled hard here" when the truth is
+  // "we stopped looking here". That is the one lie this surface must not tell.
+  //
+  // stallFraction (totalStallUs over the window's wall clock) is the share of
+  // the window spent stalled, comparable across windows of any length, and the
+  // figure to lead with. avail_bytes is a level rather than a delta, hence its
+  // MINIMUM: the tightest the headroom got. peakPsiAvg10 is likewise a level —
+  // the decaying average at its worst — kept as the human-readable glance.
+  //
+  // Known, accepted edge: the delta on the window's FIRST sample partially
+  // covers time before startMs, so a short window can over-attribute slightly
+  // (and stallFraction can exceed 1). Deliberately not corrected for — clamping
+  // would hide the tiling rather than fix it, and a renderer showing a percent
+  // can cap it at display time.
+  //
+  // NULL when no sample falls in the window: the series does not cover every
+  // interval the timeline can show (it starts when sampling started, and older
+  // samples age out). Absent stays absent inside the result too — a window whose
+  // samples carry no PSI reports totalStallUs null, never 0, because "not
+  // measured" and "never stalled" are different claims and the tooltip trades on
+  // the difference. Pressure is machine-wide and never clipped per lane: it
+  // belongs to the host, not to any one session.
+  function pressureWindow(memory, startMs, endMs) {
+    const rows = memory && memory.pressure;
+    if (!Array.isArray(rows) || !(endMs >= startMs)) return null;
+    let totalStallUs = null, minAvailBytes = null, peakPsiAvg10 = null, samples = 0;
+    for (const row of rows) {
+      const ts = Date.parse(row && row.ts);
+      if (!Number.isFinite(ts) || ts < startMs || ts > endMs) continue;
+      samples++;
+      const stall = finiteOrNull(row.psi_stall_us);
+      if (stall != null) totalStallUs = (totalStallUs == null ? 0 : totalStallUs) + stall;
+      const avail = finiteOrNull(row.avail_bytes);
+      if (avail != null && (minAvailBytes == null || avail < minAvailBytes)) minAvailBytes = avail;
+      const psi = finiteOrNull(row.psi_avg10);
+      if (psi != null && (peakPsiAvg10 == null || psi > peakPsiAvg10)) peakPsiAvg10 = psi;
+    }
+    if (!samples) return null;
+
+    const windowMs = endMs - startMs;
+    const stallFraction = totalStallUs != null && windowMs > 0
+      ? totalStallUs / (windowMs * 1000)
+      : null;
+    return { totalStallUs, stallFraction, minAvailBytes, peakPsiAvg10, samples, windowMs };
+  }
+
+  // -------------------------------------------------------------------------
   // session summary rendering (session-digest records from /api/summaries)
   //
   // A record is {name, description, tasks?, summary}: tasks carries the
@@ -606,6 +943,7 @@
     spanInefficiency, switchArrivals, packLanes, aloftSpans, workIntervalsMs, concurrencyProfile,
     alignLiveTail,
     projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs, suspectTailMs,
+    fmtBytes, spawnedBytes, laneMemory, memoryWindow, pressureWindow,
     summaryTasks, summaryBodyHTML, summaryHintText, summaryCardHasContent, normalizeView,
   };
 });

@@ -19,16 +19,18 @@ type Config struct {
 //	  "providers": [
 //	    {"id":"claude","label":"Claude",
 //	     "exec":["switchboard-ctl","timeline","--json","--plan-window"],
-//	     "capabilities":{"plan":true}},
+//	     "capabilities":{"plan":true,"memory":true}},
 //	    {"id":"arachne","label":"Arachne",
 //	     "exec":["arachne-ctl","timeline","--json"],
 //	     "dir":"/home/you/.arachne-switchboard/history",
-//	     "capabilities":{"plan":false}}
+//	     "capabilities":{"plan":false,"memory":true}}
 //	  ]
 //	}
 //
 // exec is the full base command that prints a timeline envelope on stdout; the
 // dashboard appends --dir/--day/--since/--until. dir is the default --dir value.
+// capabilities is declarative only (see Capabilities); the dashboard discovers
+// what a provider can actually do by calling it.
 type ProviderConfig struct {
 	ID           string       `json:"id"`
 	Label        string       `json:"label"`
