@@ -768,16 +768,76 @@ function setView(view) {
   if (entering && view === "projects") startProjectsEnter();
 }
 
+// activeViewButton is the segment standing for the view on screen — the glider's
+// target, and where focus follows to when the keyboard drives the switcher.
+function activeViewButton() {
+  return currentView === "line" ? el.viewLine
+    : currentView === "projects" ? el.viewProjects
+    : el.viewSessions;
+}
+
 // positionViewGlider slides the view switcher's green thumb under the active
 // segment. The segments differ in width, so geometry is measured, not styled;
 // clientLeft corrects for the container border (offsetLeft spans it, the
 // absolutely-positioned glider doesn't).
 function positionViewGlider() {
-  const btn = currentView === "line" ? el.viewLine
-    : currentView === "projects" ? el.viewProjects
-    : el.viewSessions;
+  const btn = activeViewButton();
   el.viewGlider.style.width = btn.offsetWidth + "px";
   el.viewGlider.style.transform = "translateX(" + (btn.offsetLeft - el.viewseg.clientLeft) + "px)";
+}
+
+// isTypingTarget reports whether a keystroke belongs to a field the user is
+// editing. The BARE keys below are claimed page-wide, but claiming them inside
+// a text field or the date input would eat the user's typing (c) or trap focus
+// with no way out (Tab), so a field in hand keeps the browser's behavior. Ctrl
+// chords are exempt — see handleShortcutKey.
+function isTypingTarget(node) {
+  if (!node || node.nodeType !== 1) return false;
+  if (node.isContentEditable) return true;
+  const tag = node.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+}
+
+// handleShortcutKey is the page's whole keymap:
+//
+//   Tab / Shift+Tab   cycle the plot forward / back through the three views
+//   Ctrl+L / Ctrl+R   step the window one day left / right
+//   c                 open the date picker with the field in hand
+//
+// Each overrides a browser default the dashboard has a better use for. Tab's
+// focus walk goes because the three views ARE this page's windows; Ctrl+L and
+// Ctrl+R go because stepping the day is what this page is for, and the browser's
+// omnibox and reload are a keystroke away by other means. Alt and Meta chords
+// are left alone wholesale — those are the window manager's and the OS's.
+//
+// The Ctrl chords fire even from inside a field: they are never text input, and
+// c hands focus TO the date input, so guarding them would strand the day arrows
+// the moment the calendar was opened. Bare keys yield to the field instead.
+function handleShortcutKey(ev) {
+  if (ev.defaultPrevented || ev.altKey || ev.metaKey) return;
+  const key = ev.key.length === 1 ? ev.key.toLowerCase() : ev.key;
+
+  if (ev.ctrlKey) {
+    if (ev.shiftKey) return;
+    if (key === "l") { ev.preventDefault(); stepDay(-1); return; }
+    if (key === "r") { ev.preventDefault(); stepDay(+1); return; }
+    return;
+  }
+
+  if (isTypingTarget(ev.target)) return;
+
+  // Focus follows the view only when it was already inside the switcher —
+  // moving it there from anywhere else would yank the ring across the page on
+  // every press.
+  if (key === "Tab") {
+    ev.preventDefault();
+    const focusFollows = el.viewseg.contains(document.activeElement);
+    setView(stepView(currentView, ev.shiftKey ? -1 : +1));
+    if (focusFollows) activeViewButton().focus();
+    return;
+  }
+
+  if (key === "c" && !ev.shiftKey) { ev.preventDefault(); openDayPicker(); }
 }
 
 // renderTopline: three dominant figures framing AI's payoff, gross → net → rate.
@@ -2674,6 +2734,25 @@ function shiftDay(base, delta) {
 
 function reloadNow() { hidePopout(); loadTimeline(); }
 
+// stepDay walks the window a day in either direction: move the picker, relabel,
+// refetch. Shared by the topbar arrows and their keyboard equivalents (Ctrl+L /
+// Ctrl+R) so neither path can drift from the other.
+function stepDay(delta) {
+  el.day.value = shiftDay(el.day.value, delta);
+  syncDayDisplay();
+  reloadNow();
+}
+
+// openDayPicker puts the date field in hand: focus first, so the field is the
+// keyboard's whether or not the calendar itself opens, then raise the native
+// picker. showPicker throws where it is unsupported or judged not
+// user-activated, and the focus alone is still worth having, so the throw is
+// swallowed rather than left to kill the handler.
+function openDayPicker() {
+  el.day.focus();
+  try { el.day.showPicker(); } catch (_) {}
+}
+
 function applyUrlParams() {
   const q = new URLSearchParams(window.location.search);
   el.day.value = q.get("day") || todayLocal();
@@ -2746,8 +2825,8 @@ function init() {
   themeMql.addEventListener("change", () => { if (!storedTheme()) applyTheme(); });
 
   el.day.addEventListener("change", () => { syncDayDisplay(); reloadNow(); });
-  el.prevDay.addEventListener("click", () => { el.day.value = shiftDay(el.day.value, -1); syncDayDisplay(); reloadNow(); });
-  el.nextDay.addEventListener("click", () => { el.day.value = shiftDay(el.day.value, +1); syncDayDisplay(); reloadNow(); });
+  el.prevDay.addEventListener("click", () => stepDay(-1));
+  el.nextDay.addEventListener("click", () => stepDay(+1));
   // open the native calendar on click (the transparent picker overlays the field)
   el.dateField.addEventListener("click", () => { try { el.day.showPicker(); } catch (_) {} });
   el.optCtxSwitches.addEventListener("change", () => { if (lastData) renderTimeline(lastData); });
@@ -2762,6 +2841,8 @@ function init() {
   el.viewSessions.addEventListener("click", () => setView("sessions"));
   el.viewLine.addEventListener("click", () => setView("line"));
   el.viewProjects.addEventListener("click", () => setView("projects"));
+  // …and the same walk from the keyboard, alongside the day and calendar keys.
+  document.addEventListener("keydown", handleShortcutKey);
   el.section.classList.toggle("view-line", currentView === "line");
   el.section.classList.toggle("view-projects", currentView === "projects");
   el.viewSessions.setAttribute("aria-pressed", String(currentView === "sessions"));

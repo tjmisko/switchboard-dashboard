@@ -11,7 +11,7 @@ const {
   laneIdentity, rawSessionId, leadLabel, nameSegments, buildBars, spanInefficiency, switchArrivals, packLanes,
   aloftSpans, workIntervalsMs, concurrencyProfile, alignLiveTail,
   projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs,
-  suspectTailMs, normalizeView, scaleGeometry,
+  suspectTailMs, normalizeView, VIEW_ORDER, stepView, scaleGeometry,
   fmtBytes, spawnedBytes, laneMemory, memoryWindow, pressureWindow,
   summaryTasks, summaryBodyHTML, summaryHintText, summaryCardHasContent,
 } = require("./model.js");
@@ -1013,6 +1013,53 @@ test("normalizeView should return null when the view is unknown or missing", () 
   assert.equal(normalizeView(undefined), null);
   assert.equal(normalizeView(""), null);
   assert.equal(normalizeView("foo"), null);
+});
+
+// ---------------------------------------------------------------------------
+// stepView — the Tab / Shift+Tab walk across the view switcher
+// ---------------------------------------------------------------------------
+
+test("stepView should advance through the views in switcher order when stepping forward", () => {
+  assert.equal(stepView("sessions", +1), "line");
+  assert.equal(stepView("line", +1), "projects");
+});
+
+test("stepView should walk back through the views in switcher order when stepping backward", () => {
+  assert.equal(stepView("projects", -1), "line");
+  assert.equal(stepView("line", -1), "sessions");
+});
+
+test("stepView should wrap at both ends so no keypress is a dead end", () => {
+  // Tab off the last view returns to the first, and Shift+Tab off the first
+  // reaches the last — the cycle is a ring, not a track with buffers.
+  assert.equal(stepView("projects", +1), "sessions");
+  assert.equal(stepView("sessions", -1), "projects");
+});
+
+test("stepView should fall back to the default view when the current view is unknown", () => {
+  // A corrupted sb-view (or a view name from a future release) must still move,
+  // and must move as if it were sessions.
+  assert.equal(stepView("foo", +1), "line");
+  assert.equal(stepView(null, +1), "line");
+  assert.equal(stepView(undefined, -1), "projects");
+});
+
+test("stepView should accept the legacy 'bars' spelling as the sessions view", () => {
+  assert.equal(stepView("bars", +1), "line");
+  assert.equal(stepView("bars", -1), "projects");
+});
+
+test("stepView should return to the starting view after a full cycle in either direction", () => {
+  for (const view of VIEW_ORDER) {
+    let forward = view;
+    let backward = view;
+    for (let i = 0; i < VIEW_ORDER.length; i++) {
+      forward = stepView(forward, +1);
+      backward = stepView(backward, -1);
+    }
+    assert.equal(forward, view, `forward cycle from ${view}`);
+    assert.equal(backward, view, `backward cycle from ${view}`);
+  }
 });
 
 // ---------------------------------------------------------------------------

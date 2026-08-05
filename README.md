@@ -34,6 +34,21 @@ invocation, so it loads instantly and runs offline.
   union / per-session / delegated / attended / prompt breakdown, plus the window
   cost, a per-session breakdown, and a rolling 5h plan-usage gauge.
 - **Hover any figure** for a descriptor showing its formula, result, and meaning.
+- **Keyboard shortcuts**, each overriding a browser default this page has a
+  better use for:
+
+  | key | does |
+  | --- | --- |
+  | <kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd> | cycle the plot forward / back through sessions → agents aloft → projects, wrapping at both ends |
+  | <kbd>Ctrl</kbd>+<kbd>L</kbd> / <kbd>Ctrl</kbd>+<kbd>R</kbd> | step the window one day back / forward |
+  | <kbd>c</kbd> | focus the date field and open the calendar |
+
+  The bare keys (<kbd>Tab</kbd>, <kbd>c</kbd>) stand down while a field has
+  focus, so the date input can still be typed in and tabbed out of; the
+  <kbd>Ctrl</kbd> chords work everywhere. <kbd>Alt</kbd> and <kbd>Meta</kbd>
+  chords are never intercepted. While the browser's own calendar popup is open
+  it owns the keyboard outright and the page sees no keys at all — dismiss it
+  with <kbd>Esc</kbd> to get the shortcuts back.
 - **Live by default**: polls `/api/timeline` every ~3s and repaints on change,
   with a freshness indicator.
 
