@@ -1055,6 +1055,18 @@
     return new Date(t + days * DAY_MS).toISOString().slice(0, 10);
   }
 
+  // clampISODate holds a day at or below `max` — the dashboard reports what has
+  // already happened, so every path that names a day passes through here and
+  // none of them can reach past today. Fixed-width ISO days sort as strings, so
+  // the comparison is the whole job. Returns the input unchanged when either
+  // side isn't a date, matching stepISODate: clamping a blank field must not
+  // manufacture a day the caller never named.
+  function clampISODate(iso, max) {
+    if (!Number.isFinite(parseISODate(iso))) return iso;
+    if (!Number.isFinite(parseISODate(max))) return iso;
+    return iso > max ? max : iso;
+  }
+
   // stepISOMonth pages a month at a time, holding the day of the month where it
   // fits and CLAMPING where it doesn't: 31 Mar back a month is 28 Feb, not 3
   // Mar. Rolling over instead would make paging non-reversible — page back then
@@ -1149,6 +1161,6 @@
     summaryTasks, summaryBodyHTML, summaryHintText, summaryCardHasContent, normalizeView,
     fmtTokens, shortModel, tokenBilled, tokenTotals, tokenRowsHTML,
     VIEW_ORDER, stepView,
-    parseISODate, stepISODate, stepISOMonth, monthGrid,
+    parseISODate, stepISODate, stepISOMonth, clampISODate, monthGrid,
   };
 });

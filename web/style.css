@@ -161,6 +161,10 @@ button {
 button:hover { border-color: var(--fg-dim); }
 button.icon { padding: 5px 9px; font-size: 14px; line-height: 1; color: var(--fg-muted); }
 button.ghost { background: transparent; color: var(--fg-muted); font-size: 12px; }
+/* the forward day arrow on today. A spent control keeps its place in the row —
+   the arrows are a pair, and hiding one would shuffle the topbar every step */
+button.icon:disabled { opacity: 0.3; cursor: default; }
+button.icon:disabled:hover { border-color: var(--border); }
 
 /* theme toggle: shows the icon of the ACTIVE theme (moon = dark, sun = light);
    data-theme drives which one is visible, so it's correct before JS runs. */
@@ -801,6 +805,9 @@ main { padding: 16px 18px 36px; }
   background: transparent; border-color: transparent; color: var(--fg-dim);
 }
 .cal-page:hover { color: var(--fg); border-color: var(--border-soft); }
+/* spent on the month today is in — there is no later month to page to */
+.cal-page:disabled { opacity: 0.3; cursor: default; }
+.cal-page:disabled:hover { color: var(--fg-dim); border-color: transparent; }
 
 .cal-dow, .cal-grid { display: grid; grid-template-columns: repeat(7, 30px); gap: 2px; }
 .cal-dow {
@@ -828,6 +835,12 @@ main { padding: 16px 18px 36px; }
    most of a mid-month grid look disabled. */
 .cal-day.future { color: var(--fg-muted); }
 .cal-day.out { color: var(--fg-dim); opacity: 0.5; }
+/* future cells are also `disabled` — the three weights above already say "not
+   now", so this only withdraws the affordances that promise a click, and
+   deliberately does NOT dim further: a mid-month grid is half future, and
+   greying that half would read as a broken calendar rather than a bounded one */
+.cal-day:disabled { cursor: default; }
+.cal-day:disabled:hover { background: transparent; border-color: transparent; }
 /* today: a dot under the numeral, the same mark whether or not it is selected */
 .cal-day.today::after {
   content: ""; position: absolute; left: 50%; bottom: 3px;

@@ -12,7 +12,7 @@ const {
   aloftSpans, workIntervalsMs, concurrencyProfile, alignLiveTail,
   projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs,
   suspectTailMs, normalizeView, VIEW_ORDER, stepView, scaleGeometry,
-  parseISODate, stepISODate, stepISOMonth, monthGrid,
+  parseISODate, stepISODate, stepISOMonth, clampISODate, monthGrid,
   fmtBytes, spawnedBytes, laneMemory, memoryWindow, pressureWindow,
   summaryTasks, summaryBodyHTML, summaryHintText, summaryCardHasContent,
   fmtTokens, shortModel, tokenBilled, tokenTotals, tokenRowsHTML,
@@ -1221,6 +1221,37 @@ test("stepISODate should return a non-date unchanged", () => {
   // Stepping a blank field must not manufacture a day out of nothing.
   assert.equal(stepISODate("", +1), "");
   assert.equal(stepISODate("nope", +1), "nope");
+});
+
+test("clampISODate should hold a day past the ceiling at the ceiling", () => {
+  assert.equal(clampISODate("2026-08-06", "2026-08-05"), "2026-08-05");
+  assert.equal(clampISODate("2026-09-01", "2026-08-05"), "2026-08-05");
+  assert.equal(clampISODate("2027-01-01", "2026-08-05"), "2026-08-05");
+});
+
+test("clampISODate should pass through a day at or below the ceiling", () => {
+  assert.equal(clampISODate("2026-08-05", "2026-08-05"), "2026-08-05"); // the ceiling itself is reachable
+  assert.equal(clampISODate("2026-08-04", "2026-08-05"), "2026-08-04");
+  assert.equal(clampISODate("2019-02-28", "2026-08-05"), "2019-02-28");
+});
+
+test("clampISODate should compare by day, not by string length or year alone", () => {
+  // The comparison rides on fixed-width ISO, so the cases that would break a
+  // naive lexical compare in other formats have to hold here.
+  assert.equal(clampISODate("2026-12-31", "2026-08-05"), "2026-08-05"); // later month, same year
+  assert.equal(clampISODate("2026-08-31", "2026-08-05"), "2026-08-05"); // later day, same month
+  assert.equal(clampISODate("2026-01-09", "2026-08-05"), "2026-01-09"); // single-digit day, zero-padded
+});
+
+test("clampISODate should return a non-date unchanged on either side", () => {
+  // Same contract as stepISODate: clamping a blank field must not manufacture
+  // a day, and a broken ceiling must not silently become one.
+  assert.equal(clampISODate("", "2026-08-05"), "");
+  assert.equal(clampISODate("nope", "2026-08-05"), "nope");
+  assert.equal(clampISODate("2026-02-31", "2026-08-05"), "2026-02-31"); // never a real day
+  assert.equal(clampISODate("2026-12-31", ""), "2026-12-31");
+  assert.equal(clampISODate("2026-12-31", "nope"), "2026-12-31");
+  assert.equal(clampISODate(undefined, "2026-08-05"), undefined);
 });
 
 test("stepISOMonth should page a month while holding the day of the month", () => {
