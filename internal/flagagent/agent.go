@@ -208,6 +208,18 @@ func ParseVerdict(out string) (flags.Verdict, error) {
 	return verdict, nil
 }
 
+// maxDetail bounds how much of a failed run's output rides along in the error.
+// The message is stored on the flag record and shown in the UI, and a runaway
+// transcript there would bury the flag it belongs to.
+const maxDetail = 600
+
+func truncateDetail(s string) string {
+	if len(s) <= maxDetail {
+		return s
+	}
+	return s[:maxDetail] + "…"
+}
+
 // unwrapResult pulls the answer out of the `--output-format json` envelope when
 // one is present, and otherwise hands the text back untouched. An envelope whose
 // is_error is set surfaces as no usable object rather than as a verdict built
@@ -276,9 +288,21 @@ func ClaudeRunner(model, dir, historyDir string, maxUSD string) Runner {
 		cmd.Stdin = strings.NewReader(prompt)
 		out, err := cmd.Output()
 		if err != nil {
+			// A failing `claude -p --output-format json` writes its diagnosis to
+			// STDOUT as an error envelope and leaves stderr empty, so reporting
+			// stderr alone yields a bare "exit status 1" that says nothing. Both
+			// streams go into the message, trimmed, or a failed investigation is
+			// undebuggable from the flag record it lands in.
+			detail := strings.TrimSpace(string(out))
 			var exitErr *exec.ExitError
 			if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
-				return "", fmt.Errorf("claude -p: %w: %s", err, strings.TrimSpace(string(exitErr.Stderr)))
+				if detail != "" {
+					detail += "; "
+				}
+				detail += strings.TrimSpace(string(exitErr.Stderr))
+			}
+			if detail != "" {
+				return "", fmt.Errorf("claude -p: %w: %s", err, truncateDetail(detail))
 			}
 			return "", fmt.Errorf("claude -p: %w", err)
 		}
