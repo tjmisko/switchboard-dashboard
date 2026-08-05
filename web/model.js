@@ -558,11 +558,15 @@
     if (!lane || !sessions) return [];
     // The pid key is built here rather than taken from laneIdentity, which yields
     // the session id whenever there is one — the very case that has to reach for
-    // the pid bucket as well.
-    const byPid = lane.pid != null ? "pid:" + lane.pid : null;
+    // the pid bucket as well. Both spellings are tried: the merged endpoint
+    // namespaces EVERY key by provider, "pid:<n>" included, so a lane in a
+    // multi-provider view is looking for "claude:pid:<n>"; a single-provider
+    // payload is not namespaced at all and carries the bare form.
+    const bare = lane.pid != null ? "pid:" + lane.pid : null;
+    const byPid = bare && lane.provider ? lane.provider + ":" + bare : null;
     const out = [];
     const seen = new Set();
-    for (const key of [lane.session_id, rawSessionId(lane), byPid]) {
+    for (const key of [lane.session_id, rawSessionId(lane), byPid, bare]) {
       if (!key || seen.has(key)) continue;
       seen.add(key);
       const record = sessions[key];
@@ -570,7 +574,7 @@
       // A record reached by two keys is one claim, not two: an unidentified
       // lane's identity IS its pid key.
       if (out.some((c) => c.record === record)) continue;
-      const inferred = key === byPid && key !== lane.session_id;
+      const inferred = (key === byPid || key === bare) && key !== lane.session_id;
       out.push({ record, samples: claimedSamples(record, lane, inferred), inferred });
     }
     return out;

@@ -1299,6 +1299,24 @@ test("laneMemory should leave a single record's scalars exactly as the producer 
   assert.equal(mem.avgAgentBytes, 250 * MB);
 });
 
+test("laneMemory should find the pid bucket under its provider prefix", () => {
+  // The merged endpoint namespaces EVERY key by provider, "pid:<n>" included, so
+  // in a multi-provider view the bucket is "claude:pid:4821". Looking only for
+  // the bare form found nothing — which is how this shipped: verified against the
+  // live merged endpoint, where every split session came back with only the half
+  // its id named.
+  const lane = { session_id: "claude:ghost", provider: "claude", pid: 4821, start: at(0), end: at(60), intervals: [] };
+  const mem = {
+    sessions: {
+      "claude:ghost": { peak_tree_bytes: 400 * MB, mem: [{ ts: at(0), tree: 400 * MB }] },
+      "claude:pid:4821": { peak_tree_bytes: 1200 * MB, mem: [{ ts: at(20), tree: 1200 * MB }] },
+    },
+  };
+  const joined = laneMemory(lane, mem);
+  assert.equal(joined.samples.length, 2, "both halves, found under the namespaced key");
+  assert.equal(joined.peakTreeBytes, 1200 * MB);
+});
+
 test("laneMemory should not credit a lane with a pid bucket outside its own span", () => {
   // A pid outlives the session wearing it. Over a long window one bucket can
   // hold the unidentified stretches of two sessions that held that pid in turn,
