@@ -902,6 +902,115 @@
     return Boolean(summary) && summaryBodyHTML(summary) !== "";
   }
 
+  // -------------------------------------------------------------------------
+  // token spend rendering (digest.tokens from /api/summaries)
+  //
+  // A record is {main, sidechain?, byModel?}, each bucket carrying raw counts:
+  // inputFresh (the UNCACHED REMAINDER of the prompt, not the prompt),
+  // cacheCreation, cacheRead, output, peakTurnInput, responses. The components
+  // are raw on purpose — see TokenCounts in internal/sessiondigest/tokens.go —
+  // so forming the two figures a reader wants is this layer's job.
+  // -------------------------------------------------------------------------
+
+  // fmtTokens renders a count compactly. A busy session reads tens of millions
+  // of cached tokens, so the raw integer is unscannable and the exact digits
+  // carry no decision.
+  function fmtTokens(n) {
+    if (!Number.isFinite(n)) return "—";
+    if (n < 1e3) return String(Math.round(n));
+    if (n < 1e6) return (n / 1e3).toFixed(n < 1e4 ? 1 : 0).replace(/\.0$/, "") + "k";
+    if (n < 1e9) return (n / 1e6).toFixed(n < 1e7 ? 1 : 0).replace(/\.0$/, "") + "M";
+    return (n / 1e9).toFixed(1).replace(/\.0$/, "") + "B";
+  }
+
+  // shortModel drops the parts of a model id that are constant across the whole
+  // breakdown: every model here is a Claude one, and the dated suffix
+  // distinguishes releases nobody is comparing in a tooltip.
+  function shortModel(model) {
+    return String(model == null ? "" : model).replace(/^claude-/, "").replace(/-\d{8}$/, "");
+  }
+
+  // tokenBilled is what a bucket actually paid for on the input side: the
+  // uncached remainder PLUS the cache write PLUS the cache read, because every
+  // turn genuinely resends the whole conversation. Reporting inputFresh as
+  // "input" would be off by three orders of magnitude — it is frequently 2.
+  function tokenBilled(counts) {
+    if (!counts) return 0;
+    return (counts.inputFresh || 0) + (counts.cacheCreation || 0) + (counts.cacheRead || 0);
+  }
+
+  // tokenTotals folds a record into the figures the UI shows, or null when
+  // there is nothing to show. Main and sidechain are summed for the headline —
+  // a subagent's tokens are still this session's spend — with the delegated
+  // share kept separately so the split stays visible.
+  function tokenTotals(tokens) {
+    const main = tokens && tokens.main;
+    if (!main) return null;
+    const side = (tokens && tokens.sidechain) || null;
+    const responses = (main.responses || 0) + (side ? side.responses || 0 : 0);
+    if (responses === 0) return null;
+
+    const byModel = (tokens && tokens.byModel) || {};
+    const models = Object.keys(byModel).map((model) => ({
+      model,
+      label: shortModel(model),
+      output: byModel[model].output || 0,
+      billedInput: tokenBilled(byModel[model]),
+    })).sort((a, b) => b.output - a.output || (a.label < b.label ? -1 : 1));
+
+    return {
+      responses,
+      output: (main.output || 0) + (side ? side.output || 0 : 0),
+      billedInput: tokenBilled(main) + (side ? tokenBilled(side) : 0),
+      cacheRead: (main.cacheRead || 0) + (side ? side.cacheRead || 0 : 0),
+      cacheCreation: (main.cacheCreation || 0) + (side ? side.cacheCreation || 0 : 0),
+      inputFresh: (main.inputFresh || 0) + (side ? side.inputFresh || 0 : 0),
+      // Peak context is the MAIN chain's high-water mark alone. A subagent runs
+      // its own conversation in its own window, so folding its peak in here
+      // would report a context size that never existed.
+      peakContext: main.peakTurnInput || 0,
+      delegatedOutput: side ? side.output || 0 : 0,
+      delegatedResponses: side ? side.responses || 0 : 0,
+      models,
+    };
+  }
+
+  // tokenRowsHTML renders a record as rows. Output leads because it is the
+  // expensive half; billed input follows with the cache split beneath it, since
+  // cache reads are roughly a tenth the price and dominate the raw input number
+  // — one undifferentiated "input" figure would read as a bill ten times the
+  // real one. Returns "" for no data, so a session that never called the API
+  // renders exactly as before.
+  //
+  // rowClass is the caller's row style: the tooltip and the pinned card scope
+  // their row rules separately (.tooltip .t-row, .popout .po-row), so an
+  // unstyled row is what a hardcoded class would buy on the other surface.
+  function tokenRowsHTML(tokens, rowClass) {
+    const t = tokenTotals(tokens);
+    if (!t) return "";
+    const cls = rowClass || "t-row";
+    const row = (html) => `<div class="${cls}">${html}</div>`;
+    const turns = (n) => `${n} turn${n === 1 ? "" : "s"}`;
+
+    let html = row(`tokens <b>${fmtTokens(t.output)}</b> out · <b>${fmtTokens(t.billedInput)}</b> in`
+      + ` <span class="dim">over ${turns(t.responses)}</span>`);
+    html += row(`<span class="dim">cache</span> ${fmtTokens(t.cacheRead)} read`
+      + ` · ${fmtTokens(t.cacheCreation)} written`
+      + ` · <span class="dim">peak ctx</span> ${fmtTokens(t.peakContext)}`);
+    if (t.delegatedOutput > 0) {
+      html += row(`<span class="dim">delegated</span> ${fmtTokens(t.delegatedOutput)} out`
+        + ` <span class="dim">over ${turns(t.delegatedResponses)}</span>`);
+    }
+    // One model needs no breakdown; several do, because a session total is not
+    // convertible to a cost figure without knowing which model spent what.
+    if (t.models.length > 1) {
+      html += row(t.models
+        .map((m) => `<span class="dim">${escapeHTML(m.label)}</span> ${fmtTokens(m.output)}`)
+        .join(" · "));
+    }
+    return html;
+  }
+
   // normalizeView validates a chart-view name, resolving "bars" — the sessions
   // view's pre-rename spelling — so persisted `sb-view` choices and old ?view=
   // links keep working. Returns null for anything that isn't a view, which both
@@ -949,5 +1058,6 @@
     projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs, suspectTailMs,
     fmtBytes, spawnedBytes, laneMemory, memoryWindow, pressureWindow,
     summaryTasks, summaryBodyHTML, summaryHintText, summaryCardHasContent, normalizeView,
+    fmtTokens, shortModel, tokenBilled, tokenTotals, tokenRowsHTML,
   };
 });

@@ -14,6 +14,7 @@ const {
   suspectTailMs, normalizeView, scaleGeometry,
   fmtBytes, spawnedBytes, laneMemory, memoryWindow, pressureWindow,
   summaryTasks, summaryBodyHTML, summaryHintText, summaryCardHasContent,
+  fmtTokens, shortModel, tokenBilled, tokenTotals, tokenRowsHTML,
 } = require("./model.js");
 
 // ms helper: a fixed base instant + offset minutes, as RFC3339 with offset.
@@ -938,8 +939,9 @@ test("summaryCardHasContent should pin nothing when the record has no tasks and 
 
 test("summaryCardHasContent should pin nothing when a description is all the record carries", () => {
   // The case tjmisko/switchboard-dashboard#7 item 2 describes, and the one the
-  // backend can actually serve — handler.go drops a record whose description is
-  // empty, so this is the empty record as the browser sees it. The tooltip
+  // backend can actually serve — handler.go serves no summary fields at all
+  // when the description is empty (a tokens-only entry carries tokens and
+  // nothing else), so this is the fullest empty record. The tooltip
   // already prints the description; all the card would add is the archival name
   // and the id footer. Losing that name from the UI is the accepted cost of not
   // having a bar that pins a card it never advertised.
@@ -988,6 +990,149 @@ test("summaryCardHasContent should pin a card exactly when the tooltip advertise
     assert.equal(summaryCardHasContent(sum), summaryHintText(sum) !== "",
       `card and hint disagree for ${label}`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// token spend — digest.tokens as /api/summaries serves it
+// ---------------------------------------------------------------------------
+
+// A record in the shape internal/sessiondigest writes, with the real numbers
+// from one switchboard-dashboard session (236 responses across 413 records).
+function tokensFixture(overrides) {
+  return Object.assign({
+    main: {
+      responses: 236, inputFresh: 646, cacheCreation: 259595, cacheCreation1h: 259595,
+      cacheRead: 34532761, output: 104821, peakTurnInput: 236518,
+    },
+    byModel: {
+      "claude-opus-5": {
+        responses: 236, inputFresh: 646, cacheCreation: 259595,
+        cacheRead: 34532761, output: 104821, peakTurnInput: 236518,
+      },
+    },
+  }, overrides);
+}
+
+test("fmtTokens should scale a count to the unit a reader can hold", () => {
+  assert.equal(fmtTokens(2), "2");
+  assert.equal(fmtTokens(999), "999");
+  assert.equal(fmtTokens(1000), "1k");
+  assert.equal(fmtTokens(9500), "9.5k");
+  assert.equal(fmtTokens(104821), "105k");
+  assert.equal(fmtTokens(34532761), "35M");
+  assert.equal(fmtTokens(2400000000), "2.4B");
+  assert.equal(fmtTokens(undefined), "—", "an absent count must not render as 0");
+});
+
+test("shortModel should drop the constant prefix and the dated suffix", () => {
+  assert.equal(shortModel("claude-opus-5"), "opus-5");
+  assert.equal(shortModel("claude-haiku-4-5-20251001"), "haiku-4-5");
+  assert.equal(shortModel(""), "");
+});
+
+test("tokenBilled should sum all three input components, not input_tokens alone", () => {
+  // The trap the whole feature turns on: inputFresh is the UNCACHED REMAINDER,
+  // here 646 against 34.8M actually sent. Reporting it as "input" is off by
+  // four orders of magnitude.
+  const main = tokensFixture().main;
+  assert.equal(tokenBilled(main), 646 + 259595 + 34532761);
+  assert.notEqual(tokenBilled(main), main.inputFresh);
+  assert.equal(tokenBilled(null), 0);
+});
+
+test("tokenTotals should fold delegated spend into the headline while keeping the split", () => {
+  // A subagent's tokens are still this session's spend, so the headline sums
+  // both; the delegated share stays separately readable.
+  const t = tokenTotals(tokensFixture({
+    sidechain: {
+      responses: 55, inputFresh: 101, cacheCreation: 352990,
+      cacheRead: 2646005, output: 14546, peakTurnInput: 97105,
+    },
+  }));
+  assert.equal(t.output, 104821 + 14546);
+  assert.equal(t.responses, 236 + 55);
+  assert.equal(t.cacheRead, 34532761 + 2646005);
+  assert.equal(t.delegatedOutput, 14546);
+  assert.equal(t.delegatedResponses, 55);
+});
+
+test("tokenTotals should report peak context from the main chain alone", () => {
+  // A subagent runs its own conversation in its own window. Folding its peak in
+  // — by summing, or by taking a max that could come from the subagent — would
+  // report a context size that never existed on either side.
+  const t = tokenTotals(tokensFixture({
+    sidechain: { responses: 3, output: 10, cacheRead: 5, peakTurnInput: 999999 },
+  }));
+  assert.equal(t.peakContext, 236518, "peak context is the session's own high-water mark");
+});
+
+test("tokenTotals should report nothing when no response was ever recorded", () => {
+  assert.equal(tokenTotals(null), null);
+  assert.equal(tokenTotals({}), null);
+  assert.equal(tokenTotals({ main: { responses: 0 } }), null);
+});
+
+test("tokenRowsHTML should render nothing when the session never called the API", () => {
+  // A lane with no record must render exactly as it did before the feature.
+  assert.equal(tokenRowsHTML(null), "");
+  assert.equal(tokenRowsHTML(undefined), "");
+  assert.equal(tokenRowsHTML({ main: { responses: 0 } }), "");
+});
+
+test("tokenRowsHTML should show output, billed input, and the cache split", () => {
+  const html = tokenRowsHTML(tokensFixture());
+  assert.match(html, /105k<\/b> out/, "output leads");
+  assert.match(html, /35M<\/b> in/, "billed input, not the 646-token remainder");
+  assert.ok(!html.includes("646"), "the uncached remainder is never shown as the input figure");
+  assert.match(html, /35M read/, "the cache read is broken out — it is a tenth the price");
+  assert.match(html, /260k written/);
+  assert.match(html, /peak ctx<\/span> 237k/);
+  assert.match(html, /over 236 turns/);
+});
+
+test("tokenRowsHTML should break out the models only when a session used several", () => {
+  const single = tokenRowsHTML(tokensFixture());
+  assert.ok(!single.includes("opus-5"), "one model needs no breakdown");
+
+  const mixed = tokenRowsHTML(tokensFixture({
+    byModel: {
+      "claude-opus-5": { responses: 200, output: 90000, cacheRead: 30000000 },
+      "claude-fable-5": { responses: 36, output: 14821, cacheRead: 4532761 },
+    },
+  }));
+  assert.match(mixed, /opus-5<\/span> 90k/);
+  assert.match(mixed, /fable-5<\/span> 15k/);
+  // heaviest first: a session total is not convertible to cost without knowing
+  // which model spent the bulk of it.
+  assert.ok(mixed.indexOf("opus-5") < mixed.indexOf("fable-5"), "sorted by output, heaviest first");
+});
+
+test("tokenRowsHTML should omit the delegated row when the session delegated nothing", () => {
+  assert.ok(!tokenRowsHTML(tokensFixture()).includes("delegated"));
+  const delegated = tokenRowsHTML(tokensFixture({
+    sidechain: { responses: 55, output: 14546, cacheRead: 2646005, peakTurnInput: 97105 },
+  }));
+  assert.match(delegated, /delegated<\/span> 15k out/);
+  assert.match(delegated, /over 55 turns/);
+});
+
+test("tokenRowsHTML should use the caller's row class so both surfaces are styled", () => {
+  // .tooltip .t-row and .popout .po-row are scoped separately, so a hardcoded
+  // class renders unstyled rows on whichever surface it does not match.
+  assert.match(tokenRowsHTML(tokensFixture()), /class="t-row"/);
+  assert.match(tokenRowsHTML(tokensFixture(), "po-row"), /class="po-row"/);
+  assert.ok(!tokenRowsHTML(tokensFixture(), "po-row").includes(`class="t-row"`));
+});
+
+test("tokenRowsHTML should escape a model name before interpolating it", () => {
+  const html = tokenRowsHTML(tokensFixture({
+    byModel: {
+      "claude-<img src=x onerror=alert(1)>": { responses: 1, output: 10 },
+      "claude-opus-5": { responses: 1, output: 20 },
+    },
+  }));
+  assert.ok(!html.includes("<img"), "markup in a model id must not reach innerHTML");
+  assert.match(html, /&lt;img/);
 });
 
 // ---------------------------------------------------------------------------
