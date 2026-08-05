@@ -867,6 +867,84 @@ main { padding: 16px 18px 36px; }
   .cal-day { transition: none; }
 }
 
+/* ---------- loading a day ----------
+   While a day's data is in flight the page keeps its structure — the axis, the
+   panels, the static labels, the layout — and every figure is REPLACED by a
+   placeholder of about the size the figure will be, so nothing moves when the
+   real value lands.
+
+   Replaced, not masked: several labels have numbers baked into them ("agent
+   hours net 4h 11m babysitting"), and a value-only mask leaves exactly those
+   behind, which is the previous day's number reading as this one's. app.js
+   stamps the placeholder markup (showSkeletons); this only makes it shimmer. */
+@keyframes sb-shimmer {
+  0%   { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+@keyframes sb-skel-pulse {
+  0%, 100% { opacity: 0.45; }
+  50%      { opacity: 0.9; }
+}
+:root {
+  --skel-base: var(--bg-elev-2);
+  --skel-sheen: color-mix(in srgb, var(--fg-dim) 20%, var(--bg-elev-2));
+}
+
+/* HTML placeholders: a bar with a sheen crossing it. */
+.skel-text {
+  display: inline-block; vertical-align: middle;
+  height: 0.95em; min-width: 3ch; border-radius: 4px;
+  background-color: var(--skel-base);
+  background-image: linear-gradient(90deg,
+    transparent 0%, transparent 35%,
+    var(--skel-sheen) 50%,
+    transparent 65%, transparent 100%);
+  background-size: 200% 100%;
+  background-repeat: no-repeat;
+  animation: sb-shimmer 1.25s linear infinite;
+}
+.topline .th-val.skel-text { width: 170px; height: 34px; }
+.status-key .sk-val.skel-text { width: 62px; height: 12px; }
+.skel-headline { display: block; width: 45%; height: 30px; margin: 2px 0 14px; }
+.card .kv .skel-text { height: 12px; }
+
+/* SVG placeholders paint through `fill`, so they pulse rather than take a
+   gradient sweep — a sheen would need a <linearGradient> per rect. */
+.skel {
+  fill: var(--skel-base);
+  animation: sb-skel-pulse 1.25s ease-in-out infinite;
+}
+.skel-name { animation-delay: 0.06s; }
+.skel-bar  { animation-delay: 0.12s; }
+
+/* projects-view placeholder rows drop the trailing hours column, so the name and
+   bar land in the columns the real rows use. */
+.projects .skel-row { grid-template-columns: minmax(120px, 220px) 1fr; }
+.skel-projname { height: 12px; width: 70%; }
+.skel-projbar  { height: 16px; }
+
+/* The line view draws to a canvas, so its placeholder is the shimmer showing
+   through the cleared bitmap rather than anything painted into it. */
+body.day-loading #concurrency {
+  background-color: var(--skel-base);
+  background-image: linear-gradient(90deg,
+    transparent 0%, transparent 35%,
+    var(--skel-sheen) 50%,
+    transparent 65%, transparent 100%);
+  background-size: 200% 100%;
+  background-repeat: no-repeat;
+  border-radius: 6px;
+  animation: sb-shimmer 1.25s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skel-text, .skel, body.day-loading #concurrency {
+    animation: none;
+    background-image: none;
+  }
+  .skel { fill: var(--skel-base); opacity: 0.7; }
+}
+
 /* ---------- footer ---------- */
 .footer {
   display: grid;

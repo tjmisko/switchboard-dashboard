@@ -302,10 +302,15 @@ let lastPlan = null;       // parsed /api/plan
 let lastPlanText = "";
 let lastSummaries = {};    // /api/summaries session_id → {name, description, tasks, summary, tokens}
 let lastMemory = null;     // /api/memory {sessions, pressure} — read lazily at hover, never repainted
-let lastUpdatedAt = null;  // ms of last successful timeline fetch
+let lastUpdatedAt = null;  // ms of the data currently painted (a fetch, or a cache entry's age)
 let fetchOK = false;
 let timelineTimer = null;
 let planTimer = null;
+// loadingDay is the day whose SCAFFOLD is on screen — the frame is drawn but its
+// data has not arrived. Non-null means lastData is deliberately null, so every
+// incidental repaint path (`if (lastData)`) sits still rather than redrawing the
+// day you just navigated away from.
+let loadingDay = null;
 
 // Which chart occupies the plot area: "sessions" (the SVG swimlanes), "line"
 // (the "agents aloft" concurrency canvas) or "projects" (the
@@ -505,35 +510,184 @@ function syncSmoothLegend() {
 // data loading
 // ---------------------------------------------------------------------------
 
-function buildQuery() {
+function buildQuery(day) {
   const params = new URLSearchParams();
-  if (el.day.value) params.set("day", el.day.value);
+  const d = day === undefined ? el.day.value : day;
+  if (d) params.set("day", d);
   return params.toString();
 }
 
-async function loadTimeline() {
+// ---------------------------------------------------------------------------
+// day cache
+//
+// ctl needs the better part of a second to compile a day (0.4s for a quiet one,
+// 1-2s for a busy one), and that second used to be spent with the PREVIOUS day
+// still on screen. The cache is what makes a walk back through the week cost
+// nothing after the first pass: a day already fetched repaints from memory,
+// synchronously, in the same frame as the keypress.
+//
+// Entries hold the raw text as well as the parse, because the raw text is what
+// the repaint-on-change guard compares — re-serialising the parse would not
+// reproduce it byte for byte, and every cached day would then look changed.
+//
+// Nothing here expires. A closed day is settled history; today is the one entry
+// that moves, and it is overwritten by the 3s poll for as long as it is the day
+// on screen. What a cache hit buys is the FIRST frame — it is always revalidated
+// behind what it painted, so a stale entry is corrected within the same second
+// rather than believed.
+// ---------------------------------------------------------------------------
+const DAY_CACHE_MAX = 32;
+const dayCache = new Map(); // day → {text, data, at}; Map insertion order IS the LRU
+
+function cacheGet(day) {
+  const hit = dayCache.get(day);
+  if (!hit) return null;
+  dayCache.delete(day);
+  dayCache.set(day, hit); // touch: most-recently-used moves to the end
+  return hit;
+}
+
+function cachePut(day, text, data) {
+  if (!day) return;
+  dayCache.delete(day);
+  dayCache.set(day, { text, data, at: Date.now() });
+  while (dayCache.size > DAY_CACHE_MAX) dayCache.delete(dayCache.keys().next().value);
+}
+
+// ---------------------------------------------------------------------------
+// loading
+// ---------------------------------------------------------------------------
+
+// Three guards, all of which exist because a day switch and the 3s poll can now
+// be in flight at the same time:
+//
+//   timelineGen — only the newest request may paint. A response for a day you
+//     have already navigated away from is dropped.
+//
+//     This one is a bug fix, not a precaution. Nothing previously tied a response
+//     to the day that asked for it, so four quick presses of Ctrl+← would land
+//     four responses in whatever order ctl finished them and repaint on each.
+//     Measured on the old build, stepping 08-05 back to 08-01: with 08-01
+//     selected the chart painted 08-02, then 08-03, then 08-04, and only reached
+//     08-01 1.5s later — the label said one day while the chart flicked through
+//     three others, and had the last response been the slowest it would have
+//     stayed wrong until the next poll.
+//
+//   inflightAbort — a superseded request is cancelled rather than left to occupy
+//     a connection and a ctl process on the way to being discarded.
+//   inflightDay — the poll does not stack a second ctl run on a day whose fetch
+//     is already out. It would return the same bytes at twice the cost.
+let timelineGen = 0;
+let inflightDay = null;
+let inflightAbort = null;
+
+async function loadTimeline(opts) {
+  const o = opts || {};
+  const rec = o.rec || null;
+  const day = el.day.value;
+  if (inflightDay === day) { perfEnd(rec, { source: "coalesced", quiet: true }); return; }
+  const gen = ++timelineGen;
+  if (inflightAbort) inflightAbort.abort();
+  const ac = new AbortController();
+  inflightAbort = ac;
+  inflightDay = day;
   try {
-    const res = await fetch("/api/timeline?" + buildQuery(), { cache: "no-store" });
-    const text = await res.text();
+    const res = await perfPhaseAsync(rec, "fetch", () =>
+      fetch("/api/timeline?" + buildQuery(day), { cache: "no-store", signal: ac.signal })
+        .then(async (r) => ({ ok: r.ok, text: await r.text() })));
+    if (gen !== timelineGen) { perfEnd(rec, { source: "superseded", quiet: true }); return; }
     if (!res.ok) {
-      let msg = text;
-      try { const j = JSON.parse(text); msg = j.error + (j.stderr ? "\n" + j.stderr : ""); } catch (_) {}
+      let msg = res.text;
+      try { const j = JSON.parse(res.text); msg = j.error + (j.stderr ? "\n" + j.stderr : ""); } catch (_) {}
       showError(msg);
       fetchOK = false;
+      perfEnd(rec, { source: "error", quiet: true });
       return;
     }
     hideError();
     fetchOK = true;
     lastUpdatedAt = Date.now();
-    if (text === lastTimelineText) { tickLive(); return; } // unchanged → no repaint
-    lastTimelineText = text;
-    lastData = JSON.parse(text);
-    render(lastData);
+    const data = perfPhase(rec, "parse", () => JSON.parse(res.text));
+    cachePut(day, res.text, data);
+    if (res.text === lastTimelineText) { // unchanged → no repaint
+      tickLive();
+      perfEnd(rec, { source: "unchanged", quiet: true });
+      return;
+    }
+    paintTimeline(day, res.text, data, rec);
     tickLive();
+    perfEnd(rec, { source: "network", bytes: res.text.length, lanes: (data.lanes || []).length });
   } catch (e) {
+    if (e && e.name === "AbortError") { perfEnd(rec, { source: "aborted", quiet: true }); return; }
     showError(String(e));
     fetchOK = false;
+    perfEnd(rec, { source: "error", quiet: true });
+  } finally {
+    if (inflightAbort === ac) { inflightAbort = null; inflightDay = null; }
   }
+}
+
+// paintTimeline is the single place data becomes pixels. Everything that can
+// produce a timeline — the network, the cache, a prefetch that landed on the day
+// you are looking at — goes through here, so "what is on screen" has exactly one
+// definition and the repaint-on-change guard has exactly one writer.
+//
+// Replacing a scaffold re-arms the entry sweep. The reveal already exists for
+// view switches; borrowing it here is what turns "blank frame, then everything
+// at once" into a chart drawing itself in, which is a much better use of the
+// ~40ms the render costs than a snap.
+function paintTimeline(day, text, data, rec) {
+  const wasScaffold = loadingDay != null;
+  loadingDay = null;
+  document.body.classList.remove("day-loading");
+  lastTimelineText = text;
+  lastData = data;
+  if (wasScaffold) armChartEnter(currentView);
+  perfPhase(rec, "render", () => render(data, rec));
+  if (wasScaffold && currentView === "projects") startProjectsEnter();
+}
+
+// ---------------------------------------------------------------------------
+// prefetch
+//
+// Stepping through a week is the motion this page invites, so the days either
+// side of wherever you land are warmed while you read the one you asked for.
+// After the first pass every step in that walk is a cache hit — the fetch has
+// already happened, in time you were not waiting.
+//
+// Deliberately AFTER a short delay and one day at a time: ctl is CPU-bound, so a
+// prefetch racing the visible fetch would put two of them on one core and slow
+// down the one the user is actually waiting for. Future days are skipped — there
+// is nothing there, and ctl still costs a subprocess to say so.
+// ---------------------------------------------------------------------------
+const PREFETCH_DELAY_MS = 400;
+let prefetchTimer = null;
+let prefetchRun = 0;
+
+function scheduleNeighborPrefetch(day) {
+  if (prefetchTimer) clearTimeout(prefetchTimer);
+  prefetchTimer = setTimeout(async () => {
+    prefetchTimer = null;
+    const run = ++prefetchRun;
+    const today = todayLocal();
+    for (const d of [shiftDay(day, -1), shiftDay(day, 1)]) {
+      if (run !== prefetchRun) return; // a newer landing supersedes this walk
+      if (!d || d > today || dayCache.has(d)) continue;
+      await prefetchDay(d);
+    }
+  }, PREFETCH_DELAY_MS);
+}
+
+// prefetchDay fills the cache without touching the screen: the day it fetches is
+// by definition not the day you are looking at. Best-effort throughout — a warm
+// cache is a bonus, never a requirement, so a failure is simply not cached.
+async function prefetchDay(day) {
+  try {
+    const res = await fetch("/api/timeline?" + buildQuery(day), { cache: "no-store" });
+    if (!res.ok) return;
+    const text = await res.text();
+    cachePut(day, text, JSON.parse(text));
+  } catch (e) { /* leave it uncached; the day will fetch normally when visited */ }
 }
 
 // loadSettings pulls the operator-model tunables over OP's fallbacks. Fetched
@@ -961,7 +1115,10 @@ function setView(view) {
   // zoom, a resize and a theme flip all repaint silently. The time views arm
   // BEFORE the render so it draws at the sweep's opening reveal...
   if (entering) armChartEnter(view);
-  if (lastData) renderChartArea(lastData);
+  // While a scaffold is up lastData is null by design, so the new view gets its
+  // own frame rather than an empty box.
+  if (loadingDay) drawDayScaffold(loadingDay);
+  else if (lastData) renderChartArea(lastData);
   // ...while the projects grow-in arms AFTER it, so the hold is sized to the
   // rows that just landed. Its animation starts when .enter is applied, so
   // stamping it once the rows exist is what makes them all run together.
@@ -1347,6 +1504,242 @@ function windowBounds(data, lanes) {
   return { t0, t1 };
 }
 
+// ---------------------------------------------------------------------------
+// the scaffold: the frame, drawn before the data exists
+//
+// The measurement that produced this code: a day step was 700-2200ms end to end,
+// of which 95% was ctl compiling the day in a subprocess and ~5% was us drawing
+// it. For all of that time the page showed the PREVIOUS day's chart, totals and
+// cost under the new day's date — not merely slow, but confidently wrong, which
+// is what actually made the transition feel broken.
+//
+// Everything below is derivable from the date alone and costs ~2ms of DOM, so
+// there is no reason for any of it to wait on a subprocess: the axis for the new
+// day, the gutter, the baseline, the plot's own dimensions. What is NOT
+// derivable — the lanes, the totals, the cost — is cleared to a shimmer, so the
+// page says "this day, loading" instead of asserting yesterday's numbers.
+//
+// The window drawn is the day's full local span, clipped to now for today. It is
+// the only bound knowable before the data lands and it is an honest one: the
+// render that follows narrows the axis to where the work actually was, which
+// reads as focusing in rather than as a correction.
+// ---------------------------------------------------------------------------
+
+// The placeholder plot inherits the height of the chart it replaces, so the page
+// does not jump on the way in, clamped so a forty-session day does not leave a
+// screen and a half of shimmer behind it.
+const SCAFFOLD_MIN_H = 200, SCAFFOLD_MAX_H = 460;
+const SCAFFOLD_ROW_H = 36;
+
+// dayStartMs is local midnight for an ISO day. The picker speaks local time
+// (todayLocal), so the scaffold's window has to as well.
+function dayStartMs(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || "");
+  if (!m) return NaN;
+  return new Date(+m[1], +m[2] - 1, +m[3]).getTime();
+}
+
+// showDayScaffold puts the new day's frame on screen in the same frame as the
+// keypress, before anything has been fetched.
+function showDayScaffold(day) {
+  loadingDay = day;
+  lastData = null;       // every incidental repaint path is already `if (lastData)`
+  lastTimelineText = ""; // …and the bytes that land must repaint even if identical
+  hideTip();
+  hidePopout();
+  cancelSweep();
+  document.body.classList.add("day-loading");
+  el.empty.hidden = true;
+  showSkeletons();
+  drawDayScaffold(day);
+  updateZoomReadout();
+}
+
+// showSkeletons replaces every data-bearing region outside the plot. Deliberately
+// a REPLACEMENT and not a mask over the real markup: with the figures gone from
+// the page they cannot leak through a selector nobody thought to cover, and
+// several of these labels carry a number inside the label itself ("agent hours
+// net 4h 11m babysitting", "force multiplier · over 7h 10m active") — exactly
+// what a value-only mask leaves standing, which is the previous day's figure
+// presenting itself as this one's.
+//
+// Only the labels that are true of any day survive.
+const SKELETON_TOPLINE = ["agent hours worked", "agent hours net", "force multiplier"];
+const SKELETON_KV_WIDTHS = [46, 38, 52, 34, 44, 40]; // % widths, so the rows don't read as a block
+
+function showSkeletons() {
+  el.topline.innerHTML = SKELETON_TOPLINE.map((k) =>
+    `<div class="th-block">
+       <div class="th-val skel-text"></div>
+       <div class="th-key">${k}</div>
+     </div>`).join("");
+  // The status list is a fixed set with fixed colors, so the legend half of it is
+  // known before the data is — only the durations are unknown.
+  el.statusKey.innerHTML = STATUS_ORDER.map((k) =>
+    `<span class="sk">
+       <span class="sk-left">
+         <span class="swatch" style="background:${statusColor(k)}"></span>
+         <span class="sk-name">${statusLabel(k)}</span>
+       </span>
+       <span class="sk-val skel-text"></span>
+     </span>`).join("");
+  el.providerKey.hidden = true; // which providers ran is itself a fact about the day
+  el.providerKey.innerHTML = "";
+  // the line view's peak/avg readout is written by its renderer, which will not
+  // run until the data lands — left alone it would report the previous day's peak
+  if (el.chartStats) el.chartStats.innerHTML = "";
+  el.cardAttention.innerHTML = skeletonCard("attention &amp; delegation", 5);
+  el.cardCost.innerHTML = skeletonCard("cost", 4);
+}
+
+function skeletonCard(label, rows) {
+  const lines = [];
+  for (let i = 0; i < rows; i++) {
+    lines.push(`<div class="kv">
+        <span class="skel-text" style="width:${SKELETON_KV_WIDTHS[i % SKELETON_KV_WIDTHS.length]}%"></span>
+        <span class="skel-text" style="width:20%"></span>
+      </div>`);
+  }
+  return `<div class="card-label">${label}</div>
+    <div class="skel-headline skel-text"></div>
+    <div class="kv-list">${lines.join("")}</div>`;
+}
+
+// drawDayScaffold stamps the frame for whichever view is on screen. Only the
+// sessions view gets a real axis: it is the default, it is where the day step is
+// actually used, and the other two are covered by the same shimmer without
+// needing their geometry duplicated here.
+function drawDayScaffold(day) {
+  if (currentView === "projects") { drawProjectsScaffold(); return; }
+  if (currentView === "line") { drawAloftScaffold(); return; }
+  drawSessionsScaffold(day);
+}
+
+// lastPlotWindow remembers the shape of the window the plot was last drawn at,
+// as a clock offset from midnight plus a duration — NOT as absolute times, which
+// belong to a day that is over. The scaffold reuses it because a day's work
+// window is the most reliable prediction of the next day's: same hours, same
+// width, so the frame that goes up is close to the one the data will settle into
+// and the axis does not lurch when it arrives.
+//
+// Without it a scaffold has to draw the whole 24 hours, which at the default
+// density is five screens wide and opens on an empty midnight — a frame that is
+// technically correct about the day and wrong about every useful thing.
+let lastPlotWindow = null; // {offsetMs, span}
+
+function rememberPlotWindow(t0, t1) {
+  const midnight = new Date(t0);
+  midnight.setHours(0, 0, 0, 0);
+  const offsetMs = t0 - midnight.getTime();
+  // A window spanning midnight (a session that ran past it) says nothing useful
+  // about where the next day's work sits; fall back to the full-day default.
+  if (offsetMs < 0 || t1 - t0 > 86400e3) { lastPlotWindow = null; return; }
+  lastPlotWindow = { offsetMs, span: t1 - t0 };
+}
+
+// scaffoldWindow: the inherited clock window mapped onto `day`, or the whole day
+// when there is nothing to inherit (the first load). Today is clipped to now —
+// the trailing edge of a live window is the present, never the end of the day.
+function scaffoldWindow(day) {
+  const start = dayStartMs(day);
+  if (!isFinite(start)) return null;
+  const isToday = day === todayLocal();
+  let t0 = start, t1 = start + 86400e3;
+  if (lastPlotWindow) {
+    t0 = start + lastPlotWindow.offsetMs;
+    t1 = t0 + lastPlotWindow.span;
+  }
+  if (isToday) t1 = Math.min(t1, Math.max(t0 + 3600e3, Date.now()));
+  return t1 > t0 ? { t0, t1 } : { t0: start, t1: start + 86400e3 };
+}
+
+function drawSessionsScaffold(day) {
+  const win = scaffoldWindow(day);
+  if (!win) return;
+  const { t0, t1 } = win;
+  const span = t1 - t0;
+
+  while (el.svg.childNodes.length > 1) el.svg.removeChild(el.svg.lastChild); // keep <defs>
+
+  const containerW = Math.max(620, el.wrap.clientWidth);
+  const fitPlotW = Math.max(160, containerW - GEO.GUTTER - GEO.RIGHT);
+  const plotW = plotWidthFor(span, fitPlotW);
+  const W = GEO.GUTTER + plotW + GEO.RIGHT;
+  const prevH = parseFloat(el.svg.getAttribute("height"));
+  const H = Math.min(SCAFFOLD_MAX_H,
+    Math.max(SCAFFOLD_MIN_H, isFinite(prevH) && prevH > 0 ? prevH : SCAFFOLD_MIN_H));
+  const plotBottom = H - GEO.AXIS_BOTTOM_H;
+
+  el.svg.setAttribute("width", W);
+  el.svg.setAttribute("height", H);
+  el.svg.style.width = W + "px";
+  el.svg.style.height = H + "px";
+
+  const x = (ms) => GEO.GUTTER + ((ms - t0) / span) * plotW;
+  const { ticks } = axisTicks(t0, t1, plotW);
+  const fmtTick = (t) =>
+    new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+  for (const t of ticks) {
+    const px = x(t);
+    el.svg.appendChild(svgEl("line", { class: "axis-tick", x1: px, y1: GEO.PLOT_TOP, x2: px, y2: plotBottom }));
+    const top = svgEl("text", { class: "axis-label", x: px + 3, y: GEO.AXIS_Y });
+    top.textContent = fmtTick(t);
+    el.svg.appendChild(top);
+    const bot = svgEl("text", { class: "axis-label", x: px + 3, y: plotBottom + 16 });
+    bot.textContent = fmtTick(t);
+    el.svg.appendChild(bot);
+  }
+  el.svg.appendChild(svgEl("line", { class: "axis-line", x1: GEO.GUTTER, y1: GEO.PLOT_TOP, x2: GEO.GUTTER, y2: plotBottom }));
+  el.svg.appendChild(svgEl("line", { class: "axis-line", x1: GEO.GUTTER, y1: plotBottom, x2: GEO.GUTTER + plotW, y2: plotBottom }));
+
+  // Placeholder rows: a name block in the gutter, a bar in the plot. Their widths
+  // are a fixed repeating pattern rather than anything derived — a skeleton that
+  // varied with a guess at the day would be inventing data, and the shimmer is
+  // what tells you these are not sessions.
+  const barW = [0.62, 0.38, 0.74, 0.5];
+  for (let y = GEO.PLOT_TOP + 10, i = 0; y + SCAFFOLD_ROW_H <= plotBottom; y += SCAFFOLD_ROW_H, i++) {
+    el.svg.appendChild(svgEl("rect", {
+      class: "skel skel-name", x: 14, y: y + 5, width: 96 + (i % 3) * 34, height: 10, rx: 3,
+    }));
+    el.svg.appendChild(svgEl("rect", {
+      class: "skel skel-bar", x: GEO.GUTTER + 10,
+      y, width: Math.max(48, (plotW - 20) * barW[i % barW.length]), height: 20, rx: 3,
+    }));
+  }
+}
+
+// The line view's plot is a canvas whose geometry is bound up in its renderer, so
+// its scaffold is the box at the size the chart will occupy, cleared to
+// transparent — style.css then shows the shimmer through it while .day-loading is
+// set. Reconstructing its axes here would duplicate renderConcurrencyChart's
+// whole layout for one frame of benefit.
+function drawAloftScaffold() {
+  const w = Math.max(320, el.wrap.clientWidth);
+  const h = Math.min(SCAFFOLD_MAX_H, Math.max(SCAFFOLD_MIN_H, el.canvas.clientHeight || SCAFFOLD_MIN_H));
+  const dpr = window.devicePixelRatio || 1;
+  el.canvas.width = Math.round(w * dpr);
+  el.canvas.height = Math.round(h * dpr);
+  el.canvas.style.width = w + "px";
+  el.canvas.style.height = h + "px";
+  const ctx = el.canvas.getContext("2d");
+  if (ctx) ctx.clearRect(0, 0, el.canvas.width, el.canvas.height);
+  chartHover = null; // the crosshair's paint closure belongs to a chart that is gone
+}
+
+// The projects view is a ranking, not a timeline: there is no axis to put up
+// early, so its scaffold is the rows themselves. The descending widths are the
+// only honest thing a ranking placeholder can say — that it is a ranking.
+const SCAFFOLD_PROJ_WIDTHS = [90, 72, 58, 44, 30];
+
+function drawProjectsScaffold() {
+  el.projects.classList.remove("enter");
+  el.projects.innerHTML = SCAFFOLD_PROJ_WIDTHS.map((w) =>
+    `<div class="proj-row skel-row">
+       <div class="skel-text skel-projname"></div>
+       <div class="skel-text skel-projbar" style="width:${w}%"></div>
+     </div>`).join("");
+}
+
 function renderTimeline(data) {
   const lanes = renderableLanes(data.lanes);
   // keep <defs> (first child), drop the rest
@@ -1364,6 +1757,7 @@ function renderTimeline(data) {
 
   const { t0, t1 } = windowBounds(data, lanes);
   const span = t1 - t0;
+  rememberPlotWindow(t0, t1); // the next day's scaffold is drawn at this shape
 
   // Horizontal scroll: the plot keeps a minimum density (px per hour) so long
   // windows grow WIDER than the viewport and scroll horizontally (the wrap has
@@ -2965,17 +3359,48 @@ function todayLocal() {
 // field means "today", which is the one thing the pure helper won't invent.
 function shiftDay(base, delta) { return stepISODate(base || todayLocal(), delta); }
 
-function reloadNow() { hidePopout(); loadTimeline(); }
-
-// stepDay walks the window a day in either direction: move the value, relabel,
-// refetch. Shared by the topbar arrows and their keyboard equivalents
-// (Ctrl+← / Ctrl+→) so neither path can drift from the other. Those chords
-// stay live while the calendar is open, so the grid follows the day out.
-function stepDay(delta) {
-  el.day.value = shiftDay(el.day.value, delta);
+// switchDay is the one path that changes the day on screen, and the whole point
+// of the transition work: it answers the input NOW — new label, new frame,
+// previous day's content cleared — and lets ctl deliver the data whenever it is
+// done. A day already in the cache skips the wait entirely and paints complete.
+//
+// Either way the day is revalidated behind whatever went up: a cached past day
+// because a session may have run past midnight into it since it was fetched,
+// today because it is still moving.
+function switchDay(iso) {
+  if (!Number.isFinite(parseISODate(iso))) return;
+  const rec = perfBegin("day-switch", iso);
+  el.day.value = iso;
   syncDayDisplay();
-  if (calendarOpen()) { calCursor = el.day.value; renderCalendar(); focusCursorCell(); }
-  reloadNow();
+  hidePopout();
+
+  const hit = cacheGet(iso);
+  if (hit) {
+    // The pill must date what is on SCREEN, not the moment it appeared there —
+    // painting a five-minute-old cache entry and calling it "Live" would be the
+    // same lie the stale chart used to tell.
+    lastUpdatedAt = hit.at;
+    perfPhase(rec, "paint", () => paintTimeline(iso, hit.text, hit.data, rec));
+    tickLive();
+    perfPaint(rec, "firstFrame");
+    perfEnd(rec, { source: "cache", bytes: hit.text.length, lanes: (hit.data.lanes || []).length });
+    loadTimeline(); // silent revalidation; repaints only if the bytes moved
+  } else {
+    perfPhase(rec, "scaffold", () => showDayScaffold(iso));
+    perfPaint(rec, "firstFrame");
+    loadTimeline({ rec }); // rec stays open and closes when the data paints
+  }
+  scheduleNeighborPrefetch(iso);
+}
+
+// stepDay walks the window a day in either direction. Shared by the topbar arrows
+// and their keyboard equivalents (Ctrl+← / Ctrl+→) so neither path can drift from
+// the other. Those chords stay live while the calendar is open, so the grid
+// follows the day out.
+function stepDay(delta) {
+  const iso = shiftDay(el.day.value, delta);
+  switchDay(iso);
+  if (calendarOpen()) { calCursor = iso; renderCalendar(); focusCursorCell(); }
 }
 
 // ---------------------------------------------------------------------------
@@ -3092,13 +3517,12 @@ function moveCursor(iso) {
   focusCursorCell();
 }
 
-// commitDay is the only path that changes the day the page is showing.
+// commitDay is the calendar's way in: close the popover, then hand the day to
+// switchDay, which owns everything about changing what is on screen.
 function commitDay(iso) {
   if (!Number.isFinite(parseISODate(iso))) return;
-  el.day.value = iso;
-  syncDayDisplay();
   closeCalendar(true);
-  reloadNow();
+  switchDay(iso);
 }
 
 // handleCalendarKey: while the popover is up it owns the keyboard, the way the
@@ -3280,17 +3704,28 @@ function init() {
   window.addEventListener("resize", () => {
     if (calendarOpen()) placeCalendar(); // the panel is anchored to a field that just moved
     if (resizeTimer) clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(() => { if (lastData) renderChartArea(lastData); }, 120);
+    resizeTimer = setTimeout(() => {
+      if (loadingDay) drawDayScaffold(loadingDay); // the frame is width-dependent too
+      else if (lastData) renderChartArea(lastData);
+    }, 120);
   });
 
   // live polling — no manual refresh controls. Settings land first: every
   // operator figure depends on them, and re-rendering the page a beat later with
   // different thresholds would be a visible flicker of the numbers.
-  loadSettings().then(loadTimeline);
+  //
+  // The boot path takes the same shape as a day switch, for the same reason: the
+  // frame is on screen in the first frame and the ~1s first fetch fills it in,
+  // instead of an empty page holding still until ctl is finished.
+  const boot = perfBegin("first-load", el.day.value);
+  perfPhase(boot, "scaffold", () => showDayScaffold(el.day.value));
+  perfPaint(boot, "firstFrame");
+  loadSettings().then(() => loadTimeline({ rec: boot }));
   loadPlan();
   loadSummaries();
   loadMemory();
-  timelineTimer = setInterval(loadTimeline, POLL_MS);
+  scheduleNeighborPrefetch(el.day.value);
+  timelineTimer = setInterval(() => loadTimeline({ rec: perfBegin("poll", el.day.value) }), POLL_MS);
   planTimer = setInterval(loadPlan, PLAN_POLL_MS);
   setInterval(loadSummaries, SUMMARIES_POLL_MS);
   setInterval(loadMemory, MEMORY_POLL_MS);
