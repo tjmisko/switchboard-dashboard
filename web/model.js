@@ -531,27 +531,111 @@
     return Math.max(0, treeBytes - agentBytes);
   }
 
-  // memoryRecord joins a lane to its /api/memory entry. The merged endpoint
+  // memoryRecords joins a lane to its /api/memory entries. The merged endpoint
   // namespaces session keys by provider exactly as lane.session_id is, so the
-  // lane's own id is the primary key; rawSessionId is tried as a fallback for a
-  // single-provider payload that was never namespaced. Null when there is none.
+  // lane's own id is the primary key; rawSessionId is tried for a single-provider
+  // payload that was never namespaced, and laneIdentity's "pid:<n>" for the
+  // stretch a session spends unidentified — it emits samples from the moment its
+  // process is discovered but receives its id only at its first agent hook, and a
+  // lane that has not been identified either is keyed the same way.
   //
-  // The last fallback is laneIdentity's "pid:<n>". A session emits memory
-  // samples from the moment its process is discovered but only receives its id
-  // at its first agent hook, so the producer keys that pre-identification
-  // stretch by pid — and a lane that has not been identified either is keyed the
-  // same way. Without this the two halves of one unidentified session would
-  // never meet, which is the state a freshly started or long-idle session sits
-  // in, and exactly when its memory is worth looking at.
-  function memoryRecord(lane, memory) {
+  // ALL matching records, not the first — one session can hold two of them at
+  // once. The id arrives at an agent hook and does not survive a daemon restart,
+  // so a session running across one emits samples under its real id, then under
+  // "pid:<n>" until its next hook, then under its id again. Taking the first
+  // match reported whichever stretch happened to be looked up first: measured on
+  // a live machine after a restart, an idle session had 1 sample under its id and
+  // 18 under its pid, and the hover showed the 1.
+  //
+  // A claim is one record plus the samples of it this lane is entitled to. The
+  // id-keyed record names this session and nothing else, so the lane takes it
+  // whole. The pid bucket is claimed by inference and is bounded to the lane's
+  // own span: a pid outlives the session wearing it, so over a long enough window
+  // one bucket can hold the unidentified stretches of two sessions that ran on
+  // that pid in turn, and only the overlap is this lane's.
+  function memoryRecords(lane, memory) {
     const sessions = memory && memory.sessions;
-    if (!lane || !sessions) return null;
-    if (lane.session_id && sessions[lane.session_id]) return sessions[lane.session_id];
-    const raw = rawSessionId(lane);
-    if (raw && sessions[raw]) return sessions[raw];
-    const byPid = laneIdentity(lane);
-    if (byPid && sessions[byPid]) return sessions[byPid];
-    return null;
+    if (!lane || !sessions) return [];
+    // The pid key is built here rather than taken from laneIdentity, which yields
+    // the session id whenever there is one — the very case that has to reach for
+    // the pid bucket as well.
+    const byPid = lane.pid != null ? "pid:" + lane.pid : null;
+    const out = [];
+    const seen = new Set();
+    for (const key of [lane.session_id, rawSessionId(lane), byPid]) {
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      const record = sessions[key];
+      if (!record) continue;
+      // A record reached by two keys is one claim, not two: an unidentified
+      // lane's identity IS its pid key.
+      if (out.some((c) => c.record === record)) continue;
+      const inferred = key === byPid && key !== lane.session_id;
+      out.push({ record, samples: claimedSamples(record, lane, inferred), inferred });
+    }
+    return out;
+  }
+
+  // claimedSamples is a record's series as this lane may read it — whole for a
+  // record it owns by id, bounded to the lane's span for one it claims by pid.
+  // An unusable lane bound fails open rather than dropping the series.
+  function claimedSamples(record, lane, inferred) {
+    const samples = memSamples(record);
+    if (!inferred) return samples;
+    const from = Date.parse(lane && lane.start);
+    const to = Date.parse(lane && lane.end);
+    if (!Number.isFinite(from) || !Number.isFinite(to)) return samples;
+    return samples.filter((s) => s.ts >= from && s.ts <= to);
+  }
+
+  // mergedSamples is the union of the claims' series in time order.
+  function mergedSamples(claims) {
+    if (claims.length <= 1) return claims.length ? claims[0].samples : [];
+    const all = [];
+    for (const claim of claims) all.push(...claim.samples);
+    return all.sort((a, b) => a.ts - b.ts);
+  }
+
+  // claimStat combines one figure across the claims describing a single session.
+  // Peaks take the maximum, which is exact. Averages are re-weighted by each
+  // claim's span, which is what time-weighted averages compose to. A claim taken
+  // whole reports the producer's scalars, keeping the pre-thinning accuracy that
+  // reading them off a bounded series would lose; a claim the span actually cut
+  // has to be re-derived from what survived, since the producer's figures then
+  // describe more than this lane may count. Where nothing spans any time, a plain
+  // mean is the only thing left to say.
+  function claimStat(claims, peakKey, avgKey) {
+    let peak = null;
+    let weighted = 0, span = 0;
+    const flat = [];
+    for (const claim of claims) {
+      const stat = claimFigures(claim, peakKey, avgKey);
+      if (stat.peak != null && (peak == null || stat.peak > peak)) peak = stat.peak;
+      if (stat.avg == null) continue;
+      flat.push(stat.avg);
+      if (stat.span > 0) {
+        weighted += stat.avg * stat.span;
+        span += stat.span;
+      }
+    }
+    let avg = null;
+    if (span > 0) avg = Math.round(weighted / span);
+    else if (flat.length) avg = Math.round(flat.reduce((x, y) => x + y, 0) / flat.length);
+    return { peak, avg };
+  }
+
+  // claimFigures is one claim's {peak, avg, span}: the producer's scalars when
+  // the claim is whole, re-derived over the surviving samples when it was cut.
+  function claimFigures(claim, peakKey, avgKey) {
+    const { record, samples } = claim;
+    const span = samples.length > 1 ? samples[samples.length - 1].ts - samples[0].ts : 0;
+    const cut = samples.length !== memSamples(record).length;
+    if (cut) {
+      const key = avgKey.startsWith("avg_agent") ? "agent" : "tree";
+      const stat = seriesStats(samples, key) || { peak: null, avg: null };
+      return { peak: stat.peak, avg: stat.avg, span };
+    }
+    return { peak: finiteOrNull(record[peakKey]), avg: finiteOrNull(record[avgKey]), span };
   }
 
   // memSamples parses a record's mem[] series into sorted epoch-ms samples,
@@ -608,12 +692,12 @@
   // an unusable timestamp. A lane whose every sample lands in the synthesized
   // tail has nothing evidenced left and returns null.
   function laneMemory(lane, memory) {
-    const record = memoryRecord(lane, memory);
-    if (!record) return null;
+    const records = memoryRecords(lane, memory);
+    if (!records.length) return null;
 
-    let agent = { peak: finiteOrNull(record.peak_agent_bytes), avg: finiteOrNull(record.avg_agent_bytes) };
-    let tree = { peak: finiteOrNull(record.peak_tree_bytes), avg: finiteOrNull(record.avg_tree_bytes) };
-    let samples = memSamples(record);
+    let agent = claimStat(records, "peak_agent_bytes", "avg_agent_bytes");
+    let tree = claimStat(records, "peak_tree_bytes", "avg_tree_bytes");
+    let samples = mergedSamples(records);
 
     const cut = suspectSinceMs(lane);
     const clipped = cut != null && samples.length > 0;
@@ -650,13 +734,13 @@
   // The window is clipped to the lane's trusted span for the same reason
   // laneMemory clips: samples inside a synthesized tail are not evidence.
   function memoryWindow(lane, memory, startMs, endMs) {
-    const record = memoryRecord(lane, memory);
-    if (!record || !(endMs >= startMs)) return null;
+    const records = memoryRecords(lane, memory);
+    if (!records.length || !(endMs >= startMs)) return null;
     const cut = suspectSinceMs(lane);
     const bound = cut != null && cut < endMs ? cut : endMs;
     if (!(bound >= startMs)) return null;
 
-    const samples = memSamples(record).filter((s) => s.ts >= startMs && s.ts <= bound);
+    const samples = mergedSamples(records).filter((s) => s.ts >= startMs && s.ts <= bound);
     if (!samples.length) return null;
     const agent = seriesStats(samples, "agent") || { peak: null, avg: null };
     const tree = seriesStats(samples, "tree") || { peak: null, avg: null };

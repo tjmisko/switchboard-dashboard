@@ -1237,6 +1237,89 @@ test("laneMemory should not join an unidentified lane to an unrelated pid", () =
   assert.equal(laneMemory(lane, { sessions: { "pid:9999": { peak_tree_bytes: 900 * MB } } }), null);
 });
 
+// A session that ran across a daemon restart holds BOTH keys: the id it had
+// before, and "pid:<n>" for the stretch after, until its next agent hook hands
+// the id back. Taking the first match reported one stretch and hid the other —
+// observed live as 1 sample under the id against 18 under the pid.
+function splitPayload() {
+  return {
+    sessions: {
+      ghost: {
+        peak_agent_bytes: 300 * MB,
+        avg_agent_bytes: 300 * MB,
+        peak_tree_bytes: 400 * MB,
+        avg_tree_bytes: 400 * MB,
+        mem: [
+          { ts: at(0), agent: 300 * MB, tree: 400 * MB },
+          { ts: at(10), agent: 300 * MB, tree: 400 * MB },
+        ],
+      },
+      "pid:4821": {
+        peak_agent_bytes: 900 * MB,
+        avg_agent_bytes: 800 * MB,
+        peak_tree_bytes: 1200 * MB,
+        avg_tree_bytes: 1000 * MB,
+        mem: [
+          { ts: at(20), agent: 900 * MB, tree: 1200 * MB },
+          { ts: at(50), agent: 700 * MB, tree: 900 * MB },
+        ],
+      },
+    },
+    pressure: [],
+  };
+}
+
+function splitLane() {
+  return { session_id: "ghost", pid: 4821, start: at(0), end: at(60), intervals: [] };
+}
+
+test("laneMemory should join an identified lane to its pid-keyed memory too", () => {
+  const mem = laneMemory(splitLane(), splitPayload());
+  assert.equal(mem.peakTreeBytes, 1200 * MB, "the peak is the higher of the two stretches");
+  assert.equal(mem.peakAgentBytes, 900 * MB);
+  assert.equal(mem.samples.length, 4, "both series, not whichever key matched first");
+});
+
+test("laneMemory should weight a blended average by each stretch's own span", () => {
+  // 400 MB held over 10 min, then 1000 MB over 30 — the long stretch has to
+  // dominate. A plain mean of the two averages would say 700 MB.
+  const mem = laneMemory(splitLane(), splitPayload());
+  assert.equal(mem.avgTreeBytes, 850 * MB, "(400*10 + 1000*30) / 40");
+  assert.equal(mem.avgAgentBytes, 675 * MB, "(300*10 + 800*30) / 40");
+});
+
+test("laneMemory should leave a single record's scalars exactly as the producer sent them", () => {
+  // The blend must be a no-op on the ordinary one-record case: the producer's
+  // figures are computed over the full series before it is thinned, so anything
+  // re-derived here would be the less accurate number.
+  const lane = ghostLane();
+  lane.suspect = false;
+  const mem = laneMemory(lane, memoryPayload());
+  assert.equal(mem.avgTreeBytes, 900 * MB);
+  assert.equal(mem.avgAgentBytes, 250 * MB);
+});
+
+test("laneMemory should not credit a lane with a pid bucket outside its own span", () => {
+  // A pid outlives the session wearing it. Over a long window one bucket can
+  // hold the unidentified stretches of two sessions that held that pid in turn,
+  // and the later one's 4 GB must not land on this lane's hover. The id-keyed
+  // record needs no such bound; only the pid claim is an inference.
+  const payload = splitPayload();
+  payload.sessions["pid:4821"].mem.push({ ts: at(200), agent: 4000 * MB, tree: 4000 * MB });
+  payload.sessions["pid:4821"].peak_tree_bytes = 4000 * MB;
+  const mem = laneMemory(splitLane(), payload);
+  assert.equal(mem.peakTreeBytes, 1200 * MB, "the out-of-span sample belongs to whoever held the pid next");
+  assert.equal(mem.samples.length, 4);
+});
+
+test("memoryWindow should re-derive over both stretches of a split session", () => {
+  // The interval tooltip reads the same union; a window landing in the pid-keyed
+  // stretch must not come back empty because the lane carries an id.
+  const win = memoryWindow(splitLane(), splitPayload(), ms(20), ms(50));
+  assert.equal(win.samples.length, 2);
+  assert.equal(win.peakTreeBytes, 1200 * MB);
+});
+
 function pressureSeries() {
   return [
     { ts: at(0), avail_bytes: 8 * GB, psi_avg10: 0.4, psi_stall_us: 1200 },
