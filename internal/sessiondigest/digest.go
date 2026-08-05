@@ -10,10 +10,7 @@
 package sessiondigest
 
 import (
-	"bufio"
-	"bytes"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -44,6 +41,13 @@ type Digest struct {
 	CommitSubjects     []string       `json:"commitSubjects,omitempty"`
 	ToolCounts         map[string]int `json:"toolCounts,omitempty"`
 	Subagents          []Subagent     `json:"subagents,omitempty"`
+	// Tokens is the session's token spend (tokens.go). It must NOT join
+	// promptFields in condense.go: the condenser never sees these numbers, so a
+	// change to them cannot change a summary, and hashing them would re-condense
+	// the entire archive the first time this field is backfilled. The coupling
+	// is unenforced, hence the comment. Nil on a record written before the field
+	// existed, which is why it is a pointer.
+	Tokens *TokenUsage `json:"tokens,omitempty"`
 }
 
 // Subagent is a delegated agent's identity, harvested verbatim. The JSON tags
@@ -73,31 +77,15 @@ var commitLine = regexp.MustCompile(`(?m)^\[[^\]\n]* ([0-9a-f]{7,40})\] (.+)$`)
 // or missing (older sessions predate it), Task/Agent tool_use records in the
 // transcript serve as the fallback roster.
 func BuildFromTranscript(transcriptPath, subagentsDir string) (Digest, error) {
-	f, err := os.Open(transcriptPath)
-	if err != nil {
-		return Digest{}, err
-	}
-	defer f.Close()
-
 	d := Digest{ToolCounts: map[string]int{}}
 	var aiTitle, customTitle string
 	var spawns []Subagent
+	tokens := newTokenAccumulator()
 	seenFile := map[string]bool{}
 	seenBashDesc := map[string]bool{}
 	seenCommit := map[string]bool{}
 
-	sc := bufio.NewScanner(f)
-	// Transcript lines can carry megabytes of pasted or base64 content.
-	sc.Buffer(make([]byte, 0, 1<<20), 64<<20)
-	for sc.Scan() {
-		line := bytes.TrimSpace(sc.Bytes())
-		if len(line) == 0 || line[0] != '{' {
-			continue
-		}
-		var e entry
-		if json.Unmarshal(line, &e) != nil {
-			continue
-		}
+	err := scanEntries(transcriptPath, func(e entry) {
 		if d.SessionID == "" && e.SessionID != "" {
 			d.SessionID = e.SessionID
 		}
@@ -116,6 +104,11 @@ func BuildFromTranscript(transcriptPath, subagentsDir string) (Digest, error) {
 			}
 		}
 
+		// Tokens are collected ahead of the switch on purpose: the cases below
+		// drop sidechain records, but a subagent's spend is still this session's
+		// spend, so the accumulator has to see them and bucket them itself.
+		tokens.add(e, e.IsSidechain)
+
 		switch e.Type {
 		case "ai-title":
 			if e.AITitle != "" {
@@ -131,7 +124,7 @@ func BuildFromTranscript(transcriptPath, subagentsDir string) (Digest, error) {
 			}
 		case "user":
 			if e.IsSidechain {
-				continue
+				return
 			}
 			blocks := e.blocks()
 			hasToolResult := false
@@ -148,7 +141,7 @@ func BuildFromTranscript(transcriptPath, subagentsDir string) (Digest, error) {
 				}
 			}
 			if e.IsMeta || hasToolResult {
-				continue
+				return
 			}
 			var parts []string
 			for _, b := range blocks {
@@ -161,7 +154,7 @@ func BuildFromTranscript(transcriptPath, subagentsDir string) (Digest, error) {
 			}
 		case "assistant":
 			if e.IsSidechain {
-				continue
+				return
 			}
 			for _, b := range e.blocks() {
 				switch b.Type {
@@ -195,10 +188,11 @@ func BuildFromTranscript(transcriptPath, subagentsDir string) (Digest, error) {
 				}
 			}
 		}
+	})
+	if err != nil {
+		return Digest{}, err
 	}
-	if err := sc.Err(); err != nil {
-		return Digest{}, fmt.Errorf("scan %s: %w", transcriptPath, err)
-	}
+	tokens.addSubagentTranscripts(subagentsDir)
 
 	d.Title = customTitle
 	if d.Title == "" {
@@ -215,6 +209,7 @@ func BuildFromTranscript(transcriptPath, subagentsDir string) (Digest, error) {
 	if len(d.ToolCounts) == 0 {
 		d.ToolCounts = nil
 	}
+	d.Tokens = tokens.result()
 	return d, nil
 }
 
