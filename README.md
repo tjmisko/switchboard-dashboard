@@ -40,15 +40,27 @@ invocation, so it loads instantly and runs offline.
   | key | does |
   | --- | --- |
   | <kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd> | cycle the plot forward / back through sessions → agents aloft → projects, wrapping at both ends |
-  | <kbd>Ctrl</kbd>+<kbd>L</kbd> / <kbd>Ctrl</kbd>+<kbd>R</kbd> | step the window one day back / forward |
-  | <kbd>c</kbd> | focus the date field and open the calendar |
+  | <kbd>Ctrl</kbd>+<kbd>←</kbd> / <kbd>Ctrl</kbd>+<kbd>→</kbd> | step the window one day back / forward |
+  | <kbd>c</kbd> | open the date popover |
+  | <kbd>3</kbd> | toggle the 30-minute average |
+  | <kbd>Shift</kbd>+<kbd>C</kbd> | toggle context switches |
+  | <kbd>Shift</kbd>+<kbd>F</kbd> | toggle the focus overlay |
 
-  The bare keys (<kbd>Tab</kbd>, <kbd>c</kbd>) stand down while a field has
-  focus, so the date input can still be typed in and tabbed out of; the
-  <kbd>Ctrl</kbd> chords work everywhere. <kbd>Alt</kbd> and <kbd>Meta</kbd>
-  chords are never intercepted. While the browser's own calendar popup is open
-  it owns the keyboard outright and the page sees no keys at all — dismiss it
-  with <kbd>Esc</kbd> to get the shortcuts back.
+  Each toggle belongs to one view — the 30-minute average to the aloft chart,
+  focus and context switches to the swimlanes — so its key takes you to that
+  view rather than changing something you can't see.
+
+  The bare keys stand down while a field is being edited; the <kbd>Ctrl</kbd>
+  chords work everywhere. <kbd>Alt</kbd>, <kbd>Meta</kbd> and
+  <kbd>Ctrl</kbd>+<kbd>Shift</kbd> chords are never intercepted.
+
+  Inside the date popover: <kbd>←</kbd><kbd>↑</kbd><kbd>↓</kbd><kbd>→</kbd> move
+  the cursor a day or a week, <kbd>PgUp</kbd>/<kbd>PgDn</kbd> page a month,
+  <kbd>t</kbd> jumps to today, <kbd>Enter</kbd> commits and <kbd>Esc</kbd>
+  closes. Nothing is loaded until you commit. It is the page's own calendar
+  rather than the native picker, which can't be themed, renders the date in the
+  browser locale where this page speaks ISO, and takes the keyboard away from
+  the page entirely while it is open.
 - **Live by default**: polls `/api/timeline` every ~3s and repaints on change,
   with a freshness indicator.
 

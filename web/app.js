@@ -247,6 +247,13 @@ const el = {
   dateField: document.getElementById("date-field"),
   prevDay: document.getElementById("prev-day"),
   nextDay: document.getElementById("next-day"),
+  calendar: document.getElementById("calendar"),
+  calGrid: document.getElementById("cal-grid"),
+  calYm: document.getElementById("cal-ym"),
+  calMonthName: document.getElementById("cal-monthname"),
+  calPrev: document.getElementById("cal-prev"),
+  calNext: document.getElementById("cal-next"),
+  calToday: document.getElementById("cal-today"),
   liveDot: document.getElementById("live-dot"),
   updated: document.getElementById("updated"),
   error: document.getElementById("error"),
@@ -798,29 +805,46 @@ function isTypingTarget(node) {
   return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
 }
 
+// toggleControl flips a footer checkbox from the keyboard and then lets the
+// control's own change listener do the rest — the keymap must not become a
+// second place where "what this toggle does" is written down.
+//
+// Each of these toggles belongs to one view (the 30-min average to the aloft
+// chart; focus and context switches to the swimlanes), and a key that silently
+// changed something invisible would read as a dead key. So the shortcut takes
+// you to the view that owns the toggle, which is what asking to see the thing
+// meant in the first place.
+function toggleControl(input, owningView) {
+  if (currentView !== owningView) setView(owningView);
+  input.checked = !input.checked;
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
 // handleShortcutKey is the page's whole keymap:
 //
 //   Tab / Shift+Tab   cycle the plot forward / back through the three views
-//   Ctrl+L / Ctrl+R   step the window one day left / right
-//   c                 open the date picker with the field in hand
+//   Ctrl+← / Ctrl+→   step the window one day back / forward
+//   c                 open the date popover
+//   3                 toggle the 30-minute average (aloft chart)
+//   Shift+C           toggle context switches (swimlanes)
+//   Shift+F           toggle the focus overlay (swimlanes)
 //
-// Each overrides a browser default the dashboard has a better use for. Tab's
-// focus walk goes because the three views ARE this page's windows; Ctrl+L and
-// Ctrl+R go because stepping the day is what this page is for, and the browser's
-// omnibox and reload are a keystroke away by other means. Alt and Meta chords
-// are left alone wholesale — those are the window manager's and the OS's.
+// Tab's focus walk is overridden because the three views ARE this page's
+// windows. Alt and Meta chords are left alone wholesale — those are the window
+// manager's and the OS's — and so is Ctrl+Shift, which is where browsers keep
+// their own second tier.
 //
-// The Ctrl chords fire even from inside a field: they are never text input, and
-// c hands focus TO the date input, so guarding them would strand the day arrows
-// the moment the calendar was opened. Bare keys yield to the field instead.
+// The Ctrl chords fire even from inside a field: they are never text input, so
+// nothing is lost by letting them through, and the day arrows stay live
+// wherever focus happens to be. Bare keys yield to a field being edited.
 function handleShortcutKey(ev) {
   if (ev.defaultPrevented || ev.altKey || ev.metaKey) return;
   const key = ev.key.length === 1 ? ev.key.toLowerCase() : ev.key;
 
   if (ev.ctrlKey) {
     if (ev.shiftKey) return;
-    if (key === "l") { ev.preventDefault(); stepDay(-1); return; }
-    if (key === "r") { ev.preventDefault(); stepDay(+1); return; }
+    if (key === "ArrowLeft") { ev.preventDefault(); stepDay(-1); return; }
+    if (key === "ArrowRight") { ev.preventDefault(); stepDay(+1); return; }
     return;
   }
 
@@ -837,7 +861,15 @@ function handleShortcutKey(ev) {
     return;
   }
 
-  if (key === "c" && !ev.shiftKey) { ev.preventDefault(); openDayPicker(); }
+  // c opens the calendar; Shift+C is a different key entirely (the swimlanes'
+  // context switches), which is why the shift state is read, not ignored.
+  if (key === "c") {
+    ev.preventDefault();
+    if (ev.shiftKey) toggleControl(el.optCtxSwitches, "sessions"); else toggleCalendar();
+    return;
+  }
+  if (key === "f" && ev.shiftKey) { ev.preventDefault(); toggleControl(el.optFocus, "sessions"); return; }
+  if (key === "3") { ev.preventDefault(); toggleControl(el.optSmooth, "line"); }
 }
 
 // renderTopline: three dominant figures framing AI's payoff, gross → net → rate.
@@ -2726,31 +2758,164 @@ function todayLocal() {
   const d = new Date();
   return new Date(d - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 }
-function shiftDay(base, delta) {
-  const d = new Date((base || todayLocal()) + "T00:00:00");
-  d.setDate(d.getDate() + delta);
-  return new Date(d - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
-}
+// The day arithmetic itself is model.js's, in UTC — see stepISODate. A blank
+// field means "today", which is the one thing the pure helper won't invent.
+function shiftDay(base, delta) { return stepISODate(base || todayLocal(), delta); }
 
 function reloadNow() { hidePopout(); loadTimeline(); }
 
-// stepDay walks the window a day in either direction: move the picker, relabel,
-// refetch. Shared by the topbar arrows and their keyboard equivalents (Ctrl+L /
-// Ctrl+R) so neither path can drift from the other.
+// stepDay walks the window a day in either direction: move the value, relabel,
+// refetch. Shared by the topbar arrows and their keyboard equivalents
+// (Ctrl+← / Ctrl+→) so neither path can drift from the other. Those chords
+// stay live while the calendar is open, so the grid follows the day out.
 function stepDay(delta) {
   el.day.value = shiftDay(el.day.value, delta);
   syncDayDisplay();
+  if (calendarOpen()) { calCursor = el.day.value; renderCalendar(); focusCursorCell(); }
   reloadNow();
 }
 
-// openDayPicker puts the date field in hand: focus first, so the field is the
-// keyboard's whether or not the calendar itself opens, then raise the native
-// picker. showPicker throws where it is unsupported or judged not
-// user-activated, and the focus alone is still worth having, so the throw is
-// swallowed rather than left to kill the handler.
-function openDayPicker() {
-  el.day.focus();
-  try { el.day.showPicker(); } catch (_) {}
+// ---------------------------------------------------------------------------
+// date popover
+//
+// Our own calendar rather than the native <input type="date"> picker: that one
+// cannot be themed to match anything, renders the date in the browser locale
+// where this page speaks ISO throughout, and — the reason it had to go — takes
+// the keyboard away from the page entirely while it is up, so every shortcut
+// below died the moment it opened.
+//
+// The grid comes from model.js's monthGrid (pure, six fixed weeks). The
+// keyboard cursor IS the browser's focus, moved from cell to cell over a
+// roving tabindex, so the focus ring, screen-reader announcement and our own
+// idea of "where the keyboard is" can never disagree.
+// ---------------------------------------------------------------------------
+
+const MONTH_NAMES = ["january", "february", "march", "april", "may", "june",
+  "july", "august", "september", "october", "november", "december"];
+
+let calCursor = null; // ISO day under the keyboard; null while closed
+
+function calendarOpen() { return !el.calendar.hidden; }
+
+function openCalendar() {
+  if (calendarOpen()) return;
+  calCursor = Number.isFinite(parseISODate(el.day.value)) ? el.day.value : todayLocal();
+  // The topbar doesn't stick, so `c` pressed from halfway down the page would
+  // anchor the panel to a trigger that isn't on screen. Bring the trigger back
+  // first — the popover belongs to it, and a floating panel with no visible
+  // anchor is worse than a small scroll.
+  const a = el.dateField.getBoundingClientRect();
+  if (a.top < 0 || a.bottom > window.innerHeight) {
+    el.dateField.scrollIntoView({ block: "nearest" });
+  }
+  el.calendar.hidden = false;
+  el.dateField.setAttribute("aria-expanded", "true");
+  renderCalendar();
+  placeCalendar();
+  focusCursorCell();
+}
+
+// closeCalendar hands focus back to the trigger, which is where the keyboard
+// came from — dropping it on <body> instead would cost a keyboard user their
+// place on the page. Skipped for an outside click, where focus is already
+// wherever the user just clicked.
+function closeCalendar(restoreFocus) {
+  if (!calendarOpen()) return;
+  el.calendar.hidden = true;
+  el.dateField.setAttribute("aria-expanded", "false");
+  calCursor = null;
+  if (restoreFocus) el.dateField.focus();
+}
+
+function toggleCalendar() {
+  if (calendarOpen()) closeCalendar(true); else openCalendar();
+}
+
+// placeCalendar centers the panel under the field, flipping above it when there
+// is no room below. Both axes are clamped to the viewport as the last step, so
+// the panel is on screen whatever the anchor is doing — a fixed-position panel
+// hung off a scrolled-away trigger would otherwise render half out of frame.
+function placeCalendar() {
+  const pad = 8, anchor = el.dateField.getBoundingClientRect();
+  const r = el.calendar.getBoundingClientRect();
+  let top = anchor.bottom + 6;
+  if (top + r.height > window.innerHeight - pad) top = anchor.top - r.height - 6;
+  const clamp = (v, max) => Math.max(pad, Math.min(v, Math.max(pad, max)));
+  el.calendar.style.left = clamp(anchor.left + anchor.width / 2 - r.width / 2,
+    window.innerWidth - r.width - pad) + "px";
+  el.calendar.style.top = clamp(top, window.innerHeight - r.height - pad) + "px";
+}
+
+// renderCalendar stamps the month the cursor is in. Every arrow press re-stamps
+// rather than patching classes: 42 buttons is nothing, and one code path for
+// "what the grid looks like" is worth more than the diff it saves.
+function renderCalendar() {
+  const grid = monthGrid(calCursor) || monthGrid(todayLocal());
+  const today = todayLocal();
+  el.calYm.textContent = grid.year + "-" + String(grid.month + 1).padStart(2, "0");
+  el.calMonthName.textContent = MONTH_NAMES[grid.month];
+  const frag = document.createDocumentFragment();
+  for (const cell of grid.cells) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "cal-day";
+    b.textContent = String(cell.day);
+    b.dataset.iso = cell.iso;
+    b.setAttribute("role", "gridcell");
+    b.setAttribute("aria-label", cell.iso);
+    if (!cell.inMonth) b.classList.add("out");
+    // ISO days sort as strings, so this is just "hasn't happened yet"
+    if (cell.iso > today) b.classList.add("future");
+    if (cell.iso === today) b.classList.add("today");
+    if (cell.iso === el.day.value) { b.classList.add("sel"); b.setAttribute("aria-selected", "true"); }
+    // roving tabindex: exactly one cell is in the tab order at a time
+    b.tabIndex = cell.iso === calCursor ? 0 : -1;
+    frag.appendChild(b);
+  }
+  el.calGrid.replaceChildren(frag);
+}
+
+function focusCursorCell() {
+  const cell = el.calGrid.querySelector('[data-iso="' + calCursor + '"]');
+  if (cell) cell.focus();
+}
+
+// moveCursor walks the keyboard cursor without committing anything. Landing
+// outside the month on display pages the grid to follow it.
+function moveCursor(iso) {
+  if (!Number.isFinite(parseISODate(iso))) return;
+  calCursor = iso;
+  renderCalendar();
+  focusCursorCell();
+}
+
+// commitDay is the only path that changes the day the page is showing.
+function commitDay(iso) {
+  if (!Number.isFinite(parseISODate(iso))) return;
+  el.day.value = iso;
+  syncDayDisplay();
+  closeCalendar(true);
+  reloadNow();
+}
+
+// handleCalendarKey: while the popover is up it owns the keyboard, the way the
+// native picker did — minus the dead end. Ctrl chords pass through (Ctrl+←/→
+// keeps stepping the day underneath, grid and all), function keys are left to
+// the browser, and every remaining printable key is swallowed so the page's
+// shortcuts can't fire from behind a modal dialog.
+function handleCalendarKey(ev) {
+  if (ev.altKey || ev.metaKey || ev.ctrlKey) return;
+  const k = ev.key;
+  if (k === "Escape") { ev.preventDefault(); closeCalendar(true); return; }
+  if (k === "Enter" || k === " ") { ev.preventDefault(); commitDay(calCursor); return; }
+  const days = k === "ArrowLeft" ? -1 : k === "ArrowRight" ? 1
+    : k === "ArrowUp" ? -7 : k === "ArrowDown" ? 7 : 0;
+  if (days) { ev.preventDefault(); moveCursor(stepISODate(calCursor, days)); return; }
+  if (k === "PageUp") { ev.preventDefault(); moveCursor(stepISOMonth(calCursor, -1)); return; }
+  if (k === "PageDown") { ev.preventDefault(); moveCursor(stepISOMonth(calCursor, +1)); return; }
+  if (k === "t") { ev.preventDefault(); moveCursor(todayLocal()); return; }
+  if (k === "Tab") { ev.preventDefault(); return; } // focus stays in the dialog
+  if (k.length === 1) ev.preventDefault();
 }
 
 function applyUrlParams() {
@@ -2763,9 +2928,9 @@ function applyUrlParams() {
   syncDayDisplay();
 }
 
-// syncDayDisplay mirrors the picker's ISO value (YYYY-MM-DD) into the visible
-// label. The native <input type="date"> renders in the browser locale, so we
-// hide it behind this label to keep the date reading as ISO everywhere.
+// syncDayDisplay mirrors the held ISO value (YYYY-MM-DD) into the visible
+// label on the trigger. The value lives in a hidden input so every reader can
+// still ask for el.day.value; this is the only thing that renders it.
 function syncDayDisplay() {
   el.dayDisplay.textContent = el.day.value || "—";
 }
@@ -2824,11 +2989,22 @@ function init() {
   el.themeToggle.addEventListener("click", toggleTheme);
   themeMql.addEventListener("change", () => { if (!storedTheme()) applyTheme(); });
 
-  el.day.addEventListener("change", () => { syncDayDisplay(); reloadNow(); });
   el.prevDay.addEventListener("click", () => stepDay(-1));
   el.nextDay.addEventListener("click", () => stepDay(+1));
-  // open the native calendar on click (the transparent picker overlays the field)
-  el.dateField.addEventListener("click", () => { try { el.day.showPicker(); } catch (_) {} });
+
+  // date popover: the field is its trigger, the grid commits on click, and the
+  // panel's own keydown owns the keyboard while it is up.
+  el.dateField.addEventListener("click", toggleCalendar);
+  el.calendar.addEventListener("keydown", handleCalendarKey);
+  el.calGrid.addEventListener("click", (ev) => {
+    const cell = ev.target.closest(".cal-day");
+    if (cell) commitDay(cell.dataset.iso);
+  });
+  // Paging keeps the panel open and commits nothing — it moves the cursor, and
+  // the cursor is what the grid is drawn around.
+  el.calPrev.addEventListener("click", () => moveCursor(stepISOMonth(calCursor, -1)));
+  el.calNext.addEventListener("click", () => moveCursor(stepISOMonth(calCursor, +1)));
+  el.calToday.addEventListener("click", () => commitDay(todayLocal()));
   el.optCtxSwitches.addEventListener("change", () => { if (lastData) renderTimeline(lastData); });
   el.optFocus.addEventListener("change", () => { if (lastData) renderTimeline(lastData); });
   el.optSmooth.addEventListener("change", () => {
@@ -2878,14 +3054,28 @@ function init() {
   });
   el.canvas.addEventListener("mouseleave", () => { if (chartHover && !sweeping()) chartHover.paint(null); hideTip(); });
 
-  // dismiss popout on outside click / Escape
+  // dismiss popout and calendar on outside click / Escape. The trigger is
+  // excluded from the calendar's outside test: its own click already toggles,
+  // and closing here too would make opening by click impossible.
   document.addEventListener("click", (ev) => {
     if (!el.popout.hidden && !el.popout.contains(ev.target)) hidePopout();
+    if (calendarOpen() && !el.calendar.contains(ev.target) && !el.dateField.contains(ev.target)) {
+      closeCalendar(false);
+    }
   });
   document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") hidePopout(); });
 
+  // The panel is anchored to the topbar, which scrolls away with the page: keep
+  // it seated while the trigger is still in frame, and let it go once it isn't.
+  window.addEventListener("scroll", () => {
+    if (!calendarOpen()) return;
+    const a = el.dateField.getBoundingClientRect();
+    if (a.bottom < 0 || a.top > window.innerHeight) closeCalendar(false); else placeCalendar();
+  }, { passive: true });
+
   let resizeTimer = null;
   window.addEventListener("resize", () => {
+    if (calendarOpen()) placeCalendar(); // the panel is anchored to a field that just moved
     if (resizeTimer) clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => { if (lastData) renderChartArea(lastData); }, 120);
   });
