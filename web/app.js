@@ -327,6 +327,172 @@ let currentView = (function () {
   } catch (e) {}
   return "sessions";
 })();
+// ---------------------------------------------------------------------------
+// profiling
+//
+// A day transition used to be one opaque wait, so the only question worth asking
+// about it — how much is ctl and how much is us? — had no answer short of a
+// devtools capture. This gives it one. Every transition is timed from the input
+// that provoked it to the frame the user actually sees, split into the phases
+// that can be moved: the fetch, the JSON parse, the operator-model recompute,
+// each renderer.
+//
+// Two rules make the numbers mean something. Timing ends after a real paint (two
+// nested rAFs), because a render function returning is not the user seeing
+// anything. And the record carries where the data came from — network, cache,
+// unchanged — because the same 30ms render is a different story behind a 1.2s
+// subprocess than behind a Map lookup.
+//
+// Off by default and nearly free when off: perfBegin returns null, every other
+// entry point takes that null and does nothing, so no records are built and the
+// cost is one test per phase. Turn it on with ?perf=1 or sbPerf.enable() (which
+// persists); read it with sbPerf.report(). Phases are also emitted as User
+// Timing measures, so a devtools capture taken with profiling on carries the
+// same breakdown inline on the flame chart.
+// ---------------------------------------------------------------------------
+const PERF_KEY = "sb-perf";
+const PERF_LOG_MAX = 60;
+
+let perfOn = (function () {
+  try {
+    if (new URLSearchParams(location.search).get("perf") === "1") return true;
+    return localStorage.getItem(PERF_KEY) === "1";
+  } catch (e) { return false; }
+})();
+
+const perfLog = []; // completed transitions, oldest first, capped at PERF_LOG_MAX
+
+// perfBegin opens a transition record, or returns null when profiling is off.
+function perfBegin(kind, detail) {
+  if (!perfOn) return null;
+  return { kind, detail: detail || "", t0: performance.now(), phases: {}, marks: {} };
+}
+
+// perfPhase times fn() into `name`, ACCUMULATING: a phase entered twice in one
+// transition reads as its total rather than its last.
+function perfPhase(rec, name, fn) {
+  if (!rec) return fn();
+  const t0 = performance.now();
+  try {
+    return fn();
+  } finally {
+    perfRecord(rec, name, t0);
+  }
+}
+
+// perfPhaseAsync is perfPhase for a phase that awaits. The sync one closes its
+// timer when the promise is CREATED, which for a fetch is instantly and wrongly.
+async function perfPhaseAsync(rec, name, fn) {
+  if (!rec) return fn();
+  const t0 = performance.now();
+  try {
+    return await fn();
+  } finally {
+    perfRecord(rec, name, t0);
+  }
+}
+
+function perfRecord(rec, name, t0) {
+  const dt = performance.now() - t0;
+  rec.phases[name] = (rec.phases[name] || 0) + dt;
+  try { performance.measure("sb:" + name, { start: t0, duration: dt }); } catch (e) {}
+}
+
+// perfMark stamps a moment (ms since the transition opened) for the boundaries
+// no single call wraps.
+function perfMark(rec, name) {
+  if (rec) rec.marks[name] = performance.now() - rec.t0;
+}
+
+// perfPaint stamps a mark only once the browser has actually painted: the first
+// rAF runs before the coming paint, the second after it.
+function perfPaint(rec, name) {
+  if (!rec) return;
+  requestAnimationFrame(() => requestAnimationFrame(() => perfMark(rec, name)));
+}
+
+// perfEnd closes the record after the paint it describes is on screen. `extra`
+// carries the facts that explain the number — where the data came from, how big
+// it was, how many lanes it drew. A record marked quiet is kept but not logged,
+// which is how the 3s poll stays in the statistics without filling the console.
+function perfEnd(rec, extra) {
+  if (!rec) return;
+  Object.assign(rec, extra || {});
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    rec.total = performance.now() - rec.t0;
+    perfLog.push(rec);
+    while (perfLog.length > PERF_LOG_MAX) perfLog.shift();
+    if (!rec.quiet) console.log(perfLine(rec));
+  }));
+}
+
+function perfLine(rec) {
+  const phases = Object.entries(rec.phases)
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => k + " " + v.toFixed(1));
+  const marks = Object.entries(rec.marks).map(([k, v]) => k + "@" + v.toFixed(0));
+  return `[perf] ${rec.kind} ${rec.detail} ${rec.total.toFixed(1)}ms`
+    + (rec.source ? ` <${rec.source}>` : "")
+    + (marks.length ? "  |  " + marks.join(" ") : "")
+    + (phases.length ? "  |  " + phases.join("  ") : "");
+}
+
+// perfPct: nearest-rank percentile over the finite values, to a tenth of a ms.
+function perfPct(xs, p) {
+  const v = xs.filter((x) => typeof x === "number" && isFinite(x)).sort((a, b) => a - b);
+  if (!v.length) return null;
+  return +v[Math.min(v.length - 1, Math.floor(p * v.length))].toFixed(1);
+}
+
+// sbPerf is the console handle. report() prints the rows, then the distribution
+// per kind — the tail is what this code was written to move, and a median that
+// looks fine while every fifth day-step takes two seconds is exactly the shape
+// the old transition had.
+const sbPerf = {
+  get log() { return perfLog.slice(); },
+  enable() { perfOn = true; try { localStorage.setItem(PERF_KEY, "1"); } catch (e) {} return "profiling on"; },
+  disable() { perfOn = false; try { localStorage.removeItem(PERF_KEY); } catch (e) {} return "profiling off"; },
+  clear() { perfLog.length = 0; return "cleared"; },
+  report() {
+    if (!perfLog.length) {
+      return perfOn ? "no transitions recorded yet" : "profiling is off — sbPerf.enable(), then navigate";
+    }
+    console.table(perfLog.map((r) => ({
+      kind: r.kind,
+      day: r.detail,
+      source: r.source || "",
+      total: +r.total.toFixed(1),
+      firstFrame: r.marks.firstFrame != null ? +r.marks.firstFrame.toFixed(1) : null,
+      fetch: r.phases.fetch != null ? +r.phases.fetch.toFixed(1) : null,
+      parse: r.phases.parse != null ? +r.phases.parse.toFixed(1) : null,
+      render: r.phases.render != null ? +r.phases.render.toFixed(1) : null,
+      lanes: r.lanes != null ? r.lanes : null,
+      kb: r.bytes != null ? Math.round(r.bytes / 1024) : null,
+    })));
+    const byKind = new Map();
+    for (const r of perfLog) {
+      if (!byKind.has(r.kind)) byKind.set(r.kind, []);
+      byKind.get(r.kind).push(r);
+    }
+    const rows = {};
+    for (const [kind, rs] of byKind) {
+      // first frame falls back to total for a transition that had nothing to
+      // scaffold (a poll repaint IS its own first frame).
+      const ff = rs.map((r) => (r.marks.firstFrame != null ? r.marks.firstFrame : r.total));
+      rows[kind] = {
+        n: rs.length,
+        "first frame p50": perfPct(ff, 0.5),
+        "first frame p95": perfPct(ff, 0.95),
+        "data p50": perfPct(rs.map((r) => r.total), 0.5),
+        "data p95": perfPct(rs.map((r) => r.total), 0.95),
+      };
+    }
+    console.table(rows);
+    return `${perfLog.length} transitions`;
+  },
+};
+window.sbPerf = sbPerf;
+
 function smoothEnabled() { return !el.optSmooth || el.optSmooth.checked; }
 
 // syncSmoothLegend collapses the legend's 30-min-average entry in step with its
@@ -609,14 +775,37 @@ function computeOperatorTime(data) {
 // render: top-level
 // ---------------------------------------------------------------------------
 
-function render(data) {
-  const op = computeOperatorTime(data);
-  renderTopline(data.summary || {}, op);
-  renderStatusKey(data.summary || {});
-  renderProviderKey(data.lanes || []);
-  renderChartArea(data);
-  renderAttentionCard(data.summary || {}, op);
-  renderCostCard(data, lastPlan);
+// operatorTime memoises computeOperatorTime on the identity of the parse it was
+// computed from. The figure is wanted twice per render — once for the topline
+// and the cards, once inside renderTimeline for the operator lane — and on a busy
+// day it is 10ms of interval algebra apiece. The same parse asked twice now gets
+// the same answer for free; a new parse (a poll that changed, another day) misses
+// and recomputes. Also pays off on the toggle repaints, which re-run
+// renderTimeline against lastData without the data having moved.
+let opCacheKey = null, opCacheVal = null;
+function operatorTime(data) {
+  if (opCacheKey === data) return opCacheVal;
+  opCacheKey = data;
+  opCacheVal = computeOperatorTime(data);
+  return opCacheVal;
+}
+
+// render draws every data-dependent region from one parse. `rec` is the optional
+// profiling record (see the profiling section); the phase names it collects are
+// the vocabulary sbPerf.report() speaks, so they are chosen to be the units a
+// person would actually try to make faster.
+function render(data, rec) {
+  const op = perfPhase(rec, "operator", () => operatorTime(data));
+  perfPhase(rec, "topline", () => renderTopline(data.summary || {}, op));
+  perfPhase(rec, "keys", () => {
+    renderStatusKey(data.summary || {});
+    renderProviderKey(data.lanes || []);
+  });
+  perfPhase(rec, "chart", () => renderChartArea(data));
+  perfPhase(rec, "cards", () => {
+    renderAttentionCard(data.summary || {}, op);
+    renderCostCard(data, lastPlan);
+  });
 }
 
 // renderChartArea draws whichever chart the view switcher selects into the plot
@@ -1188,7 +1377,7 @@ function renderTimeline(data) {
 
   // operator free-time lane occupies the top row, above all project groups.
   const opTop = GEO.PLOT_TOP;
-  const op = computeOperatorTime(data);
+  const op = operatorTime(data);
 
   // group lanes by project; within each group, PACK time-serializable sessions
   // onto shared rows (greedy interval partitioning). A group that is too small to
