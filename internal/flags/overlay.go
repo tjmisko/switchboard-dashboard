@@ -175,11 +175,10 @@ func mergeLanes(dst, src timeline.Lane) timeline.Lane {
 	dst.Labels = sortSpans(append(dst.Labels, src.Labels...))
 	dst.Names = sortSpans(append(dst.Names, src.Names...))
 
-	dst.CostUSD += src.CostUSD
-	dst.TokIn += src.TokIn
-	dst.TokOut += src.TokOut
-	dst.TokCacheRead += src.TokCacheRead
-	dst.TokCacheCreate += src.TokCacheCreate
+	// Numeric and billing figures route through the timeline package so the strip
+	// rejoined lane keeps the same structured cost/usage semantics as the rest of
+	// the envelope (CostUSD is the deprecated alias of Cost.APIEquivalentUSD).
+	dst = timeline.MergeLanes(dst, src)
 
 	if earlier(src.Start, dst.Start) {
 		dst.Start = src.Start
