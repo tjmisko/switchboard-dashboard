@@ -40,13 +40,13 @@
     </div>
 
     <div class="nav">
-      <button id="prev-day" class="icon" title="previous day">‹</button>
-      <span class="date-field" id="date-field">
+      <button id="prev-day" class="icon" title="previous day (Ctrl+L)">‹</button>
+      <span class="date-field" id="date-field" title="press c to open the calendar">
         <span class="date-text" id="day-display">—</span>
         <svg class="date-ico" viewBox="0 0 16 16" width="13" height="13" fill="currentColor" aria-hidden="true"><path d="M3.5 0a.5.5 0 0 1 .5.5V1h8V.5a.5.5 0 0 1 1 0V1h1a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V3a2 2 0 0 1 2-2h1V.5a.5.5 0 0 1 .5-.5M1 4v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V4z"/></svg>
         <input type="date" id="day" aria-label="date" />
       </span>
-      <button id="next-day" class="icon" title="next day">›</button>
+      <button id="next-day" class="icon" title="next day (Ctrl+R)">›</button>
     </div>
 
     <button id="theme-toggle" class="icon theme-toggle" title="toggle theme" aria-label="toggle color theme">
@@ -98,7 +98,7 @@
         <div class="chart-stats" id="chart-stats"></div>
       </div>
       <div class="chart-footer">
-        <div class="viewseg" id="viewseg" role="group" aria-label="chart view">
+        <div class="viewseg" id="viewseg" role="group" aria-label="chart view — Tab and Shift+Tab cycle the views" title="Tab / Shift+Tab to cycle views">
           <span class="viewseg-glider" id="viewseg-glider" aria-hidden="true"></span>
           <button id="view-sessions" class="viewseg-btn" type="button" aria-pressed="true" title="session swimlanes">sessions</button>
           <button id="view-line" class="viewseg-btn" type="button" aria-pressed="false" title="agents working over time">agents aloft</button>

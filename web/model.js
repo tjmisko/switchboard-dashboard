@@ -912,6 +912,22 @@
     return null;
   }
 
+  // VIEW_ORDER is the left-to-right order of the footer's view switcher, and so
+  // the order Tab / Shift+Tab walk. Keep it in step with the buttons in
+  // index.html: the keyboard must land where the eye expects the glider to go.
+  const VIEW_ORDER = ["sessions", "line", "projects"];
+
+  // stepView returns the view `delta` places along VIEW_ORDER, wrapping at both
+  // ends so the cycle has no dead key — Tab past projects lands back on
+  // sessions, Shift+Tab off sessions lands on projects. An unrecognized current
+  // view is treated as the default (sessions), so a corrupted `sb-view` costs
+  // one keypress rather than wedging the cycle.
+  function stepView(view, delta) {
+    const from = VIEW_ORDER.indexOf(normalizeView(view) || "sessions");
+    const n = VIEW_ORDER.length;
+    return VIEW_ORDER[(((from + delta) % n) + n) % n];
+  }
+
   // scaleGeometry resolves the footer's px/hour setting against the window on
   // screen. The plot never draws narrower than its container — a short window
   // would otherwise shrink into a corner and leave dead space — so the density
@@ -949,5 +965,6 @@
     projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs, suspectTailMs,
     fmtBytes, spawnedBytes, laneMemory, memoryWindow, pressureWindow,
     summaryTasks, summaryBodyHTML, summaryHintText, summaryCardHasContent, normalizeView,
+    VIEW_ORDER, stepView,
   };
 });
