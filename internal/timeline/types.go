@@ -29,6 +29,29 @@ type Timeline struct {
 	Activity       []Activity      `json:"activity,omitempty"`
 	PlanWindow     *PlanWindow     `json:"plan_window,omitempty"`
 	ProviderErrors []ProviderError `json:"provider_errors,omitempty"`
+	FlagsApplied   []FlagApplied   `json:"flags_applied,omitempty"`
+}
+
+// FlagApplied records one operator flag whose repair changed the lanes above.
+//
+// It exists because Summary is deliberately NOT recomputed when a flag repairs a
+// lane. Re-deriving attention_union and its siblings means reimplementing the
+// producer's interval algebra against a set of lanes it never saw, and a total
+// that is half-corrected is worse than one that is uncorrected and says so.
+// Instead the aggregates keep describing the data as the producer reported it,
+// and this list is what a consumer shows beside them — the same treatment the
+// schema prescribes for suspect_duration: put the excluded quantity next to the
+// total rather than hiding it inside.
+//
+// RemovedNS is the lane wall-clock the repair took out of Lanes, so a UI can say
+// "3 lanes repaired, 9h12m removed" without re-walking the intervals itself.
+type FlagApplied struct {
+	Key       string `json:"key"`
+	SessionID string `json:"session_id,omitempty"`
+	LaneStart string `json:"lane_start"`
+	Action    string `json:"action"`
+	Verdict   string `json:"verdict,omitempty"`
+	RemovedNS int64  `json:"removed_ns,omitempty"`
 }
 
 // Lane is one session's bar. Identity is keyed by session_id (falling back to
