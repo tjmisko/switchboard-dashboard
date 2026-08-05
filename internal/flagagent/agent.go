@@ -118,7 +118,16 @@ The schema is documented at ~/Projects/switchboard/docs/history-schema.md — re
 it before concluding anything.
 
 A reader groups events by session_id, orders them by timestamp, and turns
-consecutive transitions into intervals. Known ways that goes wrong:
+consecutive transitions into intervals.
+
+The failure modes below are THIS DASHBOARD'S working vocabulary, written for you
+here. They are not terminology from switchboard's documentation or source, and
+you must not cite them as though they were. More generally: attribute a claim to
+a file only when you have actually read that file in this session, and quote what
+it says. An upstream report is worthless if a maintainer opens the file you cited
+and does not find what you said was in it.
+
+Known ways it goes wrong:
 
 - GHOST LANE: a trailing event arrives after the session_end that closed the
   lane, so the reader opens a second lane nothing ever closes and stretches it to
