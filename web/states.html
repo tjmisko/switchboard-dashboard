@@ -118,8 +118,10 @@
       <section class="sec" id="timeline" data-num="01" data-rail="the six lane colors">
         <h3>The six lane colors</h3>
         <p>
-          Every bar on the <a href="./">dashboard</a> is one of six statuses. The whole vocabulary;
-          the rest of the page is where a color comes from.
+          Every bar on the <a href="./">dashboard</a> is one of six statuses. This is not dashboard
+          slang — it is the wire vocabulary of the
+          <a href="https://github.com/tjmisko/switchboard-dashboard/blob/main/docs/provider-contract.md">provider contract</a>,
+          which every source emits. The rest of the page is where a color comes from.
         </p>
         <div class="lanemap" id="lanemap"></div>
         <p class="lane-foot">
@@ -291,7 +293,9 @@
               <p>
                 A tool that is merely running and one waiting for your approval leave <b>the same
                 mark</b> in the log. Only a permission notification separates them, and it fires
-                once, on the edge. Three invariants follow:
+                once, on the edge. This is the general case, not a quirk of one agent: on Codex a
+                gated call is byte-identical to a running one with no recovery from the file at
+                all. Three invariants follow:
               </p>
               <ol class="fallout">
                 <li><b>Blocked cannot be rebuilt by reading files</b>, so it is the one state that has to survive a daemon restart.</li>
@@ -308,23 +312,26 @@
         <h3>How it finds out</h3>
         <p>
           Switchboard observes; it never asks an agent how it is doing. Three sources, and the
-          source bounds what evidence from it can prove. This is the contract a provider adapter
-          satisfies; Claude is the one instantiation shipping today.
+          source bounds what evidence from it can prove. The sources are the general shape; what
+          fills them is per agent, and two agent kinds ship today.
         </p>
 
         <div class="sources" id="sources"></div>
 
         <p>
-          So <b>a provider with no permission notification can never paint red</b> — no log
-          distinguishes a gated tool from a running one — and reaches only green, orange and gray.
-          A source with no status concept at all is still legitimate: the
-          <a href="https://github.com/tjmisko/switchboard-dashboard/blob/main/docs/provider-contract.md">provider contract</a>
-          accepts one <code>working</code> interval spanning the lifetime.
+          So <b>a provider that announces nothing about permission can never paint red</b> — no log
+          distinguishes a gated tool from a running one. Of the writer-driven colors it reaches
+          only green, orange and gray; suspended and hidden still work, because those are liveness
+          rungs above the machine and read the process rather than the agent. That is a tier limit
+          rather than a bug, and a source with no status concept at all is legitimate too: the
+          contract accepts one <code>working</code> interval spanning the lifetime.
         </p>
 
         <p class="ev-lead">
-          The thirteen kinds Claude supplies. Hover for meaning; the two marked
-          <span class="key-mark">key</span> are load-bearing.
+          The thirteen kinds the Claude adapter supplies. Hover for meaning; the two marked
+          <span class="key-mark">key</span> are load-bearing. Codex announces the same events but
+          does not persist approvals, so it cannot supply the sound exit from Blocked and falls
+          back to the cap.
         </p>
         <div class="evgrid" id="evgrid"></div>
 
@@ -332,7 +339,7 @@
           <p class="cap">two rules that apply from every state</p>
           <ul>
             <li><code>Gone</code> → <span class="pill pill-dead">Dead</span> — the process exited, or the subagent was force-closed.</li>
-            <li><code>SessionRotated</code> → <span class="pill pill-gray">Unknown</span> — a <code>/clear</code> or a fork changed the session id under the same pid, retiring every prompt recorded against the old one.</li>
+            <li><code>SessionRotated</code> → <span class="pill pill-gray">Unknown</span> — a context reset or fork changed the session id under the same pid, retiring every prompt recorded against the old one.</li>
           </ul>
         </div>
       </section>

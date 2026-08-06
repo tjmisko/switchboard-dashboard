@@ -88,7 +88,7 @@ const STATES = [
     id: "Interrupted",
     folds: "orange",
     group: "done",
-    short: "You stopped the turn (Esc), or a prompt was declined.",
+    short: "You stopped the turn, or a prompt was declined.",
     body:
       "Folds the same as Ended; the distinction is forensic. It separates a decline from an " +
       "approve, which are otherwise indistinguishable.",
@@ -122,7 +122,7 @@ const SOURCES = [
     label: "notification",
     badge: "notify",
     tag: "the agent tells us",
-    claude: "Claude Code hooks",
+    claude: "hooks — Claude and Codex both",
     strength: "Authoritative, and it names the writer it belongs to.",
     weakness: "Edge-triggered: fires once and never repeats. A lost one is lost.",
   },
@@ -131,7 +131,7 @@ const SOURCES = [
     label: "the agent's log",
     badge: "log",
     tag: "we read what the writer wrote",
-    claude: "the session transcript's tail",
+    claude: "Claude's transcript tail; Codex's rollout file",
     strength: "Level-triggered: re-readable on every tick, and survives a restart.",
     weakness: "Ambiguous by construction — the same bytes fit more than one state.",
   },
@@ -197,7 +197,7 @@ const EVIDENCE = [
   { id: "Gone", src: "clock/liveness", universal: "Dead", gloss: "Proof the writer no longer exists." },
   {
     id: "SessionRotated", src: "clock/liveness", universal: "Unknown",
-    gloss: "A /clear or fork changed the session id under the same pid, retiring every prompt recorded against it.",
+    gloss: "A context reset or fork changed the session id under the same pid, retiring every prompt recorded against it.",
   },
 ];
 
