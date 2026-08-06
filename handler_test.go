@@ -107,6 +107,97 @@ func TestHandleTimeline_usesServerDirWhenQueryDirAbsent(t *testing.T) {
 	mustContainPair(t, args, "--dir", "/server/default")
 }
 
+// countingStub writes one line per invocation to a counter file, so a test can
+// assert how many provider subprocesses a sequence of requests actually spawned.
+func countingStub(t *testing.T, counter string) string {
+	t.Helper()
+	return writeStub(t, "#!/bin/sh\necho run >> "+counter+"\nprintf '%s' '"+fixtureJSON+"'\n")
+}
+
+func countRuns(t *testing.T, counter string) int {
+	t.Helper()
+	raw, err := os.ReadFile(counter)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0
+		}
+		t.Fatalf("read counter: %v", err)
+	}
+	return len(strings.Fields(string(raw)))
+}
+
+// The provider spawn is ~1.5s and flat in payload size, so re-answering a
+// finished day from memory is the whole point of the cache.
+func TestHandleTimeline_shouldSpawnTheProviderOnlyOnceWhenAClosedDayIsRequestedTwice(t *testing.T) {
+	counter := filepath.Join(t.TempDir(), "runs.txt")
+	srv := &Server{Ctl: countingStub(t, counter)}
+
+	var bodies []string
+	for i := 0; i < 2; i++ {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/timeline?day=2026-06-20", nil)
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Result().StatusCode != http.StatusOK {
+			t.Fatalf("request %d: status = %d, want 200", i, rec.Result().StatusCode)
+		}
+		bodies = append(bodies, strings.TrimSpace(rec.Body.String()))
+	}
+
+	if n := countRuns(t, counter); n != 1 {
+		t.Fatalf("provider spawned %d times for two requests of one closed day, want 1", n)
+	}
+	if bodies[0] != bodies[1] {
+		t.Fatalf("cached body differs from the live one:\n live: %q\ncached: %q", bodies[0], bodies[1])
+	}
+	if bodies[1] != fixtureJSON {
+		t.Fatalf("cached body = %q, want the fixture verbatim", bodies[1])
+	}
+}
+
+// Today is the window the 3s poll watches; caching it would freeze the
+// dashboard's whole point.
+func TestHandleTimeline_shouldSpawnTheProviderEveryTimeForTodayAndForTheBareLiveWindow(t *testing.T) {
+	today := time.Now().Format("2006-01-02")
+	for _, tc := range []struct{ name, query string }{
+		{"explicit today", "/api/timeline?day=" + today},
+		{"bare live window", "/api/timeline"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			counter := filepath.Join(t.TempDir(), "runs.txt")
+			srv := &Server{Ctl: countingStub(t, counter)}
+			for i := 0; i < 3; i++ {
+				rec := httptest.NewRecorder()
+				srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tc.query, nil))
+				if rec.Result().StatusCode != http.StatusOK {
+					t.Fatalf("request %d: status = %d, want 200", i, rec.Result().StatusCode)
+				}
+			}
+			if n := countRuns(t, counter); n != 3 {
+				t.Fatalf("provider spawned %d times, want 3 — the live window must never be cached", n)
+			}
+		})
+	}
+}
+
+// A failing day must not poison the cache: the next request has to retry the
+// provider rather than being handed a 502 from memory.
+func TestHandleTimeline_shouldNotCacheAFailedClosedDay(t *testing.T) {
+	counter := filepath.Join(t.TempDir(), "runs.txt")
+	stub := writeStub(t, "#!/bin/sh\necho run >> "+counter+"\necho 'boom' >&2\nexit 1\n")
+	srv := &Server{Ctl: stub}
+
+	for i := 0; i < 2; i++ {
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/timeline?day=2026-06-20", nil))
+		if rec.Result().StatusCode != http.StatusBadGateway {
+			t.Fatalf("request %d: status = %d, want 502", i, rec.Result().StatusCode)
+		}
+	}
+	if n := countRuns(t, counter); n != 2 {
+		t.Fatalf("provider spawned %d times, want 2 — a failure must not be cached", n)
+	}
+}
+
 func TestHandleTimeline_nonZeroExitYields502(t *testing.T) {
 	stub := writeStub(t, "#!/bin/sh\necho 'boom: bad day arg' >&2\nexit 3\n")
 	srv := &Server{Ctl: stub}

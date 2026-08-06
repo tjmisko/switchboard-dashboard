@@ -238,6 +238,11 @@ main { padding: 16px 18px 36px; }
 
 /* provider key: shown only in merged multi-provider mode, below the status key. */
 .provider-key { display: flex; flex-wrap: wrap; gap: 8px 12px; margin-top: 11px; padding-top: 10px; border-top: 1px solid var(--border); }
+/* `display: flex` above outranks the [hidden] attribute's UA `display: none`,
+   so renderProviderKey's `hidden = true` never actually hid this — the legend
+   stayed up in the single-provider view it is meant to be absent from, and sat
+   there showing the outgoing day's lane counts through a window change. */
+.provider-key[hidden] { display: none; }
 .provider-key .pk { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--fg-muted); }
 .provider-key .pk-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
 .provider-key .pk-name { color: var(--fg); }
@@ -911,3 +916,72 @@ main { padding: 16px 18px 36px; }
 }
 .footer .fv { color: var(--fg-muted); min-width: 0; }
 .footer code { font-family: var(--mono); color: var(--fg-muted); }
+
+/* ---------- the pending window ----------
+   Between committing to a day and its data arriving sits a ~1.5s provider
+   subprocess (the render itself is ~22ms). The page holds its frame through
+   that gap and states nothing it might have to take back: figures belonging to
+   the outgoing day fade out rather than sitting under the incoming day's date,
+   and the plot area carries ghost rows in place of the chart.
+
+   Everything here is opacity and transform only, so the whole pending state is
+   composited — it must not cost layout while the fetch is in flight. */
+
+/* Ghost blocks: structure without data. Every figure the pending window shows
+   is one of these — never a dimmed real number, which would still be a readable
+   claim about a day we have not fetched. The pulse is opacity only, so the whole
+   skeleton is composited and costs no layout while the fetch is in flight. */
+.skeleton .ghost,
+.ghost-text,
+.proj-row.ghost-row .ghost-fill {
+  fill: var(--border-soft);
+  background-color: var(--border-soft);
+  animation: ghost-pulse 1180ms ease-in-out infinite;
+  animation-delay: calc(var(--ghost-i, 0) * 90ms);
+}
+
+/* .ghost-text stands in for a line of type, so it has to carry its own box —
+   the elements it replaces (.th-val, .sk-name, .box-label) size themselves to
+   text that is no longer there. */
+.ghost-text {
+  display: block;
+  border-radius: 4px;
+  color: transparent;
+}
+.topline .th-val.ghost-text { height: 42px; margin-bottom: 2px; }
+.topline .th-key.ghost-text { height: 9px; margin-top: 11px; border-radius: 3px; }
+.status-key .sk .ghost-text,
+.card .ghost-text { height: 10px; }
+.card .card-ghost-line { margin-top: 11px; }
+.card .box-label.ghost-text { height: 9px; }
+
+/* The date must NOT be ghosted — it is the one thing on screen that is already
+   true about the window being fetched, and answering instantly is the whole
+   point of the exercise. */
+.window-pending .date-field { opacity: 1; }
+
+/* Figures fade in when they land, so a settle reads as an arrival rather than a
+   flash. The chart has the sweep for this; the numbers get the transition. */
+.topline, .boxes { transition: opacity 200ms ease-in; }
+
+@keyframes ghost-pulse {
+  0%, 100% { opacity: 0.30; }
+  50%      { opacity: 0.62; }
+}
+
+/* projects-view skeleton: the same row rhythm as a real ranking */
+.proj-row.ghost-row { pointer-events: none; }
+.proj-row.ghost-row .ghost-text { min-width: 84px; }
+.proj-row.ghost-row .proj-track { position: relative; }
+.proj-row.ghost-row .ghost-fill { display: block; height: 100%; border-radius: 3px; }
+
+/* A window that failed has an error banner above it; a shimmer still running
+   underneath would read as a request still in flight. */
+.timeline-section.window-failed .skeleton .ghost { animation: none; opacity: 0.3; }
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton .ghost,
+  .ghost-text,
+  .proj-row.ghost-row .ghost-fill { animation: none; opacity: 0.42; }
+  .topline, .boxes { transition: none; }
+}
