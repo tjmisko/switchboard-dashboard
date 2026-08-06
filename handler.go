@@ -20,6 +20,7 @@ import (
 // Embed only the served assets (not web/*.test.js, which is dev-only).
 //
 //go:embed web/index.html web/model.js web/app.js web/style.css web/favicon.svg
+//go:embed web/states.html web/states.css web/states.js web/states-model.js
 var webFS embed.FS
 
 // DefaultPlanPath is the cached OAuth plan-usage file Claude Code writes while a

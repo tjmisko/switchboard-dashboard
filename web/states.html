@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark light" />
+  <title>Switchboard · reading the board</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="states.css" />
+  <!-- Same pre-paint theme resolution as index.html, and for the same two
+       reasons: no flash, and darkreader-lock so the extension leaves our own
+       dark theme alone. states.js keeps both in sync when the toggle is used. -->
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("sb-theme");
+        if (t !== "light" && t !== "dark") {
+          t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        }
+        document.documentElement.setAttribute("data-theme", t);
+        if (t === "dark") {
+          var m = document.createElement("meta");
+          m.name = "darkreader-lock";
+          document.head.appendChild(m);
+        }
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body class="guide-body">
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot"></span>
+      <h1>Switchboard</h1>
+      <span class="sep">/</span>
+      <span class="muted">reading the board</span>
+    </div>
+
+    <a class="backlink" href="./" title="back to the activity dashboard">
+      <span aria-hidden="true">←</span> dashboard
+    </a>
+
+    <button id="theme-toggle" class="icon theme-toggle" title="toggle theme" aria-label="toggle color theme">
+      <svg class="ico-sun" viewBox="0 0 16 16" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="M8 11a3 3 0 1 1 0-6 3 3 0 0 1 0 6m0 1a4 4 0 1 0 0-8 4 4 0 0 0 0 8M8 0a.5.5 0 0 1 .5.5v2a.5.5 0 0 1-1 0v-2A.5.5 0 0 1 8 0m0 13a.5.5 0 0 1 .5.5v2a.5.5 0 0 1-1 0v-2A.5.5 0 0 1 8 13m8-5a.5.5 0 0 1-.5.5h-2a.5.5 0 0 1 0-1h2a.5.5 0 0 1 .5.5M3 8a.5.5 0 0 1-.5.5h-2a.5.5 0 0 1 0-1h2A.5.5 0 0 1 3 8m10.657-5.657a.5.5 0 0 1 0 .707l-1.414 1.415a.5.5 0 1 1-.707-.708l1.414-1.414a.5.5 0 0 1 .707 0m-9.193 9.193a.5.5 0 0 1 0 .707L3.05 13.657a.5.5 0 0 1-.707-.707l1.414-1.414a.5.5 0 0 1 .707 0m9.193 2.121a.5.5 0 0 1-.707 0l-1.414-1.414a.5.5 0 0 1 .707-.707l1.414 1.414a.5.5 0 0 1 0 .707M4.464 4.465a.5.5 0 0 1-.707 0L2.343 3.05a.5.5 0 1 1 .707-.708l1.414 1.415a.5.5 0 0 1 0 .707"/></svg>
+      <svg class="ico-moon" viewBox="0 0 16 16" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="M6 .278a.77.77 0 0 1 .08.858 7.2 7.2 0 0 0-.878 3.46c0 4.021 3.278 7.277 7.318 7.277q.792-.001 1.533-.16a.79.79 0 0 1 .81.316.73.73 0 0 1-.031.893A8.35 8.35 0 0 1 8.344 16C3.734 16 0 12.286 0 7.71 0 4.266 2.114 1.312 5.124.06A.75.75 0 0 1 6 .278"/></svg>
+    </button>
+  </header>
+
+  <!-- ===================== hero =====================
+       The band is a separate element only so its wash and rule can run the
+       full width of the window while the copy inside stays on the same
+       1240px measure as the rest of the page. -->
+  <div class="hero-band">
+  <section class="hero">
+    <div class="hero-copy">
+      <p class="eyebrow">field guide</p>
+      <h2 class="display">Every session gets one lamp.<br />Here is what it is actually reporting.</h2>
+      <p class="lede">
+        Switchboard watches your Claude Code sessions and puts a colored chip on your bar for
+        each one. The color is not a mood and not a guess — it is the output of a small,
+        total function over everything Switchboard currently believes about that session.
+        This page walks that function backwards, from the lamp you can see to the evidence
+        underneath it.
+      </p>
+      <p class="lede-sub">
+        If you only read one thing, read the five lamps in <em>the short version</em> — that is
+        the whole contract. If you have ever wondered why a chip was green while nothing seemed
+        to be happening, or red long after you answered, the answer is in
+        <a href="#machine">§4</a> and <a href="#fold">§5</a>.
+      </p>
+    </div>
+
+    <!-- The quick answer, before any theory. Each lamp jumps to where it is
+         earned. -->
+    <aside class="lampstrip" aria-label="what each chip color means">
+      <p class="strip-cap">the short version</p>
+      <a class="lamprow" href="#fold" data-color="red">
+        <span class="lamp lamp-red" aria-hidden="true"></span>
+        <span class="lamprow-t"><b>red</b><span>someone is blocked on your decision</span></span>
+        <span class="lamprow-do">answer it</span>
+      </a>
+      <a class="lamprow" href="#fold" data-color="green">
+        <span class="lamp lamp-green" aria-hidden="true"></span>
+        <span class="lamprow-t"><b>green</b><span>work is happening somewhere in the session</span></span>
+        <span class="lamprow-do">do nothing</span>
+      </a>
+      <a class="lamprow" href="#fold" data-color="orange">
+        <span class="lamp lamp-orange" aria-hidden="true"></span>
+        <span class="lamprow-t"><b>orange</b><span>nothing running, nothing stuck</span></span>
+        <span class="lamprow-do">your move</span>
+      </a>
+      <a class="lamprow" href="#fold" data-color="gray">
+        <span class="lamp lamp-gray" aria-hidden="true"></span>
+        <span class="lamprow-t"><b>gray</b><span>nothing has been observed yet</span></span>
+        <span class="lamprow-do">wait a tick</span>
+      </a>
+      <a class="lamprow" href="#fold" data-color="suspended">
+        <span class="lamp lamp-susp" aria-hidden="true"></span>
+        <span class="lamprow-t"><b>greyed out</b><span>you suspended this session yourself</span></span>
+        <span class="lamprow-do">fg it</span>
+      </a>
+    </aside>
+  </section>
+  </div>
+
+  <div class="guide-shell">
+    <!-- sticky section rail -->
+    <nav class="rail" aria-label="sections">
+      <ol id="rail-list"></ol>
+    </nav>
+
+    <main class="guide">
+
+      <!-- ===================== 1 · writers ===================== -->
+      <section class="sec" id="writers" data-num="01" data-rail="one lamp, several workers">
+        <h3 class="display">One lamp, several workers</h3>
+
+        <p>
+          A Claude Code session is not one worker. It is <b>1 + N writers</b>: the main thread,
+          plus every subagent currently in flight. They share a process, a transcript path, and
+          one chip — and each of them can block on its own permission prompt, independently of
+          the others.
+        </p>
+
+        <figure class="fig">
+          <div class="anatomy">
+            <div class="an-session">
+              <p class="an-cap">one session · one pid · one chip</p>
+              <div class="an-writers">
+                <div class="an-w" data-state="Ended">
+                  <span class="an-key">main</span>
+                  <span class="pill pill-orange">Ended</span>
+                </div>
+                <div class="an-w" data-state="Working">
+                  <span class="an-key">sub-1</span>
+                  <span class="pill pill-green">Working</span>
+                </div>
+                <div class="an-w" data-state="Blocked">
+                  <span class="an-key">sub-2</span>
+                  <span class="pill pill-red">Blocked</span>
+                </div>
+              </div>
+            </div>
+            <div class="an-arrow" aria-hidden="true">
+              <span class="an-arrow-cap">fold</span>
+              <svg viewBox="0 0 60 24" width="60" height="24"><path d="M0 12h46" /><path d="M44 7l8 5-8 5z" class="head" /></svg>
+            </div>
+            <div class="an-out">
+              <span class="lamp lamp-red lamp-lg" aria-hidden="true"></span>
+              <span class="an-out-t">RED</span>
+              <span class="an-out-s">because <code>sub-2</code> is blocked</span>
+            </div>
+          </div>
+          <figcaption>
+            The main thread finished. One teammate is producing. A third is waiting on you. The
+            chip reports the <em>most actionable</em> of those, not the busiest and not the
+            newest.
+          </figcaption>
+        </figure>
+
+        <ul class="conseq">
+          <li><b>“Is the agent working?” is not a well-formed question.</b> There are several agents behind one chip.</li>
+          <li><b>Green can mean the main thread stopped a minute ago</b> and three teammates are still going. That is not a bug; it is the whole point of delegating.</li>
+          <li><b>Red can belong to a subagent</b> you never started by hand — and answering it unblocks work you cannot see.</li>
+        </ul>
+
+        <h4>Three layers, and only one of them remembers anything</h4>
+        <div class="layers">
+          <div class="layer">
+            <span class="layer-n">1</span>
+            <div>
+              <p class="layer-t">per-writer machine</p>
+              <p class="layer-d">Evidence arrives, the writer moves. Where it lands depends on where it was.</p>
+              <p class="layer-m yes">has memory — the only real state machine here</p>
+            </div>
+          </div>
+          <div class="layer">
+            <span class="layer-n">2</span>
+            <div>
+              <p class="layer-t">session belief</p>
+              <p class="layer-d">A map of writer → state, plus one liveness flag for the process itself.</p>
+              <p class="layer-m no">no memory — just a product of layer 1</p>
+            </div>
+          </div>
+          <div class="layer">
+            <span class="layer-n">3</span>
+            <div>
+              <p class="layer-t">the lamp</p>
+              <p class="layer-d">A pure, total function of layer 2. Same writers in, same color out, always.</p>
+              <p class="layer-m no">no memory — by construction</p>
+            </div>
+          </div>
+        </div>
+
+        <blockquote class="pull">
+          The color must <em>not</em> have memory. Memory in the color layer is a latch, and a
+          latch that drifts out of step with the world is exactly what <b>stale red</b> and
+          <b>false green</b> are the names of.
+        </blockquote>
+      </section>
+
+      <!-- ===================== 2 · states ===================== -->
+      <section class="sec" id="states" data-num="02" data-rail="what a writer can be">
+        <h3 class="display">What a writer can be</h3>
+        <p>
+          Seven states. Each one is a claim about a single writer — never about the session — and
+          each contributes a color to the fold in <a href="#fold">§5</a>.
+        </p>
+        <div class="statecards" id="statecards"></div>
+
+        <div class="twins" id="twins">
+          <p class="twins-cap">the pair that makes the model click</p>
+          <div class="twins-body">
+            <div class="twins-diagram" aria-hidden="true">
+              <div class="twin">
+                <span class="pill pill-green">ToolInFlight</span>
+                <span class="twin-sig">unmatched <code>tool_use</code> in the tail</span>
+              </div>
+              <div class="twin-join"><span>identical on disk</span></div>
+              <div class="twin">
+                <span class="pill pill-red">Blocked</span>
+                <span class="twin-sig">unmatched <code>tool_use</code> in the tail</span>
+              </div>
+            </div>
+            <div class="twins-copy">
+              <p>
+                A tool that is merely running and a tool that is waiting for your approval leave
+                <b>exactly the same mark</b> in the transcript. The only thing that ever separates
+                them is a single <code>PermissionRequest</code> hook — which fires once, on the
+                edge, and never repeats.
+              </p>
+              <p>Three things the rest of this page needs fall straight out of that:</p>
+              <ol class="fallout">
+                <li><b>Blocked is the only state that cannot be rebuilt by reading files</b> — so it is the only one that has to survive a daemon restart.</li>
+                <li><b>The transcript can only ever say “ToolInFlight <em>or</em> Blocked.”</b> That makes it a falsifier, never a source.</li>
+                <li><b>Leaving Blocked needs the negation of that shared mark</b> — every dispatched tool matched. Anything weaker cannot tell the twins apart, so it cannot prove your prompt was answered.</li>
+              </ol>
+              <p class="twins-foot">
+                The third is a live defect in the shipped daemon. It is in <a href="#drift">§7</a>,
+                named and measured.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===================== 3 · evidence ===================== -->
+      <section class="sec" id="evidence" data-num="03" data-rail="how it finds out">
+        <h3 class="display">How it finds out</h3>
+        <p>
+          Switchboard never asks an agent how it is doing. It observes. Everything it knows
+          arrives as one of thirteen kinds of evidence, from one of three sources — and the
+          source is what <em>bounds</em> how much a kind is allowed to prove.
+        </p>
+
+        <div class="sources" id="sources"></div>
+
+        <p class="ev-lead">
+          Hover any kind for what it means. The two marked <span class="key-mark">key</span> are
+          the load-bearing ones: one is the only way into <span class="pill pill-red pill-sm">Blocked</span>,
+          the other the only sound way out.
+        </p>
+        <div class="evgrid" id="evgrid"></div>
+
+        <div class="universal">
+          <p class="uni-cap">two rules that apply from every state</p>
+          <ul>
+            <li><code>Gone</code> → <span class="pill pill-dead">Dead</span> — the process exited, or the subagent was force-closed. Absorbing: nothing comes back from here.</li>
+            <li><code>SessionRotated</code> → <span class="pill pill-gray">Unknown</span> — a <code>/clear</code> or a fork changed the session id under the same pid, so every prompt recorded against the old id died with it.</li>
+          </ul>
+          <p class="uni-foot">
+            They are pulled out here rather than repeated in all seven rows below, which is also
+            how the model itself states them.
+          </p>
+        </div>
+      </section>
+
+      <!-- ===================== 4 · the machine ===================== -->
+      <section class="sec wide" id="machine" data-num="04" data-rail="the machine">
+        <h3 class="display">The machine</h3>
+        <p>
+          Every one of the 6 live states × 11 kinds of evidence is spelled out — 66 cells, no
+          defaults. A defaulted row is how a gap hides, so there are none.
+        </p>
+        <p class="hint">
+          Pick a state to read its row: the wiring lights up, and the panel lists what every
+          piece of evidence does to a writer sitting there.
+        </p>
+
+        <div class="machine-wrap">
+          <div class="machine-diagram">
+            <svg id="machine-svg" role="img" aria-label="writer state transition diagram"></svg>
+            <p class="mach-cap">
+              <span class="mc-item"><span class="mc-line solid"></span>moves the writer</span>
+              <span class="mc-item"><span class="mc-line dashed"></span>arrives here from</span>
+              <span class="mc-item mc-note">holds are listed in the panel, not drawn — an arrow to yourself is not a transition</span>
+            </p>
+            <!-- the reverse question the panel doesn't answer: not "what does
+                 evidence do to a writer here" but "what put it here". For
+                 Blocked that list is one line long, which is the whole
+                 argument of §2 arriving as a fact. -->
+            <div class="mach-in" id="mach-in"></div>
+          </div>
+          <div class="machine-panel" id="machine-panel"></div>
+        </div>
+
+        <h4>The whole table at once</h4>
+        <p class="hint">
+          A filled square moves the writer and takes its destination's color. A hollow ring is a
+          <b>hold</b> — evidence that arrived and deliberately changed nothing. Hover any cell for
+          the reason.
+        </p>
+        <div class="matrix-scroll">
+          <table class="matrix" id="matrix"></table>
+        </div>
+        <p class="matrix-key">
+          <span class="mk"><span class="mk-sq"></span>state change</span>
+          <span class="mk"><span class="mk-ring"></span>hold</span>
+          <span class="mk"><span class="mk-div"></span>shipped daemon diverges (<a href="#drift">§7</a>)</span>
+          <span class="mk"><span class="mk-gap"></span>no shipped rule implements it</span>
+        </p>
+      </section>
+
+      <!-- ===================== 5 · the fold ===================== -->
+      <section class="sec" id="fold" data-num="05" data-rail="the fold">
+        <h3 class="display">The fold</h3>
+        <p>
+          Layer 3. Six rungs, checked in order, first match wins. No memory, no special cases,
+          and — importantly — nothing here knows or cares whether a writer is the main thread or
+          a subagent.
+        </p>
+
+        <ol class="ladder" id="ladder"></ol>
+
+        <blockquote class="pull">
+          <b>Red outranks everything</b> because a pending prompt is the only <em>actionable</em>
+          thing a chip can carry. A quick decision unblocks real work; “work is happening” asks
+          nothing of you. So a prompt anywhere in the session tree beats any amount of work
+          anywhere in it.
+        </blockquote>
+
+        <h4>Try it</h4>
+        <p class="hint">
+          Set the writers and watch the lamp. This is the real fold — the same six rungs, in the
+          same order, including which writer gets named as the reason.
+        </p>
+
+        <div class="sandbox" id="sandbox">
+          <div class="sb-controls">
+            <div class="sb-presets">
+              <span class="sb-cap">start from</span>
+              <button type="button" class="sb-preset" data-preset="delegating">main done, teammate working</button>
+              <button type="button" class="sb-preset" data-preset="subblocked">teammate blocked, main working</button>
+              <button type="button" class="sb-preset" data-preset="quiet">everything finished</button>
+              <button type="button" class="sb-preset" data-preset="fresh">just started</button>
+            </div>
+            <div id="sb-writers" class="sb-writers"></div>
+            <div class="sb-liveness">
+              <span class="sb-cap">process</span>
+              <div class="sb-seg" id="sb-live" role="group" aria-label="process liveness"></div>
+            </div>
+          </div>
+          <div class="sb-out" id="sb-out"></div>
+        </div>
+
+        <div class="disappears">
+          <p class="dis-cap">what this abstraction buys</p>
+          <p>
+            An earlier model carried “in-flight subagents” as a <em>dimension</em>, alongside the
+            main thread's state and the pending-prompt count — five rows of case table and two
+            named rules just to reconcile them. Here a live teammate is simply a writer that is
+            Working, so <b>“delegating” is not a state, not a rule, and not a special case</b>. It
+            is the ordinary green rung, reached with the main thread in Ended. It survives only as
+            a badge on the verdict, for a tooltip that wants to say how many.
+          </p>
+        </div>
+      </section>
+
+      <!-- ===================== 6 · the timeline ===================== -->
+      <section class="sec" id="timeline" data-num="06" data-rail="back on the timeline">
+        <h3 class="display">Back on the timeline</h3>
+        <p>
+          The <a href="./">dashboard</a> colors its swimlanes with the same six outcomes, under
+          older names that predate this model. Here is the mapping, so a bar you are staring at
+          can be read as a claim about writers.
+        </p>
+        <div class="lanemap" id="lanemap"></div>
+        <p class="lane-foot">
+          The one worth internalizing is <b>dormant</b>. A dormant parent is not idle and not
+          stuck — it has handed off, and the solid green underneath it belongs to the subagent
+          doing the work. Time spent dormant is delegated time, which is why the dashboard counts
+          it as leverage rather than waste.
+        </p>
+      </section>
+
+      <!-- ===================== 7 · drift ===================== -->
+      <section class="sec" id="drift" data-num="07" data-rail="model vs. daemon">
+        <h3 class="display">Where the model and the daemon disagree</h3>
+        <p>
+          This page describes the specification. The daemon shipping today does not implement all
+          of it. Those are defects, not design choices, and they are listed rather than smoothed
+          over — a page that quietly described the intended behavior would be worse than no page,
+          because it would make a real bug unfalsifiable.
+        </p>
+
+        <h4>Two cells behave differently in practice</h4>
+        <div class="drifts" id="drifts"></div>
+
+        <h4>Four transitions nothing implements</h4>
+        <p class="hint">
+          All four are <span class="pill pill-green pill-sm">ToolInFlight</span> cells. That is
+          the finding, not a coincidence: the daemon has no representation of that state at all,
+          which is precisely why it cannot tell a tool waiting on <em>you</em> from a tool waiting
+          on a machine.
+        </p>
+        <div class="gaps" id="gaps"></div>
+      </section>
+
+    </main>
+  </div>
+
+  <div id="tooltip" class="tooltip" hidden></div>
+
+  <footer class="footer">
+    <div class="footer-item"><span class="fk">model</span><span class="fv">Switchboard <code>internal/writerstate</code></span></div>
+    <div class="footer-item"><span class="fk">table</span><span class="fv">generated from <code>docs/writer-state-model.md</code></span></div>
+    <div class="footer-item"><span class="fk">scope</span><span class="fv">6 live states × 11 evidence kinds, every cell explicit</span></div>
+    <div class="footer-item"><span class="fk">colors</span><span class="fv">the same tokens the timeline paints with</span></div>
+  </footer>
+
+  <script src="states-model.js"></script>
+  <script src="states.js"></script>
+</body>
+</html>

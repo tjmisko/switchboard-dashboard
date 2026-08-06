@@ -214,6 +214,25 @@ func TestServer_servesEmbeddedIndex(t *testing.T) {
 	}
 }
 
+// The field guide is a second embedded page, and its three assets are listed on
+// their own //go:embed line. A missing one is a 404 the compiler cannot catch,
+// so each is fetched here — the page is inert without any of them.
+func TestServer_servesEmbeddedFieldGuide(t *testing.T) {
+	srv := &Server{Ctl: "unused"}
+	for _, path := range []string{"/states.html", "/states.css", "/states.js", "/states-model.js"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		srv.Handler().ServeHTTP(rec, req)
+
+		if rec.Result().StatusCode != http.StatusOK {
+			t.Fatalf("GET %s status = %d, want 200", path, rec.Result().StatusCode)
+		}
+		if rec.Body.Len() == 0 {
+			t.Fatalf("GET %s served an empty body", path)
+		}
+	}
+}
+
 // --- multi-provider merge ---
 
 func TestHandleTimeline_mergesMultipleProvidersAndNamespacesLanes(t *testing.T) {
