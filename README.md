@@ -70,6 +70,25 @@ invocation, so it loads instantly and runs offline.
 - **Live by default**: polls `/api/timeline` every ~3s and repaints on change,
   with a freshness indicator.
 
+## Field guide (`/states.html`)
+
+A second page, linked from the topbar, explaining what the status colors are
+actually reporting: that a session is `1 + N` **writers** (the main thread plus
+every in-flight subagent) sharing one chip, the seven states a writer can be in,
+the thirteen kinds of evidence Switchboard learns them from, the full 6 × 11
+transition table, and the fold that turns all of it into one color. The fold is
+interactive — set the writers and watch the lamp — and the page also lists the
+cells where the shipped daemon diverges from the model.
+
+The transition table is transcribed from Switchboard's
+`docs/writer-state-model.md`, which is itself generated from
+`internal/writerstate`. When the model changes, regenerate that doc and
+re-derive `web/states-model.js` rather than hand-editing cells;
+`web/states.test.js` re-derives the model's load-bearing properties (totality,
+the single door into `Blocked`, the fold's priority and tie-break) from the
+transcribed table, so a bad transcription fails the suite rather than shipping a
+page that teaches a machine the daemon does not run.
+
 ## Quickstart
 
 ```sh
@@ -410,14 +429,16 @@ merged exactly as before, never silently clipped.
 
 ```sh
 go test ./...   # handler, arg builder, /api/plan, and the name-span contract
-node --test     # render-model unit tests (web/model.js)
+node --test     # render-model + writer-state unit tests (web/*.js)
 go vet ./...
 ```
 
 The render model — identity keying, name spans, and row packing — lives in
-`web/model.js` as DOM-free pure functions covered by `web/model.test.js`. The Go
-tests inject a stub `ctl` and temporary plan files, so they need no real
-Switchboard install.
+`web/model.js` as DOM-free pure functions covered by `web/model.test.js`. The
+field guide splits the same way: `web/states-model.js` holds the writer-state
+table and the two pure functions over it, covered by `web/states.test.js`, and
+`web/states.js` is the DOM. The Go tests inject a stub `ctl` and temporary plan
+files, so they need no real Switchboard install.
 
 The provider layer lives under `internal/`: `internal/timeline` (the envelope
 types + `Merge`), `internal/provider` (the `Provider` interface, subprocess
