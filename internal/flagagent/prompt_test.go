@@ -7,6 +7,28 @@ import (
 	"github.com/tjmisko/switchboard-dashboard/internal/flags"
 )
 
+// The ghost-lane signature catches two unrelated causes, and for most of the
+// retained history the COMMON one is hook misattribution (two pids sharing a
+// session id), not the sub-millisecond write race. An earlier version of this
+// prompt described only the race, and a live investigation duly reported the
+// wrong mechanism with confidence. The pid check is what separates them, so it
+// has to survive any future edit that tightens this prose.
+func TestSystemPromptShouldSeparateGhostLaneCausesByPid(t *testing.T) {
+	ghost, _, found := strings.Cut(SystemPrompt, "- SPLIT LANE:")
+	if !found {
+		t.Fatal("SystemPrompt no longer has a GHOST LANE section ending at SPLIT LANE")
+	}
+	if !strings.Contains(ghost, "pid") {
+		t.Errorf("ghost-lane guidance never mentions pid, so nothing tells the agent "+
+			"how to tell the two causes apart:\n%s", ghost)
+	}
+	for _, want := range []string{"SAME pid", "TWO DIFFERENT pids"} {
+		if !strings.Contains(ghost, want) {
+			t.Errorf("ghost-lane guidance is missing the %q case:\n%s", want, ghost)
+		}
+	}
+}
+
 func TestBuildPromptShouldNameTheDayFileWhenLaneHasAStart(t *testing.T) {
 	// Without this the agent finds its own evidence, and on a lane with no
 	// session id that means grepping by pid across the whole directory — tens of
