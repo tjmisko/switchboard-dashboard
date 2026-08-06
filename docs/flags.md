@@ -49,22 +49,47 @@ least two distinct phenomena:
 
 - **1 confirmed write-order race** — 2026-08-05, session `296eb0f0`, gap 1.16ms,
   both events on the **same pid** (1241937). The worked example above; it stands.
-- **12 of one session id across two pids** — all twelve are on 07-31 and all
-  report pid 121407, but each spans two processes: a long-lived interactive
-  session and a short-lived subprocess. Session `ef8ae98c` is the shape:
-  ```
-  14:49:10.538  transition  pid=121407  → idle     (long-lived interactive session)
-  14:49:10.870  transition  pid=546165  → working  (short-lived subprocess)
-  ```
-  The subprocess dies and emits `session_end`; the interactive session goes on
-  transitioning. Switchboard's `docs/history-schema.md` states the contract —
-  "One session can span **two** processes… after a `session_end`, the same id
-  reappearing is a second run and a second lane" — so the reader is doing what it
-  was told. Not a reader bug, and possibly not a bug; under separate
-  investigation.
-- **3 unclassified** — 07-30 `48c6630d` (pid 2953, `resume`), 08-04 `6169e789`
-  (pid 3917156, `arachne`), 08-05 `1e158165` (pid 3363273, `jobfeed`). Not yet
-  examined individually.
+- **12 of session-id bleed between two CONCURRENT processes** — a producer
+  defect, and the largest group. All twelve are on 07-31. Session `178517a7` is
+  the verified shape: the id is carried by **two live pids at once**, 121407
+  (`sb-dash`, the real interactive session) and 653188 (`tjmisko`, cwd
+  `~/.local/share/switchboard/summaries` — `session-digest`'s own `claude -p`
+  summarizer). While the helper lives, its lane absorbs the real session's
+  transitions; at the helper's `session_end` the reader closes that lane, and the
+  real session's next event finds no open lane and mints one that is never
+  closed.
+
+  It is worth being precise about why this is **not** the case
+  `docs/history-schema.md` blesses. That contract — "One session can span **two**
+  processes… after a `session_end`, the same id reappearing is a second run and a
+  second lane" — describes a **sequential** case: a resume, after the first
+  process ended. This is **concurrent**: two processes alive at the same instant
+  under one id, which no resume can produce.
+
+  The proof it is corruption rather than two real sessions is `dur_prev_ms`,
+  which chains exactly across the id churn — 4999ms in from the prior interval
+  (under id `18999231`), 4733ms out to the next (under id `2bc8369f`). The
+  process never stopped working; only its `session_id` changed underneath it.
+
+  The repair is `clip-at`, not `suppress-lane`: the lane's head is the real
+  session's genuine work, and only the tail is synthesized.
+- **1 legitimate resume, not a defect** — 07-30 `48c6630d`. The session ended on
+  pid 189739 and the same conversation was resumed 37 minutes later on pid 2953,
+  which is exactly the sequential case above. Its lane carries a real label, a
+  full idle→working→idle cycle, focus events and a dozen `usage_sample`s with
+  genuine token deltas. This is the 37.5-minute outlier in the spread — a human,
+  not a race.
+- **2 unclassified** — 08-04 `6169e789` (pid 3917156, `arachne`), 08-05
+  `1e158165` (pid 3363273, `jobfeed`). Not yet examined individually.
+
+**Does this feature's own agent corrupt the data it repairs?** It is the obvious
+worry, since a flag investigation is itself a `claude -p` subprocess. Checked
+directly: every session id belonging to a flag investigation maps to exactly one
+pid, with no bleed onto a concurrent session. The mechanism that catches
+`session-digest`'s summarizer does not currently catch this one. Why it differs
+is not yet established — `--no-session-persistence` is the obvious candidate and
+is unverified — so this is a measurement, not a guarantee, and worth re-checking
+if the invocation changes.
 
 The signature is therefore a net, not a diagnosis: cheap to compute and it does
 catch the race, but a match is a lane worth flagging rather than a lane known to
