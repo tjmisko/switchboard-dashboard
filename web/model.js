@@ -40,6 +40,30 @@
     return "?";
   }
 
+  // laneFlagKey identifies one LANE, where laneIdentity identifies one session's
+  // bar. The two differ precisely when a session owns several lanes — which is
+  // the shape a data-quality flag most often points at, since a reader that
+  // splits a session in two is one of the ways the timeline goes wrong. Flagging
+  // the bad half must not touch the good one, so the lane's own start is part of
+  // the key.
+  //
+  // This MUST agree with Go's flags.Key (internal/flags/record.go): the browser
+  // computes the key it POSTs and the key it looks a flag up by, and the server
+  // computes the key it files under. The start is normalized to epoch
+  // milliseconds because the same instant reaches the two sides spelled
+  // differently (offset, fractional digits), and every character outside
+  // [A-Za-z0-9.-] becomes '-' because the key is also a filename.
+  function laneFlagKey(lane) {
+    if (!lane) return "";
+    const stem = sanitizeKey(lane.session_id || "") || "session";
+    const ms = Date.parse(lane.start);
+    return stem + "__" + (isFinite(ms) ? ms : 0);
+  }
+
+  function sanitizeKey(s) {
+    return String(s).replace(/[^A-Za-z0-9.-]/g, "-").replace(/^-+|-+$/g, "");
+  }
+
   // rawSessionId is the provider-agnostic session id, for joining a lane to
   // stores keyed by the bare Claude session UUID (e.g. /api/summaries). The
   // merged multi-provider view namespaces lane.session_id as
@@ -1153,7 +1177,7 @@
 
   return {
     scaleGeometry,
-    laneIdentity, rawSessionId, leadLabel, nameSegments, buildBar, buildBars,
+    laneIdentity, laneFlagKey, rawSessionId, leadLabel, nameSegments, buildBar, buildBars,
     spanInefficiency, switchArrivals, packLanes, aloftSpans, workIntervalsMs, concurrencyProfile,
     alignLiveTail,
     projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs, suspectTailMs,
