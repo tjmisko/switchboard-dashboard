@@ -49,6 +49,18 @@ type Server struct {
 	// Settings are the operator-model tunables served to the frontend. The zero
 	// value is not meaningful — main loads them (defaults when unconfigured).
 	Settings Settings
+
+	// days memoizes closed-day timeline envelopes; see daycache.go. Built on
+	// first use so a zero-value Server stays usable (tests construct one
+	// directly).
+	daysOnce sync.Once
+	days     *dayCache
+}
+
+// dayCacheRef lazily builds the closed-day cache.
+func (s *Server) dayCacheRef() *dayCache {
+	s.daysOnce.Do(func() { s.days = newDayCache() })
+	return s.days
 }
 
 // providerList returns the configured providers, or a single default claude
@@ -109,12 +121,31 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 	ps := s.providerList()
 	ctx := r.Context()
 
+	// A closed day is answered from memory when we have it: the provider spawn
+	// is ~1.5s and flat in payload size, so this is the difference between a day
+	// switch that waits and one that lands. Today is never cached — it is what
+	// the live poll watches.
+	day, since, until, dir := q.Get("day"), q.Get("since"), q.Get("until"), q.Get("dir")
+	cache := s.dayCacheRef()
+	cacheable := cache.cacheable(day, since, until, dir)
+	if cacheable {
+		if body, ok := cache.get(day); ok {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Cache", "hit")
+			_, _ = w.Write(body)
+			return
+		}
+	}
+
 	if len(ps) == 1 {
-		params := provider.Params{Day: q.Get("day"), Since: q.Get("since"), Until: q.Get("until"), Dir: q.Get("dir")}
+		params := provider.Params{Day: day, Since: since, Until: until, Dir: dir}
 		raw, err := ps[0].Fetch(ctx, params)
 		if err != nil {
 			s.writeTimelineError(w, ps[0].ID(), err)
 			return
+		}
+		if cacheable {
+			cache.put(day, raw)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(raw)
@@ -124,7 +155,7 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 	// Multi-provider: the query dir is single-source and does not map across
 	// providers, so each uses its own configured dir; only the window flags
 	// (day/since/until) are provider-agnostic and forwarded.
-	params := provider.Params{Day: q.Get("day"), Since: q.Get("since"), Until: q.Get("until")}
+	params := provider.Params{Day: day, Since: since, Until: until}
 
 	type result struct {
 		id  string
@@ -177,6 +208,12 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(timelineError{Error: "merge encode failed: " + err.Error()})
 		return
+	}
+	// Only a clean merge is cached: an envelope carrying provider_errors is a
+	// partial view of the day, and serving it back for ten minutes would pin a
+	// transient provider failure into the UI long after it recovered.
+	if cacheable && len(merged.ProviderErrors) == 0 {
+		cache.put(day, out)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(out)
