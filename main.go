@@ -68,6 +68,11 @@ func main() {
 		log.Printf("switchboard-dashboard using %d merged providers from %s", len(provs), *providers)
 	}
 
+	// Settle anything a previous process left mid-investigation before serving:
+	// its goroutine died with that process, so the record would otherwise sit at
+	// "investigating" forever and absorb every re-flag.
+	srv.RecoverInterrupted()
+
 	addr := net.JoinHostPort(*bind, strconv.Itoa(*port))
 	httpServer := &http.Server{
 		Addr:              addr,

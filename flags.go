@@ -201,6 +201,52 @@ func inFlight(status flags.Status) bool {
 	return status == flags.StatusPending || status == flags.StatusInvestigating
 }
 
+// RecoverInterrupted settles flags left mid-investigation by a previous process.
+//
+// An investigation lives in a goroutine, so a restart takes it with it while the
+// record on disk still says "investigating". Nothing would ever move that record
+// again: no goroutine is coming back for it, and inFlight() makes a re-flag a
+// no-op, so the operator's only recourse would be to revert the flag or edit the
+// file. The lane stays visibly wrong and the one button that looks like it should
+// help does nothing.
+//
+// They are settled as failed rather than re-run. A restart is not a reason to
+// spend money, and failed is the status whose menu already offers "Investigate
+// again" — so recovery hands the decision back to the operator instead of making
+// it for them. Call once at startup, before serving.
+func (s *Server) RecoverInterrupted() {
+	if !s.Flags.Enabled() {
+		return
+	}
+	records, err := s.Flags.List()
+	if err != nil {
+		log.Printf("flags: recover interrupted: %v", err)
+		return
+	}
+	for key, record := range records {
+		if !inFlight(record.Status) {
+			continue
+		}
+		updated, err := s.Flags.Update(key, func(rec *flags.Record) bool {
+			if !inFlight(rec.Status) {
+				return false // settled between the list and the update
+			}
+			rec.Fail("the dashboard restarted while this investigation was running", rec.Agent, time.Now())
+			return true
+		})
+		if err != nil {
+			log.Printf("flags: recover %s: %v", key, err)
+			continue
+		}
+		log.Printf("flags: %s was left mid-investigation by a restart; marked failed", key)
+		s.appendIssue(flags.IssueEntry{
+			Event: "resolved", Key: key, SessionID: updated.SessionID,
+			LaneStart: updated.LaneStart, Project: updated.Project, Note: updated.Note,
+			Agent: updated.Agent,
+		})
+	}
+}
+
 // startInvestigation runs the investigator in the background and folds its
 // verdict into the record.
 //
