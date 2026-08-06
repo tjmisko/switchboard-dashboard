@@ -166,6 +166,20 @@ button.ghost { background: transparent; color: var(--fg-muted); font-size: 12px;
 button.icon:disabled { opacity: 0.3; cursor: default; }
 button.icon:disabled:hover { border-color: var(--border); }
 
+/* field-guide link: a quiet outbound to states.html. Sized and shaped like the
+   icon buttons beside it so the topbar stays one row of controls, but rendered
+   as a link because it navigates rather than acts. */
+.guidelink {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 5px 11px; border-radius: 999px;
+  border: 1px solid var(--border-soft); background: var(--bg-elev-2);
+  font-family: var(--mono); font-size: 12px;
+  color: var(--fg-muted); text-decoration: none; white-space: nowrap;
+}
+.guidelink:hover { color: var(--fg); border-color: var(--fg-dim); }
+.guidelink svg { display: block; color: var(--fg-dim); }
+.guidelink:hover svg { color: var(--c-working); }
+
 /* theme toggle: shows the icon of the ACTIVE theme (moon = dark, sun = light);
    data-theme drives which one is visible, so it's correct before JS runs. */
 .theme-toggle { margin-left: 10px; display: inline-flex; align-items: center; justify-content: center; }
