@@ -307,6 +307,46 @@ let fetchOK = false;
 let timelineTimer = null;
 let planTimer = null;
 
+// ---------------------------------------------------------------------------
+// the window state machine
+//
+// The day used to live only in a hidden <input>, read by buildQuery() at fetch
+// time. That left no way to tell "the day you asked for" from "the day on
+// screen", so there was nothing to paint against while the request was out —
+// and a day switch showed NOTHING for the ~1.5s the provider subprocess takes
+// (measured; see docs/instant-day-switch.md — the render itself is ~22ms).
+//
+// So the day is real state now, and it moves in two beats:
+//   commit  — synchronous, on the keypress. The day, the label and the SKELETON
+//             (the frame the data will land in) are on screen before we yield.
+//   settle  — whenever the data for that day arrives, however long that takes.
+//
+// `seq` is what keeps the two honest. Every request carries the seq it was
+// issued under, and a response whose seq is stale is dropped on the floor. That
+// is what stops the 3s poll — which races every switch — from painting day A
+// over day B and leaving the chart disagreeing with the date label.
+// ---------------------------------------------------------------------------
+
+const DAY_FETCH_DEBOUNCE_MS = 120; // held arrows coalesce to one request
+const PREFETCH_IDLE_MS = 400;      // let the settled day breathe before warming neighbors
+const DAY_CACHE_MAX = 12;          // closed-day payloads retained client-side
+
+const win = {
+  seq: 0,          // monotonic request id; responses below this are superseded
+  pending: false,  // committed to a day whose data has not arrived yet
+};
+let dataDay = null;        // the day lastData actually describes
+let inflight = null;       // AbortController for the timeline request in flight
+let dayFetchTimer = null;  // debounce handle for the committed day's fetch
+let prefetchTimer = null;
+// Closed days are immutable enough to keep: revisiting one is then free — no
+// request at all, not merely a warm server cache. Today is never stored.
+const dayCache = new Map(); // ISO day -> raw response text (insertion-ordered LRU)
+// Shape of the last real plot, so a pending window can raise a skeleton with
+// the same frame instead of collapsing the page to nothing.
+let lastPlotShape = null;
+let lastAloftW = 0; // width of the last aloft render, for the same reason
+
 // Which chart occupies the plot area: "sessions" (the SVG swimlanes), "line"
 // (the "agents aloft" concurrency canvas) or "projects" (the
 // agent-time-per-project ranking). Persisted so the choice survives reloads.
@@ -345,29 +385,345 @@ function buildQuery() {
   return params.toString();
 }
 
-async function loadTimeline() {
+// cacheableDay: a day that is over cannot change, so its payload is worth
+// keeping. Today is excluded — it is the live window the poll exists to watch.
+function cacheableDay(day) {
+  return !!day && day < todayLocal();
+}
+
+function rememberDay(day, text) {
+  if (!cacheableDay(day)) return;
+  dayCache.delete(day); // re-insert so Map order is true LRU
+  dayCache.set(day, text);
+  while (dayCache.size > DAY_CACHE_MAX) dayCache.delete(dayCache.keys().next().value);
+}
+
+// loadTimeline fetches the committed day and, if that day is still the one on
+// screen when the bytes land, settles it.
+//
+// Two guards make it safe to have several of these in flight, which a live poll
+// crossing a day switch guarantees:
+//   - the AbortController drops the previous request the moment a newer one is
+//     issued, so a superseded subprocess isn't also competing for the machine;
+//   - the seq check drops any response that is no longer the current request,
+//     which is what stops an in-flight poll for the OLD day from repainting the
+//     chart under the NEW day's label.
+async function loadTimeline(opts) {
+  const reason = (opts && opts.reason) || "poll";
+  const day = el.day.value;
+  const seq = ++win.seq;
+
+  // A day we already hold settles with no network at all — this is what makes
+  // stepping back through history instant rather than merely animated.
+  const cached = dayCache.get(day);
+  if (cached !== undefined && reason !== "poll") {
+    settleTimeline(day, cached, { fromCache: true });
+    return;
+  }
+
+  if (inflight) inflight.abort();
+  const ctl = new AbortController();
+  inflight = ctl;
+
   try {
-    const res = await fetch("/api/timeline?" + buildQuery(), { cache: "no-store" });
+    const res = await fetch("/api/timeline?" + buildQuery(), { cache: "no-store", signal: ctl.signal });
     const text = await res.text();
+    if (seq !== win.seq) return; // superseded by a newer request
     if (!res.ok) {
       let msg = text;
       try { const j = JSON.parse(text); msg = j.error + (j.stderr ? "\n" + j.stderr : ""); } catch (_) {}
       showError(msg);
       fetchOK = false;
+      failPendingWindow();
       return;
     }
     hideError();
     fetchOK = true;
     lastUpdatedAt = Date.now();
-    if (text === lastTimelineText) { tickLive(); return; } // unchanged → no repaint
-    lastTimelineText = text;
-    lastData = JSON.parse(text);
-    render(lastData);
-    tickLive();
+    rememberDay(day, text);
+    settleTimeline(day, text, { fromCache: false });
+    schedulePrefetch(day);
   } catch (e) {
+    if (e && e.name === "AbortError") return; // a newer request owns the screen
+    if (seq !== win.seq) return;
     showError(String(e));
     fetchOK = false;
+    failPendingWindow();
+  } finally {
+    if (inflight === ctl) inflight = null;
   }
+}
+
+// settleTimeline puts data on screen for `day`. The repaint-on-change guard is
+// keyed on the DAY as well as the bytes: comparing text alone was only
+// accidentally correct, since lastTimelineText belonged to whichever day was
+// fetched last, not necessarily to this one.
+function settleTimeline(day, text, opts) {
+  const wasPending = win.pending;
+  if (!wasPending && day === dataDay && text === lastTimelineText) { tickLive(); return; }
+  lastTimelineText = text;
+  dataDay = day;
+  lastData = JSON.parse(text);
+
+  if (wasPending) {
+    // The window the user asked for has arrived: strike the skeleton and let
+    // the chart make its entrance. armChartEnter has to run BEFORE the render
+    // for the time views (they read the sweep's progress as they draw), and
+    // startProjectsEnter AFTER it (its CSS class needs the rows on the page) —
+    // the same order setView uses.
+    exitPendingWindow();
+    armChartEnter(currentView);
+    render(lastData);
+    if (currentView === "projects") startProjectsEnter();
+  } else {
+    render(lastData);
+  }
+  tickLive();
+  if (opts && opts.fromCache) schedulePrefetch(day);
+}
+
+// ---------------------------------------------------------------------------
+// commit: the synchronous half of a day switch
+// ---------------------------------------------------------------------------
+
+// commitWindow is the ONE path that moves the day. Everything it does is
+// synchronous and lands in the same frame as the keypress: the value, the
+// label, the skeleton. The fetch is deliberately the last thing, and it is
+// debounced — holding an arrow key across five days must repaint the shell five
+// times but spawn ONE provider subprocess, not five that then fight each other.
+function commitWindow(iso) {
+  if (!Number.isFinite(parseISODate(iso))) return;
+  if (iso > todayLocal()) return;
+  if (iso === el.day.value) return;
+  el.day.value = iso;
+  syncDayDisplay();
+  hidePopout();
+  hideTip();
+  enterPendingWindow();
+  schedulePoll(); // the poll only exists for the live window; a past day is closed
+  if (dayFetchTimer) clearTimeout(dayFetchTimer);
+  dayFetchTimer = setTimeout(() => {
+    dayFetchTimer = null;
+    loadTimeline({ reason: "day" });
+  }, DAY_FETCH_DEBOUNCE_MS);
+}
+
+// enterPendingWindow raises the skeleton: the frame the incoming day will land
+// in, with nothing in it that asserts a value. The section carries .pending and
+// CSS dims every figure that now belongs to the outgoing day, so the page reads
+// as "this is arriving" rather than showing stale numbers under a new date.
+function enterPendingWindow() {
+  win.pending = true;
+  cancelSweep();
+  el.section.classList.add("pending");
+  document.body.classList.add("window-pending");
+  el.empty.hidden = true;
+  hideTip(); // a formula tooltip belongs to a figure that no longer exists
+  renderSkeleton();
+  renderFiguresSkeleton();
+}
+
+function exitPendingWindow() {
+  win.pending = false;
+  el.section.classList.remove("pending");
+  document.body.classList.remove("window-pending");
+}
+
+// A failed window keeps the skeleton down but stops pretending data is coming:
+// the error banner is already up, and leaving a shimmer running under it would
+// read as a request still in flight.
+function failPendingWindow() {
+  if (!win.pending) return;
+  exitPendingWindow();
+  el.section.classList.add("window-failed");
+  setTimeout(() => el.section.classList.remove("window-failed"), 0);
+}
+
+// ---------------------------------------------------------------------------
+// the skeleton
+//
+// Rule for everything below: SHOW STRUCTURE, NEVER ASSERT A VALUE. The
+// horizontal scale is not knowable before the data lands (summary.from/to are
+// the day's first and last ACTIVITY, not calendar bounds), so the skeleton
+// draws no axis ticks and no labels — it would only have to take them back.
+// Ghost bar widths come from a fixed repeating pattern rather than the outgoing
+// day's shapes, so nothing on screen can be mistaken for the day being fetched.
+// ---------------------------------------------------------------------------
+
+const GHOST_WIDTHS = [0.92, 0.64, 0.81, 0.47, 0.73, 0.55, 0.88, 0.38];
+const GHOST_ROWS_DEFAULT = 6;
+const GHOST_ROWS_MAX = 10; // a 171-lane day must not raise a 1700px shimmer wall
+
+// ghostRowCount takes only the ROW COUNT from the outgoing day, not its exact
+// geometry. Replaying the real tops would reproduce the group-header gaps of a
+// day that is no longer on screen, leaving the skeleton pocked with holes that
+// mean nothing; a compact, even set of rows of about the right number keeps the
+// page's height in the same neighbourhood without inventing structure.
+function ghostRowCount() {
+  const prev = lastPlotShape ? lastPlotShape.rows.length : 0;
+  if (!prev) return GHOST_ROWS_DEFAULT;
+  return Math.min(GHOST_ROWS_MAX, Math.max(3, prev));
+}
+
+function renderSkeleton() {
+  if (currentView === "line") renderAloftSkeleton();
+  else if (currentView === "projects") renderProjectsSkeleton();
+  else renderSessionsSkeleton();
+}
+
+function renderSessionsSkeleton() {
+  while (el.svg.childNodes.length > 1) el.svg.removeChild(el.svg.lastChild);
+  const n = ghostRowCount();
+  const rowH = GEO.PAD_TOP + GEO.NAME_H + GEO.BAR_H + GEO.PAD_BOTTOM + GEO.GAP;
+
+  // The skeleton is sized to the VISIBLE band, not to the outgoing day's full
+  // plot width. Both time views scroll, and at the default density barely half
+  // the plot is on screen — ghost bars laid out across 4500px would all reach
+  // past the right edge, so every row would read as full width and the shape
+  // would be a solid block. This is the same reasoning sweepX applies.
+  const W = Math.max(620, el.wrap.clientWidth);
+  const plotW = Math.max(160, W - GEO.GUTTER - GEO.RIGHT);
+  const H = GEO.PLOT_TOP + GEO.OP_LANE_H + n * rowH + GEO.AXIS_BOTTOM_H;
+
+  el.svg.setAttribute("width", W);
+  el.svg.setAttribute("height", H);
+  el.svg.style.width = W + "px";
+  el.svg.style.height = H + "px";
+
+  const g = document.createElementNS(SVGNS, "g");
+  g.setAttribute("class", "skeleton");
+
+  // the operator lane's slot, held open so the rows below don't jump when it
+  // comes back
+  g.appendChild(ghostRect(GEO.GUTTER, GEO.PLOT_TOP + 12, plotW * 0.97, GEO.OP_BAR_H, 0));
+
+  for (let i = 0; i < n; i++) {
+    const barTop = GEO.PLOT_TOP + GEO.OP_LANE_H + i * rowH + GEO.PAD_TOP + GEO.NAME_H;
+    // gutter: a stand-in for where the session's name goes, not the name itself
+    g.appendChild(ghostRect(GEO.GUTTER - 148, barTop + GEO.BAR_H / 2 - 5, 120, 10, i));
+    g.appendChild(ghostRect(GEO.GUTTER, barTop, plotW * GHOST_WIDTHS[i % GHOST_WIDTHS.length], GEO.BAR_H, i));
+  }
+
+  el.svg.appendChild(g);
+}
+
+// The figures are the part of the page that must NOT survive a day change: a
+// dimmed "30h 11m" is still a readable number, and sitting under the incoming
+// day's date it reads as that day's answer. So they are replaced outright by
+// blocks of the right shape — the layout holds, and nothing on screen claims
+// anything about a window we have not fetched yet.
+function renderFiguresSkeleton() {
+  const block = (cls, w) => `<div class="${cls} ghost-text" style="width:${w}px"></div>`;
+  el.topline.innerHTML = [[150, 128], [176, 190], [86, 210]]
+    .map(([vw, kw], i) =>
+      `<div class="th-block" style="--ghost-i:${i}">${block("th-val", vw)}${block("th-key", kw)}</div>`)
+    .join("");
+  el.statusKey.innerHTML = STATUS_ORDER.map((_, i) =>
+    `<span class="sk" style="--ghost-i:${i}">`
+    + `<span class="sk-left">${block("sk-name", 62)}</span>${block("sk-val", 48)}</span>`).join("");
+  if (el.providerKey) el.providerKey.hidden = true;
+  for (const card of [el.cardAttention, el.cardCost]) {
+    card.innerHTML = `<div class="box-label ghost-text" style="width:112px"></div>`
+      + [172, 140, 156, 120].map((w, i) => block("card-ghost-line", w)).join("");
+  }
+}
+
+function ghostRect(x, y, w, h, i) {
+  const r = document.createElementNS(SVGNS, "rect");
+  r.setAttribute("class", "ghost");
+  r.setAttribute("x", x);
+  r.setAttribute("y", y);
+  r.setAttribute("width", Math.max(0, w));
+  r.setAttribute("height", h);
+  r.setAttribute("rx", Math.min(3, h / 2));
+  r.style.setProperty("--ghost-i", String(i));
+  return r;
+}
+
+// The aloft view is a canvas, so its skeleton is drawn rather than classed: the
+// plot frame and gridlines only — no trace, no axis numbers.
+function renderAloftSkeleton() {
+  const canvas = el.canvas;
+  const containerW = Math.max(620, el.wrap.clientWidth);
+  const W = lastAloftW || containerW;
+  const H = CGEO.HEIGHT;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.style.width = W + "px";
+  canvas.style.height = H + "px";
+  canvas.width = Math.round(W * dpr);
+  canvas.height = Math.round(H * dpr);
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  const plotTop = CGEO.TOP, plotBottom = H - CGEO.BOTTOM;
+  ctx.strokeStyle = cssVar("--border-soft", "#21262d");
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const y = Math.round(plotTop + ((plotBottom - plotTop) * i) / 4) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(CGEO.LEFT, y);
+    ctx.lineTo(W - CGEO.RIGHT, y);
+    ctx.stroke();
+  }
+  ctx.strokeStyle = cssVar("--border", "#2b3240");
+  ctx.beginPath();
+  ctx.moveTo(CGEO.LEFT, plotBottom + 0.5);
+  ctx.lineTo(W - CGEO.RIGHT, plotBottom + 0.5);
+  ctx.stroke();
+  updateChartStats(null);
+}
+
+function renderProjectsSkeleton() {
+  lastProjectKeys = null; // the ghost rows are not a ranking; force a real rebuild
+  const n = Math.min(GHOST_WIDTHS.length, Math.max(3, (lastPlotShape && lastPlotShape.rows.length) || GHOST_ROWS_DEFAULT));
+  let html = "";
+  for (let i = 0; i < n; i++) {
+    html += `<div class="proj-row ghost-row" style="--ghost-i:${i}">`
+      + `<span class="proj-name ghost-text"></span>`
+      + `<span class="proj-track"><span class="ghost-fill" style="width:${(GHOST_WIDTHS[i] * 100).toFixed(0)}%"></span></span>`
+      + `<span class="proj-hours ghost-text"></span>`
+      + `</div>`;
+  }
+  el.projects.innerHTML = html;
+}
+
+// ---------------------------------------------------------------------------
+// polling + prefetch
+// ---------------------------------------------------------------------------
+
+// schedulePoll runs the 3s timeline poll ONLY for the live window. A closed day
+// cannot change, so polling one re-spawned a 1.5s provider subprocess every 3
+// seconds forever — a ~50% duty cycle of pure waste that competed with the very
+// request a day switch was waiting on. A hidden tab is idle for the same reason.
+function schedulePoll() {
+  if (timelineTimer) clearInterval(timelineTimer);
+  timelineTimer = null;
+  if (!isLiveWindow() || document.hidden) return;
+  timelineTimer = setInterval(() => loadTimeline({ reason: "poll" }), POLL_MS);
+}
+
+// schedulePrefetch warms the days an arrow press would reach next. It runs only
+// once the current day has settled and gone quiet, because a prefetch costs the
+// server the same ~1.5s subprocess as a real request — issued eagerly it would
+// slow down the switch it is supposed to accelerate.
+//
+// Only CLOSED neighbors are warmed: today is never cached at either end, so
+// prefetching it would burn a spawn for nothing.
+function schedulePrefetch(day) {
+  if (prefetchTimer) clearTimeout(prefetchTimer);
+  prefetchTimer = setTimeout(() => {
+    prefetchTimer = null;
+    const neighbors = [shiftDay(day, -1), shiftDay(day, +1)];
+    for (const d of neighbors) {
+      if (d === day || !cacheableDay(d) || dayCache.has(d)) continue;
+      fetch("/api/timeline?day=" + encodeURIComponent(d), { cache: "no-store" })
+        .then((res) => (res.ok ? res.text() : null))
+        .then((text) => { if (text) rememberDay(d, text); })
+        .catch(() => { /* best-effort: a cold neighbor just costs the usual wait */ });
+      break; // one at a time — a prefetch must never queue behind another
+    }
+  }, PREFETCH_IDLE_MS);
 }
 
 // loadSettings pulls the operator-model tunables over OP's fallbacks. Fetched
@@ -771,6 +1127,10 @@ function setView(view) {
   // Entry animations run only when the view is newly ENTERED — the 3s poll, the
   // zoom, a resize and a theme flip all repaint silently. The time views arm
   // BEFORE the render so it draws at the sweep's opening reveal...
+  // While a window is pending, lastData still describes the day we just left,
+  // so drawing it here would paint the OUTGOING day under the INCOMING day's
+  // label. The skeleton just changes shape to match the new view instead.
+  if (win.pending) { renderSkeleton(); return; }
   if (entering) armChartEnter(view);
   if (lastData) renderChartArea(lastData);
   // ...while the projects grow-in arms AFTER it, so the hold is sized to the
@@ -1085,6 +1445,7 @@ function setZoom(next) {
   const centerFrac = sw > cw ? (wrap.scrollLeft + cw / 2) / sw : 0.5;
   pxPerHour = next;
   try { localStorage.setItem(ZOOM_KEY, String(next)); } catch (e) {}
+  if (win.pending) { renderSkeleton(); updateZoomReadout(); return; }
   if (lastData) {
     renderChartArea(lastData); // resolves the new geometry — read the readout after
     const nsw = wrap.scrollWidth;
@@ -1116,7 +1477,7 @@ function updateZoomReadout() {
 const groupCollapseOverride = new Map();
 function toggleGroupCollapse(project, currentlyCollapsed) {
   groupCollapseOverride.set(project, !currentlyCollapsed);
-  if (lastData) renderTimeline(lastData);
+  if (lastData && !win.pending) renderTimeline(lastData);
 }
 
 // laneHeight is the compact vertical footprint of one session bar: name band +
@@ -1229,6 +1590,14 @@ function renderTimeline(data) {
   el.svg.setAttribute("height", H);
   el.svg.style.width = W + "px";
   el.svg.style.height = H + "px";
+
+  // Remember the frame so the NEXT day's skeleton can hold the same shape. A
+  // switch then keeps the page's geometry put and only swaps its contents,
+  // rather than collapsing to nothing and shoving the footer up the screen.
+  lastPlotShape = {
+    W, H,
+    rows: groups.reduce((acc, g) => acc.concat(g.rows.map((r) => ({ top: r.top, height: r.height }))), []),
+  };
 
   const x = (ms) => {
     let px = GEO.GUTTER + ((ms - t0) / span) * plotW;
@@ -1834,6 +2203,7 @@ function renderConcurrencyChart(data) {
   canvas.height = Math.round(H * dpr);
   const ctx = canvas.getContext("2d");
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  lastAloftW = W; // so a pending window's skeleton keeps this width
 
   updateChartStats(prof);
 
@@ -2060,7 +2430,16 @@ function renderConcurrencyChart(data) {
 function repaintAloft() { if (chartHover) chartHover.paint(null); }
 
 // updateChartStats fills the line-view caption readout (peak / average / active).
+// A null profile is the pending window: the caption keeps its shape (so the
+// footer doesn't jump when the numbers arrive) but states nothing.
 function updateChartStats(prof) {
+  if (!prof) {
+    el.chartStats.innerHTML =
+        `<span class="cs-item"><span class="cs-k">peak</span><span class="cs-v">—</span></span>`
+      + `<span class="cs-item"><span class="cs-k">avg over active</span><span class="cs-v">—</span></span>`
+      + `<span class="cs-item"><span class="cs-k">active</span><span class="cs-v">—</span></span>`;
+    return;
+  }
   const avg = prof.avgActive == null ? "—" : prof.avgActive.toFixed(1) + "×";
   el.chartStats.innerHTML =
       `<span class="cs-item"><span class="cs-k">peak</span><span class="cs-v">${prof.maxN}</span></span>`
@@ -2783,12 +3162,13 @@ function shiftDay(base, delta) {
   return clampISODate(stepISODate(base || todayLocal(), delta), todayLocal());
 }
 
-function reloadNow() { hidePopout(); loadTimeline(); }
+function reloadNow() { hidePopout(); loadTimeline({ reason: "manual" }); }
 
-// stepDay walks the window a day in either direction: move the value, relabel,
-// refetch. Shared by the topbar arrows and their keyboard equivalents
-// (Ctrl+← / Ctrl+→) so neither path can drift from the other. Those chords
-// stay live while the calendar is open, so the grid follows the day out.
+// stepDay walks the window a day in either direction. The move itself is
+// synchronous — commitWindow has the new day, its label and its skeleton on
+// screen before this returns — and the fetch it schedules is debounced, so
+// holding the arrow down scrolls the shell through the days at keyboard speed
+// while only the day you land on is ever requested.
 //
 // A step the clamp swallowed changes nothing, so it does nothing: refetching
 // the day already on screen would flash the grid for a keypress that didn't
@@ -2796,10 +3176,8 @@ function reloadNow() { hidePopout(); loadTimeline(); }
 function stepDay(delta) {
   const next = shiftDay(el.day.value, delta);
   if (next === el.day.value) return;
-  el.day.value = next;
-  syncDayDisplay();
+  commitWindow(next);
   if (calendarOpen()) { calCursor = el.day.value; renderCalendar(); focusCursorCell(); }
-  reloadNow();
 }
 
 // ---------------------------------------------------------------------------
@@ -2929,14 +3307,11 @@ function moveCursor(iso) {
   focusCursorCell();
 }
 
-// commitDay is the only path that changes the day the page is showing.
+// commitDay is the calendar's way in; commitWindow does the work and owns the
+// validity checks, so the popover and the arrows cannot drift apart.
 function commitDay(iso) {
-  if (!Number.isFinite(parseISODate(iso))) return;
-  if (iso > todayLocal()) return; // belt to the disabled cells' braces
-  el.day.value = iso;
-  syncDayDisplay();
   closeCalendar(true);
-  reloadNow();
+  commitWindow(iso);
 }
 
 // handleCalendarKey: while the popover is up it owns the keyboard, the way the
@@ -3030,8 +3405,11 @@ function applyTheme() {
     el.themeToggle.setAttribute("aria-label", "switch to " + next + " theme");
   }
   // The SVG restyles itself via CSS vars; the canvas bakes colors in at draw
-  // time, so it must be repainted to pick up the new theme.
-  if (currentView === "line" && lastData) renderConcurrencyChart(lastData);
+  // time, so it must be repainted to pick up the new theme — including when
+  // what it is holding is the pending window's skeleton.
+  if (currentView !== "line") return;
+  if (win.pending) renderAloftSkeleton();
+  else if (lastData) renderConcurrencyChart(lastData);
 }
 function toggleTheme() {
   localStorage.setItem(THEME_KEY, resolvedTheme() === "dark" ? "light" : "dark");
@@ -3060,8 +3438,8 @@ function init() {
   el.calPrev.addEventListener("click", () => moveCursor(stepISOMonth(calCursor, -1)));
   el.calNext.addEventListener("click", () => moveCursor(stepISOMonth(calCursor, +1)));
   el.calToday.addEventListener("click", () => commitDay(todayLocal()));
-  el.optCtxSwitches.addEventListener("change", () => { if (lastData) renderTimeline(lastData); });
-  el.optFocus.addEventListener("change", () => { if (lastData) renderTimeline(lastData); });
+  el.optCtxSwitches.addEventListener("change", () => { if (lastData && !win.pending) renderTimeline(lastData); });
+  el.optFocus.addEventListener("change", () => { if (lastData && !win.pending) renderTimeline(lastData); });
   el.optSmooth.addEventListener("change", () => {
     syncSmoothLegend();
     if (lastData && currentView === "line") renderConcurrencyChart(lastData);
@@ -3132,17 +3510,33 @@ function init() {
   window.addEventListener("resize", () => {
     if (calendarOpen()) placeCalendar(); // the panel is anchored to a field that just moved
     if (resizeTimer) clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(() => { if (lastData) renderChartArea(lastData); }, 120);
+    resizeTimer = setTimeout(() => {
+      if (win.pending) renderSkeleton();     // the frame has to follow the window too
+      else if (lastData) renderChartArea(lastData);
+    }, 120);
   });
+
+  // A backgrounded tab has no reason to keep a 1.5s subprocess running every 3
+  // seconds; coming back should show the current state at once rather than
+  // waiting out the rest of an interval.
+  document.addEventListener("visibilitychange", () => {
+    schedulePoll();
+    if (!document.hidden && isLiveWindow()) loadTimeline({ reason: "manual" });
+  });
+
+  // The first paint is a day commit like any other: the skeleton goes up
+  // immediately, so the page has its frame on screen while the first fetch (and
+  // the settings it waits on) are still out.
+  enterPendingWindow();
 
   // live polling — no manual refresh controls. Settings land first: every
   // operator figure depends on them, and re-rendering the page a beat later with
   // different thresholds would be a visible flicker of the numbers.
-  loadSettings().then(loadTimeline);
+  loadSettings().then(() => loadTimeline({ reason: "day" }));
   loadPlan();
   loadSummaries();
   loadMemory();
-  timelineTimer = setInterval(loadTimeline, POLL_MS);
+  schedulePoll(); // live window only; a closed day polls zero times
   planTimer = setInterval(loadPlan, PLAN_POLL_MS);
   setInterval(loadSummaries, SUMMARIES_POLL_MS);
   setInterval(loadMemory, MEMORY_POLL_MS);
