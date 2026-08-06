@@ -406,6 +406,30 @@ Providers this repo compiles itself (arachne) run the same check with the caps i
 `internal/timeline/suspect.go`; a provider that omits the fields entirely is
 merged exactly as before, never silently clipped.
 
+### The live bound is quantized
+
+Anything still running when a provider renders is closed at "now", and every
+provider truncates that instant onto a shared 30s grid
+(`timeline.LiveBoundQuantum`) first. The dashboard polls `/api/timeline` every 3s
+and repaints only when the payload changes, so a bound at full precision stamps a
+fresh timestamp on every live lane and defeats that guard on every single poll.
+
+The grid is shared deliberately: providers quantizing onto *different* grids
+would move the merged bytes on the union of their grids, and the coarser one
+would buy nothing. A new adapter that closes open work at its own clock should
+truncate the same way — `switchboard-ctl` does (`nowQuantum`), and arachne does
+in `Compile`. Truncated, never rounded: a lane must not extend past the present,
+and must not end before its own start either, so a session that began inside the
+current bucket is closed at its start rather than behind it.
+
+The memory surface (`/api/memory`) takes the same bound, for a different reason.
+It is fetched lazily at hover and never polled, so byte-stability buys it
+nothing; what matters is that it clips each session's series where that session's
+lane stopped being believed. A bound derived a second time, a second differently,
+puts the hover and the bar it is drawn inside a quantum apart — so `CompileMemory`
+truncates exactly as `Compile` does, and a provider serving both surfaces should
+too.
+
 ## Development
 
 ```sh

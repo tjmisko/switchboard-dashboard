@@ -3,6 +3,8 @@ package arachne
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/tjmisko/switchboard-dashboard/internal/timeline"
 )
 
 func memEvents() []Event {
@@ -238,6 +240,78 @@ func TestCompileMemory_shouldAttributeSamplesToTheRunTheyFiredIn(t *testing.T) {
 	if second.PeakTreeBytes == nil || *second.PeakTreeBytes != 9000 {
 		t.Fatalf("second run peak = %v, want 9000", second.PeakTreeBytes)
 	}
+}
+
+// The envelope and this document are read together — the hover draws the series
+// inside the bar Compile emitted — so the two must stop believing a lane at the
+// same instant. That takes deriving the live bound the same way: read raw, this
+// document's `now` ran up to a full quantum ahead of the bound the lane was
+// closed at, and anywhere within a quantum of the trailing cap the two disagreed
+// about whether the tail was evidence or inference.
+func TestCompileMemory_shouldClipOnTheSameBoundTheLaneIsCreditedTo(t *testing.T) {
+	// 08:00:10 is 10s short of the 4h cap measured from the 12:00:00 bucket
+	// boundary, and 10s past it measured from the instant each compile below is
+	// taken at. Which of the two a surface used is the whole test.
+	const (
+		start        = "2026-07-22T07:00:00Z"
+		lastEvidence = "2026-07-22T08:00:10Z"
+		tail         = "2026-07-22T08:01:10Z"
+	)
+	events := []Event{
+		{Type: EventSessionStart, TS: start, SessionID: "feat-f71",
+			StartedAt: start, Agent: "opus", Project: "Arachne"},
+		{Type: EventMemorySample, TS: "2026-07-22T07:50:10Z", SessionID: "feat-f71",
+			MemTreeBytes: 1000, MemPeakBytes: 1000},
+		// Token accrual is work, and it is the last thing this session was heard
+		// doing. The samples around it are not evidence of anything: a hung
+		// container still holds its pages.
+		{Type: EventUsageSample, TS: lastEvidence, SessionID: "feat-f71"},
+		{Type: EventMemorySample, TS: tail, SessionID: "feat-f71",
+			MemTreeBytes: 9000, MemPeakBytes: 9000},
+	}
+
+	suspect := func(now string) bool {
+		t.Helper()
+		tl := Compile(events, CompileOptions{Now: mustTime(t, now), Window: "2026-07-22"})
+		if len(tl.Lanes) != 1 {
+			t.Fatalf("lanes = %d, want 1", len(tl.Lanes))
+		}
+		return tl.Lanes[0].Suspect
+	}
+	series := func(now string) []MemorySample {
+		t.Helper()
+		doc := compileMem(t, events, now)
+		if len(doc.Sessions) != 1 {
+			t.Fatalf("sessions = %d, want 1", len(doc.Sessions))
+		}
+		return doc.Sessions[0].Mem
+	}
+
+	t.Run("should keep the tail while the envelope still credits the lane", func(t *testing.T) {
+		const now = "2026-07-22T12:00:20Z" // inside the bucket the bound truncates to
+		if suspect(now) {
+			t.Fatalf("the lane is flagged at 3h59m50s of silence — the fixture no longer straddles the cap")
+		}
+		if got := series(now); len(got) != 2 {
+			t.Errorf("series has %d points, want 2 — clipped at an instant the lane is credited to in full: %+v", len(got), got)
+		}
+	})
+
+	t.Run("should clip the tail once the envelope stops crediting the lane", func(t *testing.T) {
+		const now = "2026-07-22T12:00:30Z" // the next bucket: silence is past the cap
+		if !suspect(now) {
+			t.Fatalf("the lane is unflagged at 4h0m20s of silence, past the %s cap", timeline.DefaultSuspectTrailingCap)
+		}
+		got := series(now)
+		if len(got) != 1 {
+			t.Fatalf("series has %d points, want 1 — the tail outlived the evidence: %+v", len(got), got)
+		}
+		// The clipped reading was 9000; if the clip failed, the peak says so.
+		doc := compileMem(t, events, now)
+		if p := doc.Sessions[0].PeakTreeBytes; p == nil || *p != 1000 {
+			t.Errorf("peak_tree_bytes = %v, want 1000 — a post-evidence reading was folded in", p)
+		}
+	})
 }
 
 func TestCompileMemory_shouldDropSessionsOutsideTheWindow(t *testing.T) {
