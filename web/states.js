@@ -98,7 +98,7 @@ function buildRail() {
       let sep = "";
       if (s.dataset.zone === "reference" && !zoned) {
         zoned = true;
-        sep = `<li class="rail-sep">reference</li>`;
+        sep = `<li class="rail-sep">Reference</li>`;
       }
       return `${sep}<li><a href="#${s.id}" data-for="${s.id}"><span class="rn">${s.dataset.num}</span><span>${esc(s.dataset.rail)}</span></a></li>`;
     })
@@ -127,7 +127,7 @@ function buildStateCards() {
   const host = document.getElementById("statecards");
   host.innerHTML = STATES.map((s) => {
     const c = STATE_COLOR[s.id];
-    const folds = s.folds === "hidden" ? "no chip" : "folds " + s.folds;
+    const folds = s.folds === "hidden" ? "No chip" : "Folds " + s.folds;
     return `
       <article class="scard${s.id === "Dead" ? " dead" : ""}" style="--sc:${c}">
         <div class="scard-head">
@@ -153,7 +153,7 @@ function buildSources() {
         <div class="source-h"><b>${esc(s.label)}</b><span class="source-tag">${esc(s.tag)}</span></div>
         <div class="source-line can"><span class="sl-m">+</span><span>${esc(s.strength)}</span></div>
         <div class="source-line cant"><span class="sl-m">−</span><span>${esc(s.weakness)}</span></div>
-        <p class="source-claude"><span class="sc-k">today</span>${esc(s.claude)}</p>
+        <p class="source-claude"><span class="sc-k">Today</span>${esc(s.claude)}</p>
       </div>`
   ).join("");
 }
@@ -168,14 +168,14 @@ function buildEvidence() {
     (e) => `
       <div class="ev" data-src="${e.src}" data-key="${e.key ? 1 : 0}" data-id="${e.id}">
         <span>${e.id}</span>
-        <span class="ev-src">${e.universal ? "universal" : badge(e.src)}</span>
+        <span class="ev-src">${e.universal ? "Universal" : badge(e.src)}</span>
       </div>`
   ).join("");
 
   for (const el of host.querySelectorAll(".ev")) {
     const e = EVIDENCE.find((x) => x.id === el.dataset.id);
     const uni = e.universal
-      ? `<div class="t-row">from every state → ${e.universal}</div>`
+      ? `<div class="t-row">From every state → ${e.universal}</div>`
       : "";
     tipify(
       el,
@@ -196,11 +196,13 @@ function buildEvidence() {
 // ---------------------------------------------------------------------------
 const RING = ["Working", "ToolInFlight", "Blocked", "Interrupted", "Ended", "Unknown"];
 const VB = { w: 640, h: 470 };
-const NODE = { w: 128, h: 34 };
+// wide enough for "ToolInFlight" at the label's 13px mono, with the swatch's
+// 30px gutter in front of it — the longest name is what sizes every pill
+const NODE = { w: 144, h: 38 };
 
 function ringPos(i) {
   const a = (-90 + i * 60) * (Math.PI / 180);
-  return { x: VB.w / 2 + 232 * Math.cos(a), y: VB.h / 2 + 172 * Math.sin(a) };
+  return { x: VB.w / 2 + 224 * Math.cos(a), y: VB.h / 2 + 170 * Math.sin(a) };
 }
 
 // Where the segment from `a` to `b` leaves a's box. Rectangle intersection, so
@@ -229,7 +231,7 @@ function buildMachine() {
 
   const parts = [];
   // guide ring, so the six pills read as one board rather than six cards
-  parts.push(`<ellipse class="mring" cx="${VB.w / 2}" cy="${VB.h / 2}" rx="232" ry="172" />`);
+  parts.push(`<ellipse class="mring" cx="${VB.w / 2}" cy="${VB.h / 2}" rx="224" ry="170" />`);
 
   // one edge per distinct (from → to) state change; the evidence that drives it
   // lives in the panel, because 24 chords with labels is a hairball
@@ -282,13 +284,13 @@ function buildMachine() {
     // without inventing a seventh color.
     const swatch =
       id === "ToolInFlight"
-        ? `<rect class="mn-sw" x="${x + 13}" y="${p.y - 4.5}" width="9" height="9" rx="2" fill="none" stroke="${c}" stroke-width="1.6" />`
-        : `<rect class="mn-sw" x="${x + 13}" y="${p.y - 4.5}" width="9" height="9" rx="2" fill="${c}" />`;
+        ? `<rect class="mn-sw" x="${x + 14}" y="${p.y - 5}" width="10" height="10" rx="2" fill="none" stroke="${c}" stroke-width="1.6" />`
+        : `<rect class="mn-sw" x="${x + 14}" y="${p.y - 5}" width="10" height="10" rx="2" fill="${c}" />`;
     parts.push(
       `<g class="mnode" data-id="${id}" style="--mn-c:${c}" tabindex="0" role="button" aria-label="${id}">` +
-        `<rect class="mn-box" x="${x}" y="${y}" width="${NODE.w}" height="${NODE.h}" rx="17" />` +
+        `<rect class="mn-box" x="${x}" y="${y}" width="${NODE.w}" height="${NODE.h}" rx="19" />` +
         swatch +
-        `<text class="mn-label" x="${x + 30}" y="${p.y + 4}">${id}</text>` +
+        `<text class="mn-label" x="${x + 32}" y="${p.y + 4.5}">${id}</text>` +
         `</g>`
     );
   }
@@ -377,7 +379,7 @@ function renderPanel(id) {
     `<p class="mp-sub">${esc(s.short)}</p>` +
     dests.map((d) => group(d, STATE_COLOR[d], byDest.get(d))).join("") +
     (holds.length
-      ? group(`stays ${id} — ${holds.length} of 11`, "var(--fg-dim)", holds, "holds")
+      ? group(`Stays ${id} · ${holds.length} of 11`, "var(--fg-dim)", holds, "holds")
       : "") +
     `<p class="mp-foot">+ Gone → Dead · SessionRotated → Unknown, from every state</p>`;
 }
@@ -401,8 +403,8 @@ function renderInbound(id) {
 
   const universal = EVIDENCE.find((e) => e.universal === id);
   document.getElementById("mach-in").innerHTML =
-    `<p class="mi-cap">what puts a writer in <b>${id}</b></p>` +
-    (rows.length ? rows.join("") : `<p class="mi-none">nothing in this table — only the universal rule below</p>`) +
+    `<p class="mi-cap">What puts a writer in <b>${id}</b></p>` +
+    (rows.length ? rows.join("") : `<p class="mi-none">Nothing in this table — only the universal rule below</p>`) +
     (universal ? `<div class="mi-row uni"><span class="mi-ev">${universal.id}</span><span class="mi-from">from every state</span></div>` : "");
 }
 
@@ -411,7 +413,7 @@ function renderInbound(id) {
 // ---------------------------------------------------------------------------
 function buildMatrix() {
   const head =
-    `<thead><tr><th class="corner">from ╲ evidence</th>` +
+    `<thead><tr><th class="corner">From ╲ Evidence</th>` +
     LIVE_EVIDENCE.map((e) => `<th class="evh" data-src="${e.src}"><span>${e.id}</span></th>`).join("") +
     `</tr></thead>`;
 
@@ -442,16 +444,16 @@ function buildMatrix() {
     const div = divergenceFor(from, ev);
     const gap = gapFor(from, ev);
     const dest = r.hold
-      ? `<div class="t-row">stays <b>${from}</b></div>`
+      ? `<div class="t-row">Stays <b>${from}</b></div>`
       : `<div class="t-row">→ <span style="color:${STATE_COLOR[r.to]}">${r.to}</span></div>`;
     tipify(
       el,
       `<div class="t-head"><span class="t-status">${from}</span><span class="t-dur">${ev}</span></div>` +
         dest +
         `<div class="t-why">${esc(r.why)}</div>` +
-        (r.shipped ? `<div class="t-id">shipped as ${esc(r.shipped)}</div>` : "") +
-        (div ? `<div class="t-suspect">⚠ the shipped daemon diverges here — see §7</div>` : "") +
-        (gap ? `<div class="t-suspect">⚠ no shipped rule implements this</div>` : "")
+        (r.shipped ? `<div class="t-id">Shipped as ${esc(r.shipped)}</div>` : "") +
+        (div ? `<div class="t-suspect">⚠ The shipped daemon diverges here — see §8</div>` : "") +
+        (gap ? `<div class="t-suspect">⚠ No shipped rule implements this</div>` : "")
     );
     el.addEventListener("mouseenter", () => selectState(from));
   }
@@ -506,12 +508,14 @@ function buildSandbox() {
         return `<div class="sb-w"><span class="sb-wk">${label}</span><div class="sb-seg">${btns}</div>${drop}</div>`;
       })
       .join("") +
-    `<button type="button" class="sb-add" id="sb-add" ${keys.length >= SB_MAX ? "disabled" : ""}>+ subagent</button>`;
+    `<button type="button" class="sb-add" id="sb-add" ${keys.length >= SB_MAX ? "disabled" : ""}>+ Subagent</button>`;
 
-  document.getElementById("sb-live").innerHTML = ["running", "suspended", "gone"]
+  // the value is the fold's liveness token; only the label is title-cased
+  const LIVE_LABEL = { running: "Running", suspended: "Suspended", gone: "Gone" };
+  document.getElementById("sb-live").innerHTML = Object.keys(LIVE_LABEL)
     .map(
       (l) => `<button type="button" data-live="${l}" aria-pressed="${SB.live === l}"
-         style="--sw-c:var(--fg-muted); --sw-bg:var(--bg-elev-2)">${l}</button>`
+         style="--sw-c:var(--fg-muted); --sw-bg:var(--bg-elev-2)">${LIVE_LABEL[l]}</button>`
     )
     .join("");
 
@@ -527,10 +531,10 @@ function renderVerdict() {
   let why;
   if (v.color === "red") why = `<b>${named}</b> needs a decision from you`;
   else if (v.color === "green") why = `<b>${named}</b> is doing work`;
-  else if (v.color === "orange") why = "nothing is running; the session wants a prompt";
-  else if (v.color === "gray") why = "nothing has been observed about any writer";
-  else if (v.color === "suspended") why = "the process is stopped; writer states are moot";
-  else why = "the process is gone";
+  else if (v.color === "orange") why = "Nothing is running; the session wants a prompt";
+  else if (v.color === "gray") why = "Nothing has been observed about any writer";
+  else if (v.color === "suspended") why = "The process is stopped; writer states are moot";
+  else why = "The process is gone";
 
   document.getElementById("sb-out").innerHTML =
     `<span class="sw ${swatchClass(v.color)} sw-lg" aria-hidden="true"></span>` +

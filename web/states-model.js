@@ -90,8 +90,8 @@ const STATES = [
     group: "done",
     short: "You stopped the turn, or a prompt was declined.",
     body:
-      "Folds the same as Ended; the distinction is forensic. It separates a decline from an " +
-      "approve, which are otherwise indistinguishable.",
+      "Folds the same as Ended; the distinction is forensic, separating a decline from an " +
+      "approve.",
     you: "Your move, when you can.",
   },
   {
@@ -119,28 +119,28 @@ const STATES = [
 const SOURCES = [
   {
     id: "hook",
-    label: "notification",
+    label: "Notification",
     badge: "notify",
-    tag: "the agent tells us",
-    claude: "hooks — Claude and Codex both",
+    tag: "The agent tells us",
+    claude: "Hooks — Claude and Codex both",
     strength: "Authoritative, and it names the writer it belongs to.",
-    weakness: "Edge-triggered: fires once and never repeats. A lost one is lost.",
+    weakness: "Edge-triggered: fires once, never repeats. A lost one is lost.",
   },
   {
     id: "transcript",
-    label: "the agent's log",
+    label: "Agent Log",
     badge: "log",
-    tag: "we read what the writer wrote",
+    tag: "We read what the writer wrote",
     claude: "Claude's transcript tail; Codex's rollout file",
-    strength: "Level-triggered: re-readable on every tick, and survives a restart.",
+    strength: "Level-triggered: re-readable every tick, and survives a restart.",
     weakness: "Ambiguous by construction — the same bytes fit more than one state.",
   },
   {
     id: "clock/liveness",
-    label: "clock · liveness",
+    label: "Clock & Liveness",
     badge: "clock",
-    tag: "time passed, or the process is gone",
-    claude: "pid state and file mtimes",
+    tag: "Time passed, or the process is gone",
+    claude: "PID state and file mtimes",
     strength: "Cannot be wrong about absence.",
     weakness: "Proves only that something stopped happening.",
   },
@@ -205,12 +205,12 @@ const EVIDENCE = [
 // the fold ladder — layer 3, priority order, first match wins
 // ---------------------------------------------------------------------------
 const LADDER = [
-  { rule: "case1-gone", cond: "liveness is gone", color: "hidden", say: "no chip at all" },
-  { rule: "case2-suspended", cond: "liveness is suspended", color: "suspended", say: "you paused this yourself" },
-  { rule: "fold-blocked", cond: "ANY writer is Blocked", color: "red", say: "a decision of yours is blocking work" },
-  { rule: "fold-active", cond: "ANY writer is Working or ToolInFlight", color: "green", say: "work is happening — leave it" },
-  { rule: "case13-unknown", cond: "EVERY writer is Unknown, or there are none", color: "gray", say: "nothing observed yet" },
-  { rule: "fold-quiet", cond: "otherwise", color: "orange", say: "stopped; wants a new prompt" },
+  { rule: "case1-gone", cond: "Liveness is gone", color: "hidden", say: "No chip at all" },
+  { rule: "case2-suspended", cond: "Liveness is suspended", color: "suspended", say: "You paused this yourself" },
+  { rule: "fold-blocked", cond: "Any writer is Blocked", color: "red", say: "Your decision is blocking work" },
+  { rule: "fold-active", cond: "Any writer is Working or ToolInFlight", color: "green", say: "Work is happening — leave it" },
+  { rule: "case13-unknown", cond: "Every writer is Unknown, or there are none", color: "gray", say: "Nothing observed yet" },
+  { rule: "fold-quiet", cond: "Otherwise", color: "orange", say: "Stopped; wants a new prompt" },
 ];
 
 // How a fold color shows up on the timeline you were just looking at. The
@@ -222,9 +222,9 @@ const LADDER = [
 // not met a "writer" yet.
 const LANE_MAP = [
   { color: "green", lane: "working", note: "The session is producing." },
-  { color: "green", lane: "dormant", note: "It handed off. The subagent bar underneath carries the work.", badge: "delegating" },
+  { color: "green", lane: "dormant", note: "It handed off; the subagent bar underneath carries the work.", badge: "delegating" },
   { color: "orange", lane: "idle", note: "Alive, waiting on a prompt from you." },
-  { color: "red", lane: "permission", note: "Waiting on your approval. The only status asking you for anything." },
+  { color: "red", lane: "permission", note: "Waiting on your approval — the only status that asks for anything." },
   { color: "suspended", lane: "suspended", note: "You paused the process (Ctrl-Z)." },
   { color: "gray", lane: "unknown", note: "Nothing observed. Drawn as an empty lane." },
 ];
