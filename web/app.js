@@ -403,25 +403,35 @@ function rememberDay(day, text) {
 //
 // Two guards make it safe to have several of these in flight, which a live poll
 // crossing a day switch guarantees:
-//   - the AbortController drops the previous request the moment a newer one is
-//     issued, so a superseded subprocess isn't also competing for the machine;
+//   - a day change aborts whatever is in flight, so a superseded subprocess is
+//     not also competing for the machine;
 //   - the seq check drops any response that is no longer the current request,
 //     which is what stops an in-flight poll for the OLD day from repainting the
 //     chart under the NEW day's label.
+//
+// A POLL, though, must never abort anything. Aborting on every issue looks
+// symmetrical and is a starvation bug: the fetch is ~1.4s against a 3s cadence
+// today, so one slow provider away, each poll would kill its predecessor at the
+// 3s mark and none would ever complete — the live view would freeze silently
+// with the dot still green. A poll that finds work in flight simply yields.
 async function loadTimeline(opts) {
   const reason = (opts && opts.reason) || "poll";
   const day = el.day.value;
-  const seq = ++win.seq;
 
   // A day we already hold settles with no network at all — this is what makes
   // stepping back through history instant rather than merely animated.
   const cached = dayCache.get(day);
   if (cached !== undefined && reason !== "poll") {
+    win.seq++;
     settleTimeline(day, cached, { fromCache: true });
     return;
   }
 
-  if (inflight) inflight.abort();
+  if (inflight) {
+    if (reason === "poll") return; // yield rather than displace live work
+    inflight.abort();
+  }
+  const seq = ++win.seq;
   const ctl = new AbortController();
   inflight = ctl;
 
@@ -692,15 +702,28 @@ function renderProjectsSkeleton() {
 // polling + prefetch
 // ---------------------------------------------------------------------------
 
-// schedulePoll runs the 3s timeline poll ONLY for the live window. A closed day
-// cannot change, so polling one re-spawned a 1.5s provider subprocess every 3
+// schedulePoll runs the timeline poll ONLY for the live window. A closed day
+// cannot change, so polling one re-spawned a ~1.5s provider subprocess every 3
 // seconds forever — a ~50% duty cycle of pure waste that competed with the very
 // request a day switch was waiting on. A hidden tab is idle for the same reason.
+//
+// The cadence is measured from COMPLETION, not on a fixed interval: POLL_MS is
+// the gap BETWEEN polls, so a provider that slows down stretches the cadence
+// instead of queueing spawns behind each other. With setInterval, a fetch
+// slower than POLL_MS would have the machine permanently busy re-deriving a day
+// it had not finished deriving. See docs/incremental-poll.md — the poll re-sends
+// ~92% unchanged bytes, and that is the thing actually worth fixing.
 function schedulePoll() {
-  if (timelineTimer) clearInterval(timelineTimer);
+  if (timelineTimer) clearTimeout(timelineTimer);
   timelineTimer = null;
   if (!isLiveWindow() || document.hidden) return;
-  timelineTimer = setInterval(() => loadTimeline({ reason: "poll" }), POLL_MS);
+  timelineTimer = setTimeout(pollTick, POLL_MS);
+}
+
+async function pollTick() {
+  timelineTimer = null;
+  if (!isLiveWindow() || document.hidden) return;
+  try { await loadTimeline({ reason: "poll" }); } finally { schedulePoll(); }
 }
 
 // schedulePrefetch warms the days an arrow press would reach next. It runs only
