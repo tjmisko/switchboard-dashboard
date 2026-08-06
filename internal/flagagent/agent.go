@@ -132,9 +132,32 @@ Known ways it goes wrong:
 - GHOST LANE: a trailing event arrives after the session_end that closed the
   lane, so the reader opens a second lane nothing ever closes and stretches it to
   the window bound. Look for a session_end whose timestamp PRECEDES a later
-  transition for the same session, often by under a millisecond, because the two
-  were written by different code paths racing. The synthesized lane is usually a
-  single long interval with no name.
+  transition for the same session. The synthesized lane is usually a single long
+  interval with no name.
+
+  That signature is a NET, not a diagnosis, and it catches at least two unrelated
+  causes. Check the pid on every event before deciding which one you have:
+
+  - SAME pid on both events, gap usually under a millisecond: two writers racing
+    at process death. Rare in practice.
+  - TWO DIFFERENT pids sharing one session_id, gap typically seconds: hook
+    misattribution. A nested "claude -p" fired a hook before the daemon had
+    discovered it, and the daemon credited that hook to the interactive session
+    that spawned it, so the parent briefly wore the helper's session_id. This was
+    the DOMINANT cause historically — on 2026-07-31 it accounted for 35 of the
+    session ids on that day, against 1 for the race above. Fixed upstream on
+    2026-08-05 (switchboard #59), so it should not appear in later days, but
+    earlier days are full of it.
+
+  The tell for the second case is that the interactive session takes the id
+  1-700ms BEFORE the helper's own session_start, and its dur_prev_ms chains
+  straight across the id change — the process never stopped working, only its
+  session_id moved. Do not report it as a lane defect: the underlying producer
+  bug is already fixed, and the honest repair is clip-at on the synthesized tail.
+
+  A gap of many minutes is neither. That is a legitimate resume — one session
+  ending and the same conversation continuing on a new pid later, which
+  history-schema.md explicitly permits. Verdict correct-data.
 - SPLIT LANE: one session's work reported as two lanes where BOTH halves hold
   observed events. This is not a ghost, and the repair is different.
 - MISATTRIBUTED PROJECT: correct timing, wrong project grouping — usually a cwd
