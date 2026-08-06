@@ -49,15 +49,30 @@ least two distinct phenomena:
 
 - **1 confirmed write-order race** — 2026-08-05, session `296eb0f0`, gap 1.16ms,
   both events on the **same pid** (1241937). The worked example above; it stands.
-- **12 of session-id bleed between two CONCURRENT processes** — a producer
-  defect, and the largest group. All twelve are on 07-31. Session `178517a7` is
-  the verified shape: the id is carried by **two live pids at once**, 121407
-  (`sb-dash`, the real interactive session) and 653188 (`tjmisko`, cwd
-  `~/.local/share/switchboard/summaries` — `session-digest`'s own `claude -p`
-  summarizer). While the helper lives, its lane absorbs the real session's
-  transitions; at the helper's `session_end` the reader closes that lane, and the
-  real session's next event finds no open lane and mints one that is never
-  closed.
+- **12 of hook misattribution from a nested `claude -p`** — a producer defect,
+  the largest group, and **fixed upstream** (switchboard issue #59 / PR #60,
+  merged 2026-08-05). All twelve are on 07-31. The id is carried by **two live
+  pids at once** — e.g. `178517a7` on 121407 (`sb-dash`, the real interactive
+  session) and on 653188 (cwd `~/.local/share/switchboard/summaries`,
+  `session-digest`'s own summarizer).
+
+  **The direction is the opposite of what it looks like.** The helper does not
+  absorb the real session's transitions; the real session takes the *helper's*
+  id. `switchboard-ctl hook` identifies its caller by `getppid()`, and the
+  daemon's `findTrackedAncestor` walked up to the nearest **tracked** pid. A
+  `claude -p` fires SessionStart within milliseconds of exec while discovery
+  registers it only on the next /proc scan tick (default 1s), so inside that
+  window the walk sailed past the helper onto its interactive parent — which then
+  took the helper's `SessionID`, had its `Transcript` repointed at the helper's
+  file, and had its pending prompts cleared by a false rotation.
+
+  The measurement that settles direction: in **32 of the 35** ids shared across
+  two pids that day, the parent took the id **1–700ms BEFORE** the helper's own
+  `session_start`. The whole distribution sits inside one scan tick. (Note 35, not
+  12 — the signature above is a net that catches only a third of the actual
+  bleed.) One interactive session cycled through **41 distinct ids** in 10.5
+  hours, and five other sessions live during the same 28-minute burst absorbed
+  nothing, which is what pins the cause to ancestry.
 
   It is worth being precise about why this is **not** the case
   `docs/history-schema.md` blesses. That contract — "One session can span **two**
@@ -65,11 +80,6 @@ least two distinct phenomena:
   second lane" — describes a **sequential** case: a resume, after the first
   process ended. This is **concurrent**: two processes alive at the same instant
   under one id, which no resume can produce.
-
-  The proof it is corruption rather than two real sessions is `dur_prev_ms`,
-  which chains exactly across the id churn — 4999ms in from the prior interval
-  (under id `18999231`), 4733ms out to the next (under id `2bc8369f`). The
-  process never stopped working; only its `session_id` changed underneath it.
 
   The repair is `clip-at`, not `suppress-lane`: the lane's head is the real
   session's genuine work, and only the tail is synthesized.
@@ -85,11 +95,16 @@ least two distinct phenomena:
 **Does this feature's own agent corrupt the data it repairs?** It is the obvious
 worry, since a flag investigation is itself a `claude -p` subprocess. Checked
 directly: every session id belonging to a flag investigation maps to exactly one
-pid, with no bleed onto a concurrent session. The mechanism that catches
-`session-digest`'s summarizer does not currently catch this one. Why it differs
-is not yet established — `--no-session-persistence` is the obvious candidate and
-is unverified — so this is a measurement, not a guarantee, and worth re-checking
-if the invocation changes.
+pid, with no bleed onto a concurrent session.
+
+The reason is **not** `--no-session-persistence`, which controls transcript
+persistence and has no bearing on whether hooks fire. It is ancestry: an
+investigation is spawned by the dashboard server, not from inside a tracked
+interactive session, so the ancestor walk found nothing tracked to misattribute
+onto. That made the clean result incidental to where the agent is launched from —
+it would have broken the moment an investigation were spawned from inside a
+session. Since the upstream fix landed the property no longer depends on that
+accident, because the walk now stops at the helper itself.
 
 The signature is therefore a net, not a diagnosis: cheap to compute and it does
 catch the race, but a match is a lane worth flagging rather than a lane known to
@@ -250,6 +265,12 @@ report with both viable fixes — and closed it by asserting that
 not; that vocabulary comes from the agent's own system prompt. The prompt now
 forbids attributing claims to unread files, but **read the draft before filing
 it.**
+
+The 07-31 group is the case for the gate rather than against it. The draft for it
+named a plausible mechanism confidently and had the causal direction backwards;
+only measuring the 35 shared ids against the helpers' own `session_start` times
+turned it into the diagnosis that became switchboard #59. A draft is a lead, not
+a filing.
 
 ### Investigations show up on the timeline
 
