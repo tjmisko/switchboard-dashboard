@@ -46,17 +46,17 @@ const STATES = [
     group: "no idea",
     short: "Nothing has been observed about this writer yet.",
     body:
-      "A freshly spawned writer, a freshly restarted daemon, or a session whose first hook " +
-      "has not landed. Deliberately NOT the same as Ended: “I don't know” and “it finished” " +
-      "are different claims, and a confident wrong guess is its own class of bug.",
-    you: "Nothing. Look again in a moment.",
+      "A fresh writer, a restarted daemon, or a session whose first hook has not landed. " +
+      "Distinct from Ended: “I don't know” and “it finished” are different claims, and a " +
+      "confident wrong guess is its own class of bug.",
+    you: "Wait a tick and look again.",
   },
   {
     id: "Working",
     folds: "green",
     group: "busy",
     short: "A turn is in flight and no tool is outstanding.",
-    body: "The writer is producing tokens. This is the ordinary shape of work happening.",
+    body: "The writer is producing tokens. The ordinary shape of work happening.",
     you: "Nothing. This is the state you want to see.",
   },
   {
@@ -65,9 +65,9 @@ const STATES = [
     group: "busy",
     short: "A tool was dispatched and its result has not come back.",
     body:
-      "Not user-blocking — nobody needs to do anything — but on disk this is INDISTINGUISHABLE " +
-      "from Blocked. It exists as a separate state precisely so the model can say that out loud.",
-    you: "Nothing. It is waiting on a machine, not on you.",
+      "Nobody needs to do anything, but on disk this is indistinguishable from Blocked. It is a " +
+      "separate state so the model can say that out loud.",
+    you: "Nothing. The wait is machine-side.",
     twin: true,
   },
   {
@@ -76,9 +76,9 @@ const STATES = [
     group: "wants you",
     short: "A dispatched tool is gated on a human decision.",
     body:
-      "The only state that requires you, the only one that folds to RED, and the only one a hook " +
-      "alone can establish. Nothing you can read off a file proves a writer is here.",
-    you: "Answer the prompt. Until you do, that writer is stopped.",
+      "The only state that requires you, the only one that folds to red, and the only one a hook " +
+      "alone can establish. No file signature proves a writer is here.",
+    you: "Answer it. That writer is stopped until you do, and clearing it is cheap.",
     twin: true,
   },
   {
@@ -86,8 +86,8 @@ const STATES = [
     folds: "orange",
     group: "done",
     short: "The turn finished — Stop fired, or the writer drained.",
-    body: "Work stopped on its own terms. Nothing is stuck; nothing is running either.",
-    you: "Your move, when convenient.",
+    body: "Work stopped on its own terms. Nothing is stuck and nothing is running.",
+    you: "Your move, when you have attention to spend.",
   },
   {
     id: "Interrupted",
@@ -95,9 +95,9 @@ const STATES = [
     group: "done",
     short: "You stopped the turn (Esc), or a prompt was declined.",
     body:
-      "Folds identically to Ended — the distinction is forensic. It is what lets a DECLINE be " +
-      "told from an APPROVE, since both leave a writer Blocked and neither fires a clearing hook.",
-    you: "Your move, when convenient.",
+      "Folds the same as Ended; the distinction is forensic. It separates a decline from an " +
+      "approve, since both leave a writer Blocked and neither fires a clearing hook.",
+    you: "Your move, when you have attention to spend.",
   },
   {
     id: "Dead",
@@ -105,8 +105,8 @@ const STATES = [
     group: "gone",
     short: "The writer no longer exists.",
     body:
-      "Absorbing: a gone writer never comes back, and anything that looks like its return is a " +
-      "NEW writer under a new key. This is the one state with no way out.",
+      "Absorbing. Anything that looks like its return is a new writer under a new key. The one " +
+      "state with no way out.",
     you: "Nothing.",
   },
 ];
@@ -122,23 +122,23 @@ const SOURCES = [
   {
     id: "hook",
     label: "hook",
-    tag: "Claude Code tells us",
+    tag: "the agent tells us",
     strength: "Authoritative, and it names the writer it belongs to.",
-    weakness: "Edge-triggered — it fires once and never repeats. A hook that is lost is lost.",
+    weakness: "Edge-triggered: fires once and never repeats. A lost hook is lost.",
   },
   {
     id: "transcript",
     label: "transcript",
     tag: "we read the writer's own file",
-    strength: "Level-triggered: always available, re-readable on every tick, survives a restart.",
-    weakness: "Ambiguous by construction — the same bytes are consistent with more than one state.",
+    strength: "Level-triggered: re-readable on every tick, and survives a restart.",
+    weakness: "Ambiguous by construction — the same bytes fit more than one state.",
   },
   {
     id: "clock/liveness",
     label: "clock · liveness",
     tag: "time passed, or the process is gone",
     strength: "Cannot be wrong about absence.",
-    weakness: "Proves only that something STOPPED happening. Never that something is happening.",
+    weakness: "Proves only that something stopped happening.",
   },
 ];
 
@@ -150,7 +150,7 @@ const EVIDENCE = [
   {
     id: "PermissionRequest", src: "hook", key: true,
     gloss:
-      "A tool needs your approval. The ONLY evidence that can establish Blocked — no file " +
+      "A tool needs your approval. The only evidence that can establish Blocked: no file " +
       "signature implies it, and no hook repeats it.",
   },
   {
@@ -162,42 +162,42 @@ const EVIDENCE = [
   {
     id: "ToolUncorrelated", src: "hook",
     gloss:
-      "Some OTHER tool of this writer's came back — an auto-approved sibling, a different call, " +
-      "or one whose input hash disagrees. Claude Code dispatches tools in parallel, so a blocked " +
-      "writer completing a sibling is routine. This must never resolve a prompt.",
+      "Some other tool of this writer's came back — an auto-approved sibling, a different call, " +
+      "or one whose input hash disagrees. Agents dispatch tools in parallel, so a blocked writer " +
+      "completing a sibling is routine. This must never resolve a prompt.",
   },
   { id: "Stop", src: "hook", gloss: "This writer's turn ended." },
   {
     id: "TailActivity", src: "transcript",
     gloss:
-      "New assistant content in the writer's own file. Proves it wrote SOMETHING; not what. A " +
-      "writer's own blocked turn keeps emitting content blocks for seconds after its prompt.",
+      "New assistant content in the writer's own file. Proves it wrote something, but not what. " +
+      "A blocked turn keeps emitting content blocks for seconds after its prompt.",
   },
   {
     id: "TailAllMatched", src: "transcript", key: true,
     gloss:
       "Every tool this writer dispatched has a matching result. The sound “nothing is " +
-      "outstanding” predicate — and the only thing strong enough to prove a gate opened.",
+      "outstanding” predicate, and the only thing strong enough to prove a gate opened.",
   },
   {
     id: "TailUnmatched", src: "transcript",
     gloss:
-      "At least one dispatched tool has no result. THE SHARED SIGNATURE: consistent with " +
-      "ToolInFlight and with Blocked alike, so it can move a writer INTO ToolInFlight but must " +
-      "never move one into or out of Blocked.",
+      "At least one dispatched tool has no result. The shared signature: consistent with " +
+      "ToolInFlight and Blocked alike, so it can move a writer into ToolInFlight but must never " +
+      "move one into or out of Blocked.",
   },
   { id: "TailInterrupt", src: "transcript", gloss: "An interrupt notice in the writer's own file." },
   {
     id: "TailUnreadable", src: "transcript",
     gloss:
       "The file cannot answer: missing, truncated, or a tail window that missed the dispatch. " +
-      "Always fails closed — it changes nothing, anywhere.",
+      "Always fails closed and changes nothing, anywhere.",
   },
   {
     id: "QuiescentPastCap", src: "clock/liveness",
     gloss:
       "The writer's file has not moved for longer than its cap. The backstop that stops a " +
-      "crashed teammate's prompt latching red forever.",
+      "crashed subagent's prompt latching red forever.",
   },
   { id: "Gone", src: "clock/liveness", universal: "Dead", gloss: "Proof the writer no longer exists." },
   {
@@ -213,22 +213,22 @@ const EVIDENCE = [
 // ---------------------------------------------------------------------------
 const LADDER = [
   { rule: "case1-gone", cond: "liveness is gone", color: "hidden", say: "no chip at all" },
-  { rule: "case2-suspended", cond: "liveness is suspended", color: "suspended", say: "greyed out — you paused this yourself" },
-  { rule: "fold-blocked", cond: "ANY writer is Blocked", color: "red", say: "someone is waiting on you" },
-  { rule: "fold-active", cond: "ANY writer is Working or ToolInFlight", color: "green", say: "work is happening — do nothing" },
-  { rule: "case13-unknown", cond: "EVERY writer is Unknown, or there are none", color: "gray", say: "we genuinely do not know" },
-  { rule: "fold-quiet", cond: "otherwise", color: "orange", say: "nothing running, nothing stuck — your move" },
+  { rule: "case2-suspended", cond: "liveness is suspended", color: "suspended", say: "you paused this yourself" },
+  { rule: "fold-blocked", cond: "ANY writer is Blocked", color: "red", say: "a decision of yours is blocking work" },
+  { rule: "fold-active", cond: "ANY writer is Working or ToolInFlight", color: "green", say: "work is happening — leave it" },
+  { rule: "case13-unknown", cond: "EVERY writer is Unknown, or there are none", color: "gray", say: "nothing observed yet" },
+  { rule: "fold-quiet", cond: "otherwise", color: "orange", say: "stopped; wants a new prompt" },
 ];
 
 // How a fold color shows up on the timeline you were just looking at. The
 // dashboard's lane vocabulary predates this model and is not going to be
 // renamed, so the mapping is the page's job.
 const LANE_MAP = [
-  { color: "red", lane: "permission", note: "A writer is Blocked. On the bar this is the only status that is asking for something." },
+  { color: "red", lane: "permission", note: "A writer is Blocked. The only status on the bar that is asking you for something now." },
   { color: "green", lane: "working", note: "The main thread itself is Working or has a tool in flight." },
-  { color: "green", lane: "dormant", note: "The main thread has Ended but a teammate is still going — the sub-bar underneath carries the solid green.", badge: "delegating" },
-  { color: "orange", lane: "idle", note: "Every writer is Ended or Interrupted. Alive, doing nothing." },
-  { color: "suspended", lane: "suspended", note: "The process is stopped (Ctrl-Z). Not a writer state at all — it sits outside the machine." },
+  { color: "green", lane: "dormant", note: "The main thread has Ended but a subagent is still going; the sub-bar underneath carries the solid green.", badge: "delegating" },
+  { color: "orange", lane: "idle", note: "Every writer is Ended or Interrupted. Alive, waiting on a prompt." },
+  { color: "suspended", lane: "suspended", note: "The process is stopped (Ctrl-Z). A liveness fact, sitting outside the machine." },
   { color: "gray", lane: "unknown", note: "Rendered as an empty status on the lane. Nothing has been observed." },
 ];
 
@@ -312,8 +312,8 @@ const DIVERGENCES = [
   {
     from: "Working", ev: "QuiescentPastCap", to: "Ended", shipped: "case6-idle-title",
     note:
-      "The shipped demotion reads the SESSION's terminal-pane title, which cannot be attributed " +
-      "to a writer. With a teammate live it demotes on the parent's idle glyph regardless of " +
+      "The shipped demotion reads the session's terminal-pane title, which cannot be attributed " +
+      "to a writer. With a subagent live it demotes on the parent's idle glyph regardless of " +
       "which writer actually went quiet.",
   },
   {

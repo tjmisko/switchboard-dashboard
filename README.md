@@ -77,8 +77,14 @@ actually reporting: that a session is `1 + N` **writers** (the main thread plus
 every in-flight subagent) sharing one chip, the seven states a writer can be in,
 the thirteen kinds of evidence Switchboard learns them from, the full 6 × 11
 transition table, and the fold that turns all of it into one color. The fold is
-interactive — set the writers and watch the lamp — and the page also lists the
+interactive — set the writers and watch the chip — and the page also lists the
 cells where the shipped daemon diverges from the model.
+
+It reads the ladder back as operator triage: red is a cheap decision holding up
+expensive work, green asks nothing, orange wants real input and can usually
+wait. `states.css` adds no visual vocabulary of its own — the dashboard's own
+sans, mono, flat square status swatches, `--bg-elev` cards and uppercase labels,
+so the manual looks like the instrument.
 
 The transition table is transcribed from Switchboard's
 `docs/writer-state-model.md`, which is itself generated from

@@ -17,7 +17,7 @@
 // ---------------------------------------------------------------------------
 
 // A state's color IS the fold branch it contributes to — a writer is only ever
-// visible to you as the lamp its state helps produce.
+// visible to you as the chip its state helps produce.
 const STATE_COLOR = {
   Unknown: "#7d8590",
   Working: "#3fb950",
@@ -44,9 +44,9 @@ const PILL_CLASS = {
 
 function stateInfo(id) { return STATES.find((s) => s.id === id); }
 function statePill(id) { return PILL_CLASS[stateInfo(id).folds]; }
-function lampClass(color) {
-  return { red: "lamp-red", green: "lamp-green", orange: "lamp-orange",
-           gray: "lamp-gray", suspended: "lamp-susp", hidden: "lamp-hidden" }[color];
+function swatchClass(color) {
+  return { red: "sw-red", green: "sw-green", orange: "sw-orange",
+           gray: "sw-gray", suspended: "sw-susp", hidden: "sw-hidden" }[color];
 }
 
 function esc(s) {
@@ -121,11 +121,11 @@ function buildStateCards() {
     return `
       <article class="scard${s.id === "Dead" ? " dead" : ""}" style="--sc:${c}">
         <div class="scard-head">
-          <span class="lamp ${lampClass(s.folds)}" aria-hidden="true"></span>
+          <span class="sw ${swatchClass(s.folds)}" aria-hidden="true"></span>
           <span class="scard-name">${s.id}</span>
+          ${s.twin ? '<span class="scard-twin">twin</span>' : ""}
           <span class="scard-folds">${folds}</span>
         </div>
-        ${s.twin ? '<span class="scard-twin">twin</span>' : ""}
         <p class="scard-short">${esc(s.short)}</p>
         <p class="scard-body">${esc(s.body)}</p>
         <p class="scard-you"><span class="yk">you</span><span>${esc(s.you)}</span></p>
@@ -262,17 +262,17 @@ function buildMachine() {
     const c = STATE_COLOR[id];
     const x = p.x - NODE.w / 2;
     const y = p.y - NODE.h / 2;
-    // ToolInFlight's lamp is hollow: it folds the same green as Working, but it
-    // is the state whose evidence is ambiguous, and the diagram should say so
+    // ToolInFlight's swatch is hollow: it folds the same green as Working, but
+    // it is the state whose evidence is ambiguous, and the diagram should say so
     // without inventing a seventh color.
-    const lamp =
+    const swatch =
       id === "ToolInFlight"
-        ? `<circle class="mn-lamp" cx="${x + 18}" cy="${p.y}" r="4.5" fill="none" stroke="${c}" stroke-width="1.6" />`
-        : `<circle class="mn-lamp" cx="${x + 18}" cy="${p.y}" r="4.5" fill="${c}" />`;
+        ? `<rect class="mn-sw" x="${x + 13}" y="${p.y - 4.5}" width="9" height="9" rx="2" fill="none" stroke="${c}" stroke-width="1.6" />`
+        : `<rect class="mn-sw" x="${x + 13}" y="${p.y - 4.5}" width="9" height="9" rx="2" fill="${c}" />`;
     parts.push(
       `<g class="mnode" data-id="${id}" style="--mn-c:${c}" tabindex="0" role="button" aria-label="${id}">` +
         `<rect class="mn-box" x="${x}" y="${y}" width="${NODE.w}" height="${NODE.h}" rx="17" />` +
-        lamp +
+        swatch +
         `<text class="mn-label" x="${x + 30}" y="${p.y + 4}">${id}</text>` +
         `</g>`
     );
@@ -468,7 +468,7 @@ function fold(writers, live) {
   return { color: "orange", rule: "fold-quiet" };
 }
 
-// The case-5 shape: the writer carrying the green is a teammate while the main
+// The case-5 shape: the writer carrying the green is a subagent while the main
 // thread has finished. A rendering hint, never a state.
 function delegating(writers, active) {
   if (active === "") return false;
@@ -490,7 +490,7 @@ function buildLadder() {
   document.getElementById("ladder").innerHTML = LADDER.map(
     (r) => `
       <li data-rule="${r.rule}" style="--rung-c:${r.color === "hidden" ? "var(--border)" : FOLD_COLOR[r.color]}; --rung-bg:${r.color === "hidden" ? "transparent" : FOLD_COLOR[r.color] + "1f"}">
-        <span class="lamp ${lampClass(r.color)}" aria-hidden="true"></span>
+        <span class="sw ${swatchClass(r.color)}" aria-hidden="true"></span>
         <span class="rung-cond">${esc(r.cond)}</span>
         <span class="rung-say">${esc(r.say)}</span>
         <span class="rung-rule">${r.rule}</span>
@@ -517,7 +517,7 @@ function buildSandbox() {
         return `<div class="sb-w"><span class="sb-wk">${label}</span><div class="sb-seg">${btns}</div>${drop}</div>`;
       })
       .join("") +
-    `<button type="button" class="sb-add" id="sb-add" ${keys.length >= SB_MAX ? "disabled" : ""}>+ teammate</button>`;
+    `<button type="button" class="sb-add" id="sb-add" ${keys.length >= SB_MAX ? "disabled" : ""}>+ subagent</button>`;
 
   document.getElementById("sb-live").innerHTML = ["running", "suspended", "gone"]
     .map(
@@ -536,15 +536,15 @@ function renderVerdict() {
   const named = v.writer === "" ? "main" : v.writer;
 
   let why;
-  if (v.color === "red") why = `<b>${named}</b> is blocked on you`;
+  if (v.color === "red") why = `<b>${named}</b> needs a decision from you`;
   else if (v.color === "green") why = `<b>${named}</b> is doing work`;
-  else if (v.color === "orange") why = "nothing is running and nothing is stuck";
+  else if (v.color === "orange") why = "nothing is running; the session wants a prompt";
   else if (v.color === "gray") why = "nothing has been observed about any writer";
-  else if (v.color === "suspended") why = "the process is stopped — writer states are moot";
+  else if (v.color === "suspended") why = "the process is stopped; writer states are moot";
   else why = "the process is gone";
 
   document.getElementById("sb-out").innerHTML =
-    `<span class="lamp ${lampClass(v.color)} lamp-xl" aria-hidden="true"></span>` +
+    `<span class="sw ${swatchClass(v.color)} sw-lg" aria-hidden="true"></span>` +
     `<span class="sb-color" style="color:${v.color === "hidden" ? "var(--fg-dim)" : c}">${label}</span>` +
     `<span class="sb-why">${why}</span>` +
     (v.delegating ? `<span class="sb-badge">delegating</span>` : "") +
@@ -592,7 +592,7 @@ function buildLaneMap() {
   document.getElementById("lanemap").innerHTML = LANE_MAP.map(
     (l) => `
       <div class="lanerow">
-        <span class="lamp ${lampClass(l.color)}" aria-hidden="true"></span>
+        <span class="sw ${swatchClass(l.color)}" aria-hidden="true"></span>
         <span class="ln-name">${l.lane}${l.badge ? `<span class="ln-badge">${l.badge}</span>` : ""}</span>
         <span class="ln-note">${esc(l.note)}</span>
       </div>`
@@ -675,9 +675,9 @@ document.getElementById("theme-toggle").addEventListener("click", () => {
 });
 themeMql.addEventListener("change", applyTheme);
 
-// The hero lamps jump to the fold. Set the sandbox to the case that produces
+// The hero swatches jump to the fold. Set the sandbox to the case that produces
 // the color you clicked, so the answer is already on screen when you land.
-document.querySelectorAll(".lamprow").forEach((a) => {
+document.querySelectorAll(".keyrow").forEach((a) => {
   a.addEventListener("click", () => {
     const preset = { red: "subblocked", green: "delegating", orange: "quiet", gray: "fresh" }[a.dataset.color];
     if (preset) {
