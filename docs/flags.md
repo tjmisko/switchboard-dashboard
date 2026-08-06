@@ -34,10 +34,42 @@ already spent the day polluting the totals.
 
 ### How often, measured
 
-Over the seven day-files 2026-07-30 → 08-05, the exact signature (a
-`session_end` followed in timestamp order by a later `transition` for the same
-session) occurs **16 times**: 1, 12, 0, 0, 0, 1, 2 per day. It is bursty rather
-than steady — the twelve on 07-31 land in one day.
+Over the seven day-files 2026-07-30 → 08-05, the signature (a `session_end`
+followed in timestamp order by a later `transition` for the same session)
+matches **16 times**: 1, 12, 0, 0, 0, 1, 2 per day. Sixteen matches are not
+sixteen races. Measuring the gap — transition timestamp minus `session_end`
+timestamp — forces the set apart:
+
+```
+min 1.16ms | median 3.3s | max 2249s (37.5 min)
+```
+
+A 37-minute gap is not two writers colliding at process death. The 16 are at
+least two distinct phenomena:
+
+- **1 confirmed write-order race** — 2026-08-05, session `296eb0f0`, gap 1.16ms,
+  both events on the **same pid** (1241937). The worked example above; it stands.
+- **12 of one session id across two pids** — all twelve are on 07-31 and all
+  report pid 121407, but each spans two processes: a long-lived interactive
+  session and a short-lived subprocess. Session `ef8ae98c` is the shape:
+  ```
+  14:49:10.538  transition  pid=121407  → idle     (long-lived interactive session)
+  14:49:10.870  transition  pid=546165  → working  (short-lived subprocess)
+  ```
+  The subprocess dies and emits `session_end`; the interactive session goes on
+  transitioning. Switchboard's `docs/history-schema.md` states the contract —
+  "One session can span **two** processes… after a `session_end`, the same id
+  reappearing is a second run and a second lane" — so the reader is doing what it
+  was told. Not a reader bug, and possibly not a bug; under separate
+  investigation.
+- **3 unclassified** — 07-30 `48c6630d` (pid 2953, `resume`), 08-04 `6169e789`
+  (pid 3917156, `arachne`), 08-05 `1e158165` (pid 3363273, `jobfeed`). Not yet
+  examined individually.
+
+The signature is therefore a net, not a diagnosis: cheap to compute and it does
+catch the race, but a match is a lane worth flagging rather than a lane known to
+be synthesized. Which is the case for investigating each flag instead of applying
+a blanket rule.
 
 The blind spot is total. Across every day swept, **every** unnamed
 single-interval lane came in **under** the 4h cap — 41 on 08-05, 19 on 08-04, 22
