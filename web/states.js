@@ -90,8 +90,18 @@ function tipify(el, html) {
 function buildRail() {
   const list = document.getElementById("rail-list");
   const secs = [...document.querySelectorAll(".sec")];
+  // the rail carries the page's one structural claim — the operator half ends
+  // here — so the separator is stamped before the first data-zone section
+  let zoned = false;
   list.innerHTML = secs
-    .map((s) => `<li><a href="#${s.id}" data-for="${s.id}"><span class="rn">${s.dataset.num}</span><span>${esc(s.dataset.rail)}</span></a></li>`)
+    .map((s) => {
+      let sep = "";
+      if (s.dataset.zone === "reference" && !zoned) {
+        zoned = true;
+        sep = `<li class="rail-sep">reference</li>`;
+      }
+      return `${sep}<li><a href="#${s.id}" data-for="${s.id}"><span class="rn">${s.dataset.num}</span><span>${esc(s.dataset.rail)}</span></a></li>`;
+    })
     .join("");
 
   const links = new Map([...list.querySelectorAll("a")].map((a) => [a.dataset.for, a]));
@@ -143,17 +153,22 @@ function buildSources() {
         <div class="source-h"><b>${esc(s.label)}</b><span class="source-tag">${esc(s.tag)}</span></div>
         <div class="source-line can"><span class="sl-m">+</span><span>${esc(s.strength)}</span></div>
         <div class="source-line cant"><span class="sl-m">−</span><span>${esc(s.weakness)}</span></div>
+        <p class="source-claude"><span class="sc-k">today</span>${esc(s.claude)}</p>
       </div>`
   ).join("");
 }
 
 function buildEvidence() {
   const host = document.getElementById("evgrid");
+  // the badge names the SOURCE as the section names it, not by the source's
+  // internal id — the cards above say "notification", so a chip reading "hook"
+  // would look like a fourth source
+  const badge = (id) => SOURCES.find((s) => s.id === id)?.badge || id;
   host.innerHTML = EVIDENCE.map(
     (e) => `
       <div class="ev" data-src="${e.src}" data-key="${e.key ? 1 : 0}" data-id="${e.id}">
         <span>${e.id}</span>
-        <span class="ev-src">${e.universal ? "universal" : e.src.split("/")[0]}</span>
+        <span class="ev-src">${e.universal ? "universal" : badge(e.src)}</span>
       </div>`
   ).join("");
 
@@ -445,38 +460,12 @@ function buildMatrix() {
 // ---------------------------------------------------------------------------
 // 5 · the fold
 //
-// This IS the fold, transcribed from internal/writerstate/fold.go: same six
-// branches, same order, same tie-break (sorted keys, so the writer named as the
-// reason is stable across ticks). A demo that only approximated it would teach
-// the wrong ladder.
+// `fold` and `delegating` come from states-model.js, which is the transcription
+// states.test.js keeps honest. states.js used to declare its own byte-identical
+// copies; being a classic script, those declarations shadowed the globals, so
+// the sandbox demonstrated a second transcription with no test behind it — the
+// exact drift the suite exists to prevent.
 // ---------------------------------------------------------------------------
-function fold(writers, live) {
-  if (live === "gone") return { color: "hidden", rule: "case1-gone" };
-  if (live === "suspended") return { color: "suspended", rule: "case2-suspended" };
-
-  const keys = Object.keys(writers).sort();
-
-  for (const k of keys) {
-    if (writers[k] === "Blocked") return { color: "red", rule: "fold-blocked", writer: k };
-  }
-  for (const k of keys) {
-    if (writers[k] === "Working" || writers[k] === "ToolInFlight") {
-      return { color: "green", rule: "fold-active", writer: k, delegating: delegating(writers, k) };
-    }
-  }
-  if (keys.every((k) => writers[k] === "Unknown")) return { color: "gray", rule: "case13-unknown" };
-  return { color: "orange", rule: "fold-quiet" };
-}
-
-// The case-5 shape: the writer carrying the green is a subagent while the main
-// thread has finished. A rendering hint, never a state.
-function delegating(writers, active) {
-  if (active === "") return false;
-  const main = writers[""];
-  if (main === undefined) return true;
-  return main !== "Working" && main !== "ToolInFlight";
-}
-
 const SB = { writers: { "": "Ended", "sub-1": "Working" }, live: "running" };
 const SB_MAX = 4;
 const SB_PRESETS = {

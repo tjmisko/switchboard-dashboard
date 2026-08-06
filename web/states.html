@@ -58,15 +58,15 @@
       <h2>What the status colors mean</h2>
       <p class="lede">
         Switchboard puts one colored chip on the bar for each coding-agent session, and the whole
-        model is meant to be read from across the room. <b>Red</b> is a decision of yours blocking
-        work that could be running. <b>Green</b> is work running. <b>Orange</b> is a session that
-        has stopped and wants a new prompt.
+        model is meant to be read from across the room. <b>Green</b> is work running.
+        <b>Orange</b> is a session that has stopped and wants a new prompt. <b>Red</b> is a
+        decision of yours blocking work that could be running.
       </p>
       <p class="lede-sub">
-        The color is computed: a small total function over everything Switchboard currently
-        believes about that session. This page walks that function backwards, from the chip to the
-        evidence underneath it. For why a chip was green with nothing apparently happening, or red
-        long after you answered, see <a href="#machine">§4</a> and <a href="#fold">§5</a>.
+        The color is computed, not guessed — a total function over everything Switchboard currently
+        believes about the session. The first four sections are what an operator needs;
+        <a href="#states">the reference half</a> is the model underneath, for changing the daemon or
+        writing a provider.
       </p>
     </div>
 
@@ -74,11 +74,6 @@
          earned. -->
     <aside class="keystrip" aria-label="what each chip color means">
       <p class="cap">at a glance</p>
-      <a class="keyrow" href="#fold" data-color="red">
-        <span class="sw sw-red" aria-hidden="true"></span>
-        <span class="kr-t"><b>red</b><span>your decision is blocking work</span></span>
-        <span class="kr-do">answer now</span>
-      </a>
       <a class="keyrow" href="#fold" data-color="green">
         <span class="sw sw-green" aria-hidden="true"></span>
         <span class="kr-t"><b>green</b><span>work is in flight in the session</span></span>
@@ -89,14 +84,19 @@
         <span class="kr-t"><b>orange</b><span>stopped; wants a new prompt</span></span>
         <span class="kr-do">when you can</span>
       </a>
+      <a class="keyrow" href="#fold" data-color="red">
+        <span class="sw sw-red" aria-hidden="true"></span>
+        <span class="kr-t"><b>red</b><span>your decision is blocking work</span></span>
+        <span class="kr-do">answer now</span>
+      </a>
       <a class="keyrow" href="#fold" data-color="gray">
         <span class="sw sw-gray" aria-hidden="true"></span>
-        <span class="kr-t"><b>gray</b><span>nothing observed yet</span></span>
+        <span class="kr-t"><b>unknown</b><span>nothing observed yet</span></span>
         <span class="kr-do">wait a tick</span>
       </a>
       <a class="keyrow" href="#fold" data-color="suspended">
         <span class="sw sw-susp" aria-hidden="true"></span>
-        <span class="kr-t"><b>grey</b><span>you suspended this session</span></span>
+        <span class="kr-t"><b>suspended</b><span>you paused this session</span></span>
         <span class="kr-do">fg it</span>
       </a>
     </aside>
@@ -111,14 +111,31 @@
 
     <main class="guide">
 
-      <!-- ===================== 1 · writers ===================== -->
-      <section class="sec" id="writers" data-num="01" data-rail="one chip, several writers">
+      <!-- ===================== 1 · the timeline =====================
+           First, because it is the only section that turns a bar the reader is
+           currently staring at into a sentence they can act on. Everything
+           after it explains where these six colors come from. -->
+      <section class="sec" id="timeline" data-num="01" data-rail="the six lane colors">
+        <h3>The six lane colors</h3>
+        <p>
+          Every bar on the <a href="./">dashboard</a> is one of six statuses. The whole vocabulary;
+          the rest of the page is where a color comes from.
+        </p>
+        <div class="lanemap" id="lanemap"></div>
+        <p class="lane-foot">
+          <b>dormant</b> is the one worth internalizing: the session handed off, and the green
+          underneath belongs to the subagent. Dormant time is delegated time, which is why the
+          dashboard counts it as leverage.
+        </p>
+      </section>
+
+      <!-- ===================== 2 · writers ===================== -->
+      <section class="sec" id="writers" data-num="02" data-rail="one chip, several writers">
         <h3>One chip, several writers</h3>
 
         <p>
-          A session is <b>1 + N writers</b>: the main thread plus every subagent in flight. They
-          share a process, a transcript path, and one chip. Each can block on its own permission
-          prompt, independently of the others.
+          A session is <b>1 + N writers</b>: the main thread plus every subagent in flight, sharing
+          one process, one log, one chip. Each can block on its own permission prompt.
         </p>
 
         <figure class="fig">
@@ -150,189 +167,29 @@
               <span class="an-out-s">because <code>sub-2</code> is blocked</span>
             </div>
           </div>
-          <figcaption>
-            The main thread finished, one subagent is producing, a third is waiting on you. The
-            chip reports the most actionable of the three.
-          </figcaption>
         </figure>
 
         <ul class="conseq">
-          <li><b>“Is the agent working?” has no single answer.</b> Several writers sit behind one chip.</li>
-          <li><b>Green can mean the main thread stopped a minute ago</b> while three subagents run on. That is delegation working.</li>
-          <li><b>Red can belong to a subagent you never started by hand.</b> It costs the same keystroke to clear and unblocks work you cannot see, so treat it exactly like the main thread's.</li>
+          <li><b>Green can mean the main thread stopped a minute ago</b> while three subagents run on.</li>
+          <li><b>Red can belong to a subagent you never started by hand.</b> It costs the same keystroke to clear and unblocks work you cannot see.</li>
         </ul>
 
-        <h4>Three layers, and only the first has memory</h4>
-        <div class="layers">
-          <div class="layer">
-            <span class="layer-n">1</span>
-            <div>
-              <p class="layer-t">per-writer machine</p>
-              <p class="layer-d">Evidence arrives, the writer moves. Where it lands depends on where it was.</p>
-              <p class="layer-m yes">has memory — the only state machine here</p>
-            </div>
-          </div>
-          <div class="layer">
-            <span class="layer-n">2</span>
-            <div>
-              <p class="layer-t">session belief</p>
-              <p class="layer-d">A map of writer → state, plus one liveness flag for the process.</p>
-              <p class="layer-m no">no memory — a product of layer 1</p>
-            </div>
-          </div>
-          <div class="layer">
-            <span class="layer-n">3</span>
-            <div>
-              <p class="layer-t">the chip</p>
-              <p class="layer-d">A pure, total function of layer 2. Same writers in, same color out.</p>
-              <p class="layer-m no">no memory — by construction</p>
-            </div>
-          </div>
-        </div>
-
-        <blockquote class="pull">
-          The color layer must have no memory. Memory there is a latch, and a latch that drifts out
-          of step with the world produces <b>stale red</b> and <b>false green</b>.
-        </blockquote>
-      </section>
-
-      <!-- ===================== 2 · states ===================== -->
-      <section class="sec" id="states" data-num="02" data-rail="what a writer can be">
-        <h3>What a writer can be</h3>
         <p>
-          Seven states. Each is a claim about a single writer, never about the session, and each
-          contributes a color to the fold in <a href="#fold">§5</a>.
-        </p>
-        <div class="statecards" id="statecards"></div>
-
-        <div class="twins" id="twins">
-          <p class="cap">the ambiguity at the center of the model</p>
-          <div class="twins-body">
-            <div class="twins-diagram" aria-hidden="true">
-              <div class="twin">
-                <span class="pill pill-green">ToolInFlight</span>
-                <span class="twin-sig">unmatched <code>tool_use</code> in the tail</span>
-              </div>
-              <div class="twin-join"><span>identical on disk</span></div>
-              <div class="twin">
-                <span class="pill pill-red">Blocked</span>
-                <span class="twin-sig">unmatched <code>tool_use</code> in the tail</span>
-              </div>
-            </div>
-            <div class="twins-copy">
-              <p>
-                A tool that is merely running and a tool that is waiting for your approval leave
-                <b>the same mark</b> in the transcript. The only thing separating them is a single
-                <code>PermissionRequest</code> hook, which fires once, on the edge, and never
-                repeats.
-              </p>
-              <p>Three things the rest of this page needs fall out of that:</p>
-              <ol class="fallout">
-                <li><b>Blocked cannot be rebuilt by reading files</b>, so it is the one state that has to survive a daemon restart.</li>
-                <li><b>The transcript can only ever say “ToolInFlight <em>or</em> Blocked.”</b> It can falsify a belief; it can never establish one.</li>
-                <li><b>Leaving Blocked needs the negation of that shared mark</b> — every dispatched tool matched. Anything weaker cannot tell the twins apart, so it cannot prove your prompt was answered.</li>
-              </ol>
-              <p class="twins-foot">
-                The third is a live defect in the shipped daemon, named and measured in
-                <a href="#drift">§7</a>.
-              </p>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <!-- ===================== 3 · evidence ===================== -->
-      <section class="sec" id="evidence" data-num="03" data-rail="how it finds out">
-        <h3>How it finds out</h3>
-        <p>
-          Switchboard observes; it never asks an agent how it is doing. Everything it knows arrives
-          as one of thirteen kinds of evidence from one of three sources, and the source bounds how
-          much a kind is allowed to prove.
-        </p>
-
-        <div class="sources" id="sources"></div>
-
-        <p class="ev-lead">
-          Hover any kind for what it means. The two marked <span class="key-mark">key</span> are
-          load-bearing: one is the only way into <span class="pill pill-red pill-sm">Blocked</span>,
-          the other the only sound way out.
-        </p>
-        <div class="evgrid" id="evgrid"></div>
-
-        <div class="universal">
-          <p class="cap">two rules that apply from every state</p>
-          <ul>
-            <li><code>Gone</code> → <span class="pill pill-dead">Dead</span> — the process exited, or the subagent was force-closed. Absorbing: nothing comes back from here.</li>
-            <li><code>SessionRotated</code> → <span class="pill pill-gray">Unknown</span> — a <code>/clear</code> or a fork changed the session id under the same pid, so every prompt recorded against the old id died with it.</li>
-          </ul>
-          <p class="uni-foot">
-            Stated once here rather than repeated in all seven rows below, which is how the model
-            states them too.
-          </p>
-        </div>
-      </section>
-
-      <!-- ===================== 4 · the machine ===================== -->
-      <section class="sec" id="machine" data-num="04" data-rail="the machine">
-        <h3>The machine</h3>
-        <p>
-          All 6 live states × 11 kinds of evidence, spelled out — 66 cells, no defaults. A
-          defaulted row is where a gap hides.
-        </p>
-        <p class="hint">
-          Pick a state to read its row: the wiring lights up, and the panel lists what every piece
-          of evidence does to a writer sitting there.
-        </p>
-
-        <div class="machine-wrap">
-          <div class="machine-diagram">
-            <svg id="machine-svg" role="img" aria-label="writer state transition diagram"></svg>
-            <p class="mach-cap">
-              <span class="mc-item"><span class="mc-line solid"></span>moves the writer</span>
-              <span class="mc-item"><span class="mc-line dashed"></span>arrives here from</span>
-              <span class="mc-item mc-note">holds are listed in the panel rather than drawn</span>
-            </p>
-            <!-- the reverse question the panel doesn't answer: not "what does
-                 evidence do to a writer here" but "what put it here". For
-                 Blocked that list is one line long, which is the whole
-                 argument of §2 arriving as a fact. -->
-            <div class="mach-in" id="mach-in"></div>
-          </div>
-          <div class="machine-panel" id="machine-panel"></div>
-        </div>
-
-        <h4>The whole table at once</h4>
-        <p class="hint">
-          A filled square moves the writer and takes its destination's color. A hollow square is a
-          <b>hold</b>: evidence that arrived and deliberately changed nothing. Hover any cell for
-          the reason.
-        </p>
-        <div class="matrix-scroll">
-          <table class="matrix" id="matrix"></table>
-        </div>
-        <p class="matrix-key">
-          <span class="mk"><span class="mk-sq"></span>state change</span>
-          <span class="mk"><span class="mk-ring"></span>hold</span>
-          <span class="mk"><span class="mk-div"></span>shipped daemon diverges (<a href="#drift">§7</a>)</span>
-          <span class="mk"><span class="mk-gap"></span>no shipped rule implements it</span>
+          Only the per-writer machine in <a href="#machine">§7</a> has memory. The chip is a pure
+          function of the writer → state map, memoryless by construction, because a latch in the
+          color layer is what <b>stale red</b> and <b>false green</b> are made of.
         </p>
       </section>
 
-      <!-- ===================== 5 · the fold ===================== -->
-      <section class="sec" id="fold" data-num="05" data-rail="the fold">
-        <h3>The fold</h3>
-        <p>
-          Layer 3. Six rungs, checked in order, first match wins. No memory, no special cases, and
-          nothing here knows whether a writer is the main thread or a subagent.
-        </p>
+      <!-- ===================== 3 · the fold ===================== -->
+      <section class="sec" id="fold" data-num="03" data-rail="how the chip is chosen">
+        <h3>How the chip is chosen</h3>
+        <p>Six rungs, first match wins. Nothing here knows a main thread from a subagent.</p>
 
         <ol class="ladder" id="ladder"></ol>
 
         <h4>Why red sits above green</h4>
-        <p>
-          The order is a claim about what your attention is worth, not about what is most
-          interesting. Rungs 3 to 6 rank by what it costs you to leave a session alone.
-        </p>
+        <p>The rungs rank by what it costs you to leave a session alone.</p>
 
         <div class="triage">
           <div class="tri">
@@ -341,8 +198,7 @@
               <p class="tri-t">red — a cheap decision is holding up expensive work</p>
               <p class="tri-d">
                 Approval or a one-line answer, and behind it a chain of work that would otherwise
-                have run unattended. The best return on a second of your time on the board. A
-                subagent's red costs the same to clear and is just as expensive to leave.
+                run unattended. The best return on a second of your time.
               </p>
             </div>
             <span class="tri-cost now">clear it now</span>
@@ -360,9 +216,9 @@
             <div>
               <p class="tri-t">orange — the session wants real input</p>
               <p class="tri-d">
-                A new prompt, a review, a decision you have to think about. Nothing was going to
-                proceed here without you, so the cost of letting it sit is the delay alone. Batching
-                orange to protect a block of your own focus is often the right trade.
+                A new prompt, a review, a decision you have to think about. Nothing here was going
+                to proceed without you, so leaving it costs only the delay — batching orange to
+                protect a block of focus is often the right trade.
               </p>
             </div>
             <span class="tri-cost later">when you have attention</span>
@@ -370,10 +226,7 @@
         </div>
 
         <h4>Try it</h4>
-        <p class="hint">
-          Set the writers and watch the chip. This is the real fold: the same six rungs, in the same
-          order, including which writer gets named as the reason.
-        </p>
+        <p class="hint">Set the writers and watch the chip. This is the real fold.</p>
 
         <div class="sandbox" id="sandbox">
           <div class="sb-controls">
@@ -392,43 +245,147 @@
           </div>
           <div class="sb-out" id="sb-out"></div>
         </div>
+      </section>
 
-        <div class="disappears">
-          <p class="cap">what this abstraction buys</p>
-          <p>
-            An earlier model carried in-flight subagents as a separate <em>dimension</em>, alongside
-            the main thread's state and the pending-prompt count — five rows of case table and two
-            named rules to reconcile them. Here a live subagent is simply a writer that is Working,
-            so <b>“delegating” is not a state, a rule, or a special case</b>. It is the ordinary
-            green rung, reached with the main thread in Ended. It survives only as a badge on the
-            verdict, for a tooltip that wants to say how many.
-          </p>
+      <!-- ===================== 4 · the caveat ===================== -->
+      <section class="sec" id="wrong" data-num="04" data-rail="when the chip is wrong">
+        <h3>When the chip is wrong</h3>
+        <p>
+          The daemon does not implement all of the model below. The one that will bite you:
+          <b>a red can clear before you actually answered</b> — measured at 5s into a prompt that
+          stayed unanswered for another 3m07s. Your terminal is the source of truth.
+        </p>
+        <p class="hint">
+          Both divergences and four unimplemented transitions, with cell coordinates and rule ids,
+          are in <a href="#drift">§8</a>.
+        </p>
+      </section>
+
+      <!-- ===================== reference zone ===================== -->
+      <div class="zone-break">
+        <span class="zone-label">reference</span>
+        <span class="zone-note">the model underneath — for anyone changing the daemon or writing a provider</span>
+      </div>
+
+      <!-- ===================== 5 · states ===================== -->
+      <section class="sec" id="states" data-num="05" data-zone="reference" data-rail="what a writer can be">
+        <h3>What a writer can be</h3>
+        <p>Seven states. Each is a claim about a single writer, never about the session.</p>
+        <div class="statecards" id="statecards"></div>
+
+        <div class="twins" id="twins">
+          <p class="cap">the ambiguity at the center of the model</p>
+          <div class="twins-body">
+            <div class="twins-diagram" aria-hidden="true">
+              <div class="twin">
+                <span class="pill pill-green">ToolInFlight</span>
+                <span class="twin-sig">unmatched <code>tool_use</code> in the tail</span>
+              </div>
+              <div class="twin-join"><span>identical on disk</span></div>
+              <div class="twin">
+                <span class="pill pill-red">Blocked</span>
+                <span class="twin-sig">unmatched <code>tool_use</code> in the tail</span>
+              </div>
+            </div>
+            <div class="twins-copy">
+              <p>
+                A tool that is merely running and one waiting for your approval leave <b>the same
+                mark</b> in the log. Only a permission notification separates them, and it fires
+                once, on the edge. Three invariants follow:
+              </p>
+              <ol class="fallout">
+                <li><b>Blocked cannot be rebuilt by reading files</b>, so it is the one state that has to survive a daemon restart.</li>
+                <li><b>The log can only ever say “ToolInFlight <em>or</em> Blocked.”</b> It can falsify a belief; it can never establish one.</li>
+                <li><b>Leaving Blocked needs the negation of that shared mark</b> — every dispatched tool matched. Anything weaker cannot tell the twins apart, so it cannot prove your prompt was answered. The shipped daemon breaks this one (<a href="#drift">§8</a>).</li>
+              </ol>
+            </div>
+          </div>
         </div>
       </section>
 
-      <!-- ===================== 6 · the timeline ===================== -->
-      <section class="sec" id="timeline" data-num="06" data-rail="back on the timeline">
-        <h3>Back on the timeline</h3>
+      <!-- ===================== 6 · evidence ===================== -->
+      <section class="sec" id="evidence" data-num="06" data-zone="reference" data-rail="how it finds out">
+        <h3>How it finds out</h3>
         <p>
-          The <a href="./">dashboard</a> colors its swimlanes with the same six outcomes, under
-          older names that predate this model. Here is the mapping, so a bar you are staring at can
-          be read as a claim about writers.
+          Switchboard observes; it never asks an agent how it is doing. Three sources, and the
+          source bounds what evidence from it can prove. This is the contract a provider adapter
+          satisfies; Claude is the one instantiation shipping today.
         </p>
-        <div class="lanemap" id="lanemap"></div>
-        <p class="lane-foot">
-          The one worth internalizing is <b>dormant</b>. A dormant parent has handed off, and the
-          solid green underneath it belongs to the subagent doing the work. Dormant time is
-          delegated time, which is why the dashboard counts it as leverage.
+
+        <div class="sources" id="sources"></div>
+
+        <p>
+          So <b>a provider with no permission notification can never paint red</b> — no log
+          distinguishes a gated tool from a running one — and reaches only green, orange and gray.
+          A source with no status concept at all is still legitimate: the
+          <a href="https://github.com/tjmisko/switchboard-dashboard/blob/main/docs/provider-contract.md">provider contract</a>
+          accepts one <code>working</code> interval spanning the lifetime.
+        </p>
+
+        <p class="ev-lead">
+          The thirteen kinds Claude supplies. Hover for meaning; the two marked
+          <span class="key-mark">key</span> are load-bearing.
+        </p>
+        <div class="evgrid" id="evgrid"></div>
+
+        <div class="universal">
+          <p class="cap">two rules that apply from every state</p>
+          <ul>
+            <li><code>Gone</code> → <span class="pill pill-dead">Dead</span> — the process exited, or the subagent was force-closed.</li>
+            <li><code>SessionRotated</code> → <span class="pill pill-gray">Unknown</span> — a <code>/clear</code> or a fork changed the session id under the same pid, retiring every prompt recorded against the old one.</li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- ===================== 7 · the machine ===================== -->
+      <section class="sec" id="machine" data-num="07" data-zone="reference" data-rail="the machine">
+        <h3>The machine</h3>
+        <p>
+          All 6 live states × 11 kinds of evidence — 66 cells, no defaults; an unlisted cell throws
+          rather than guessing. Evidence is attributed to a writer <em>by the caller</em>, so the
+          machine assumes routing already happened and cross-writer bugs live outside it.
+        </p>
+        <p class="hint">Pick a state to read its row.</p>
+
+        <div class="machine-wrap">
+          <div class="machine-diagram">
+            <svg id="machine-svg" role="img" aria-label="writer state transition diagram"></svg>
+            <p class="mach-cap">
+              <span class="mc-item"><span class="mc-line solid"></span>moves the writer</span>
+              <span class="mc-item"><span class="mc-line dashed"></span>arrives here from</span>
+              <span class="mc-item mc-note">holds are listed in the panel rather than drawn</span>
+            </p>
+            <!-- the reverse question the panel doesn't answer: not "what does
+                 evidence do to a writer here" but "what put it here". For
+                 Blocked that list is one line long, which is the whole
+                 argument of §5 arriving as a fact. -->
+            <div class="mach-in" id="mach-in"></div>
+          </div>
+          <div class="machine-panel" id="machine-panel"></div>
+        </div>
+
+        <h4>The whole table at once</h4>
+        <p class="hint">
+          Filled square: moves the writer, in its destination's color. Hollow: a <b>hold</b> —
+          evidence that changed nothing. Hover any cell for the reason and its shipped rule id.
+        </p>
+        <div class="matrix-scroll">
+          <table class="matrix" id="matrix"></table>
+        </div>
+        <p class="matrix-key">
+          <span class="mk"><span class="mk-sq"></span>state change</span>
+          <span class="mk"><span class="mk-ring"></span>hold</span>
+          <span class="mk"><span class="mk-div"></span>shipped daemon diverges (<a href="#drift">§8</a>)</span>
+          <span class="mk"><span class="mk-gap"></span>no shipped rule implements it</span>
         </p>
       </section>
 
-      <!-- ===================== 7 · drift ===================== -->
-      <section class="sec" id="drift" data-num="07" data-rail="model vs. daemon">
+      <!-- ===================== 8 · drift ===================== -->
+      <section class="sec" id="drift" data-num="08" data-zone="reference" data-rail="model vs. daemon">
         <h3>Where the model and the daemon disagree</h3>
         <p>
-          This page describes the specification. The daemon shipping today does not implement all of
-          it. Those are defects, and they are listed rather than smoothed over: a page that quietly
-          described the intended behavior would make a real bug unfalsifiable.
+          The live bug inventory. A page that described the intended behavior instead would make a
+          real bug unfalsifiable.
         </p>
 
         <h4>Two cells behave differently in practice</h4>
@@ -436,9 +393,10 @@
 
         <h4>Four transitions nothing implements</h4>
         <p class="hint">
-          All four are <span class="pill pill-green pill-sm">ToolInFlight</span> cells. That is the
-          finding: the daemon has no representation of that state at all, which is why it cannot
-          tell a tool waiting on you from a tool waiting on a machine.
+          All four are <span class="pill pill-green pill-sm">ToolInFlight</span> cells: the daemon
+          has no representation of that state, which is why it cannot tell a tool waiting on you
+          from one waiting on a machine. Their rule ids mean the edge fires, not that the daemon
+          can occupy the state.
         </p>
         <div class="gaps" id="gaps"></div>
       </section>

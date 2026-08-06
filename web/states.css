@@ -154,6 +154,25 @@
 .rail a.on { color: var(--fg); border-left-color: var(--accent); background: var(--bg-elev); }
 .rail a.on .rn { color: var(--accent); }
 
+.rail-sep {
+  margin: 14px 0 6px; padding: 0 8px;
+  font-family: var(--mono); font-size: 9.5px; text-transform: uppercase; letter-spacing: 1.1px;
+  color: var(--fg-dim); border-top: 1px solid var(--border-soft); padding-top: 10px;
+}
+
+/* the operator half ends here. A labelled rule rather than a collapsed block:
+   the reference below is what a contributor arrives with a rule id to Ctrl-F,
+   and collapsed content does not answer a find. */
+.zone-break {
+  display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+  margin: 0 0 40px; padding-top: 26px; border-top: 1px solid var(--border);
+}
+.zone-label {
+  font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 1.4px;
+  color: var(--fg-muted);
+}
+.zone-note { font-size: 12.5px; color: var(--fg-dim); }
+
 .guide { padding: 46px 0 40px; min-width: 0; }
 .sec { margin-bottom: 76px; scroll-margin-top: 74px; }
 .sec::before {
@@ -310,6 +329,19 @@
 .source-line.can .sl-m { color: var(--c-working); }
 .source-line.cant .sl-m { color: var(--c-permission); }
 .source-line span:last-child { color: var(--fg-muted); }
+
+/* what the Claude adapter uses for this source — set apart from the two
+   contract lines above it, which hold for any provider */
+.source-claude {
+  display: flex; gap: 8px; align-items: baseline;
+  margin: 10px 0 0 !important; padding-top: 9px;
+  border-top: 1px solid var(--border-soft);
+  font-family: var(--mono); font-size: 11px; color: var(--fg-muted);
+}
+.source-claude .sc-k {
+  font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.7px;
+  color: var(--fg-dim); flex: none;
+}
 
 .ev-lead { margin-top: 22px !important; }
 .key-mark {

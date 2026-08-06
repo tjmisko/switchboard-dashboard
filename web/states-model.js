@@ -46,10 +46,9 @@ const STATES = [
     group: "no idea",
     short: "Nothing has been observed about this writer yet.",
     body:
-      "A fresh writer, a restarted daemon, or a session whose first hook has not landed. " +
       "Distinct from Ended: “I don't know” and “it finished” are different claims, and a " +
       "confident wrong guess is its own class of bug.",
-    you: "Wait a tick and look again.",
+    you: "Wait a tick.",
   },
   {
     id: "Working",
@@ -57,16 +56,14 @@ const STATES = [
     group: "busy",
     short: "A turn is in flight and no tool is outstanding.",
     body: "The writer is producing tokens. The ordinary shape of work happening.",
-    you: "Nothing. This is the state you want to see.",
+    you: "Nothing.",
   },
   {
     id: "ToolInFlight",
     folds: "green",
     group: "busy",
     short: "A tool was dispatched and its result has not come back.",
-    body:
-      "Nobody needs to do anything, but on disk this is indistinguishable from Blocked. It is a " +
-      "separate state so the model can say that out loud.",
+    body: "Split out of Working only because its on-disk signature is Blocked's. See the twins below.",
     you: "Nothing. The wait is machine-side.",
     twin: true,
   },
@@ -75,10 +72,8 @@ const STATES = [
     folds: "red",
     group: "wants you",
     short: "A dispatched tool is gated on a human decision.",
-    body:
-      "The only state that requires you, the only one that folds to red, and the only one a hook " +
-      "alone can establish. No file signature proves a writer is here.",
-    you: "Answer it. That writer is stopped until you do, and clearing it is cheap.",
+    body: "The only state a notification alone can establish, and the only one that folds to red.",
+    you: "Answer it. That writer is stopped until you do.",
     twin: true,
   },
   {
@@ -87,7 +82,7 @@ const STATES = [
     group: "done",
     short: "The turn finished — Stop fired, or the writer drained.",
     body: "Work stopped on its own terms. Nothing is stuck and nothing is running.",
-    you: "Your move, when you have attention to spend.",
+    you: "Your move, when you can.",
   },
   {
     id: "Interrupted",
@@ -96,17 +91,15 @@ const STATES = [
     short: "You stopped the turn (Esc), or a prompt was declined.",
     body:
       "Folds the same as Ended; the distinction is forensic. It separates a decline from an " +
-      "approve, since both leave a writer Blocked and neither fires a clearing hook.",
-    you: "Your move, when you have attention to spend.",
+      "approve, which are otherwise indistinguishable.",
+    you: "Your move, when you can.",
   },
   {
     id: "Dead",
     folds: "hidden",
     group: "gone",
     short: "The writer no longer exists.",
-    body:
-      "Absorbing. Anything that looks like its return is a new writer under a new key. The one " +
-      "state with no way out.",
+    body: "Absorbing. Anything that looks like its return is a new writer under a new key.",
     you: "Nothing.",
   },
 ];
@@ -118,25 +111,36 @@ const STATES = [
 // `proves` / `cannot` are the honest pair: every kind here is believed exactly
 // as far as its second line allows.
 // ---------------------------------------------------------------------------
+// Named for what a source IS, not for how Claude supplies it: the shape is the
+// adapter contract, and `claude` is what today's one instantiation happens to
+// use. A provider that cannot supply the notification source can never paint
+// red — the evidence kinds keep their shipped names because those are the
+// strings a contributor greps for in the daemon's log lines.
 const SOURCES = [
   {
     id: "hook",
-    label: "hook",
+    label: "notification",
+    badge: "notify",
     tag: "the agent tells us",
+    claude: "Claude Code hooks",
     strength: "Authoritative, and it names the writer it belongs to.",
-    weakness: "Edge-triggered: fires once and never repeats. A lost hook is lost.",
+    weakness: "Edge-triggered: fires once and never repeats. A lost one is lost.",
   },
   {
     id: "transcript",
-    label: "transcript",
-    tag: "we read the writer's own file",
+    label: "the agent's log",
+    badge: "log",
+    tag: "we read what the writer wrote",
+    claude: "the session transcript's tail",
     strength: "Level-triggered: re-readable on every tick, and survives a restart.",
     weakness: "Ambiguous by construction — the same bytes fit more than one state.",
   },
   {
     id: "clock/liveness",
     label: "clock · liveness",
+    badge: "clock",
     tag: "time passed, or the process is gone",
+    claude: "pid state and file mtimes",
     strength: "Cannot be wrong about absence.",
     weakness: "Proves only that something stopped happening.",
   },
@@ -149,62 +153,51 @@ const EVIDENCE = [
   },
   {
     id: "PermissionRequest", src: "hook", key: true,
-    gloss:
-      "A tool needs your approval. The only evidence that can establish Blocked: no file " +
-      "signature implies it, and no hook repeats it.",
+    gloss: "A tool needs your approval. The only evidence that can establish Blocked, and it never repeats.",
   },
   {
     id: "ToolMatched", src: "hook",
     gloss:
-      "A tool this writer raised came back, and it correlates to this writer's own pending " +
-      "prompt: same writer, same tool, input hashes agreeing or absent on both sides.",
+      "A tool came back and correlates to this writer's own pending prompt: same writer, same " +
+      "tool, input hashes agreeing or absent on both sides.",
   },
   {
     id: "ToolUncorrelated", src: "hook",
     gloss:
-      "Some other tool of this writer's came back — an auto-approved sibling, a different call, " +
-      "or one whose input hash disagrees. Agents dispatch tools in parallel, so a blocked writer " +
-      "completing a sibling is routine. This must never resolve a prompt.",
+      "A different tool of this writer's came back. Agents dispatch in parallel, so a blocked " +
+      "writer completing a sibling is routine. Must never resolve a prompt.",
   },
   { id: "Stop", src: "hook", gloss: "This writer's turn ended." },
   {
     id: "TailActivity", src: "transcript",
     gloss:
-      "New assistant content in the writer's own file. Proves it wrote something, but not what. " +
-      "A blocked turn keeps emitting content blocks for seconds after its prompt.",
+      "The writer wrote something — but not what. A blocked turn keeps emitting for seconds " +
+      "after its prompt.",
   },
   {
     id: "TailAllMatched", src: "transcript", key: true,
     gloss:
-      "Every tool this writer dispatched has a matching result. The sound “nothing is " +
-      "outstanding” predicate, and the only thing strong enough to prove a gate opened.",
+      "Every dispatched tool has a result. The only predicate strong enough to prove a gate opened.",
   },
   {
     id: "TailUnmatched", src: "transcript",
     gloss:
-      "At least one dispatched tool has no result. The shared signature: consistent with " +
-      "ToolInFlight and Blocked alike, so it can move a writer into ToolInFlight but must never " +
-      "move one into or out of Blocked.",
+      "A dispatched tool has no result. The shared signature — fits ToolInFlight and Blocked " +
+      "alike, so it may never move a writer into or out of Blocked.",
   },
   { id: "TailInterrupt", src: "transcript", gloss: "An interrupt notice in the writer's own file." },
   {
     id: "TailUnreadable", src: "transcript",
-    gloss:
-      "The file cannot answer: missing, truncated, or a tail window that missed the dispatch. " +
-      "Always fails closed and changes nothing, anywhere.",
+    gloss: "The log cannot answer: missing, truncated, or a tail window that missed the dispatch. Fails closed.",
   },
   {
     id: "QuiescentPastCap", src: "clock/liveness",
-    gloss:
-      "The writer's file has not moved for longer than its cap. The backstop that stops a " +
-      "crashed subagent's prompt latching red forever.",
+    gloss: "Silent past its cap. The backstop that stops a crashed subagent's prompt latching red forever.",
   },
   { id: "Gone", src: "clock/liveness", universal: "Dead", gloss: "Proof the writer no longer exists." },
   {
     id: "SessionRotated", src: "clock/liveness", universal: "Unknown",
-    gloss:
-      "A /clear or a fork: the session id changed under the same pid, so every prompt recorded " +
-      "against the retired session died with it.",
+    gloss: "A /clear or fork changed the session id under the same pid, retiring every prompt recorded against it.",
   },
 ];
 
@@ -223,13 +216,17 @@ const LADDER = [
 // How a fold color shows up on the timeline you were just looking at. The
 // dashboard's lane vocabulary predates this model and is not going to be
 // renamed, so the mapping is the page's job.
+// These are the status names in docs/provider-contract.md, which is what every
+// provider emits — so the glosses are written in plain terms rather than in
+// writer-state vocabulary. This is the first thing on the page; the reader has
+// not met a "writer" yet.
 const LANE_MAP = [
-  { color: "red", lane: "permission", note: "A writer is Blocked. The only status on the bar that is asking you for something now." },
-  { color: "green", lane: "working", note: "The main thread itself is Working or has a tool in flight." },
-  { color: "green", lane: "dormant", note: "The main thread has Ended but a subagent is still going; the sub-bar underneath carries the solid green.", badge: "delegating" },
-  { color: "orange", lane: "idle", note: "Every writer is Ended or Interrupted. Alive, waiting on a prompt." },
-  { color: "suspended", lane: "suspended", note: "The process is stopped (Ctrl-Z). A liveness fact, sitting outside the machine." },
-  { color: "gray", lane: "unknown", note: "Rendered as an empty status on the lane. Nothing has been observed." },
+  { color: "green", lane: "working", note: "The session is producing." },
+  { color: "green", lane: "dormant", note: "It handed off. The subagent bar underneath carries the work.", badge: "delegating" },
+  { color: "orange", lane: "idle", note: "Alive, waiting on a prompt from you." },
+  { color: "red", lane: "permission", note: "Waiting on your approval. The only status asking you for anything." },
+  { color: "suspended", lane: "suspended", note: "You paused the process (Ctrl-Z)." },
+  { color: "gray", lane: "unknown", note: "Nothing observed. Drawn as an empty lane." },
 ];
 
 // ---------------------------------------------------------------------------
@@ -313,17 +310,16 @@ const DIVERGENCES = [
     from: "Working", ev: "QuiescentPastCap", to: "Ended", shipped: "case6-idle-title",
     note:
       "The shipped demotion reads the session's terminal-pane title, which cannot be attributed " +
-      "to a writer. With a subagent live it demotes on the parent's idle glyph regardless of " +
-      "which writer actually went quiet.",
+      "to a writer: with a subagent live it demotes on the parent's idle glyph regardless of " +
+      "which writer went quiet.",
   },
   {
     from: "Blocked", ev: "TailAllMatched", to: "Working", shipped: "case9-approve-resume",
     note:
-      "The shipped rule fires on ANY assistant line dated after the prompt, not on all-matched. " +
-      "A writer that raises a prompt from a message with a parallel auto-approved sibling writes " +
-      "that sibling's line AFTER the hook — so the red is dropped on the next tick. Reproduced " +
-      "against the 2026-08-05 incident transcript: cleared at age 5s, with the prompt genuinely " +
-      "unanswered for a further 3m07s.",
+      "The shipped rule fires on any assistant line dated after the prompt rather than on " +
+      "all-matched, so a parallel auto-approved sibling's line drops the red on the next tick. " +
+      "Reproduced against the 2026-08-05 transcript: cleared at age 5s, prompt unanswered for a " +
+      "further 3m07s.",
   },
 ];
 
