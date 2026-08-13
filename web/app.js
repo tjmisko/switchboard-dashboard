@@ -60,6 +60,10 @@ const STATUS_COLORS = {
 };
 const DELEGATING_OPACITY = 0.4;  // faded green for legacy delegating intervals
 const DORMANT_OPACITY = 0.3;     // darkish low-alpha green for parent-dormant intervals
+// A session idle while YOU were away (a lane parked overnight) is signal-free:
+// nothing is waiting on anyone. It draws darkened rather than full idle orange,
+// and the cumulative-time card excludes it (see awayIdleMs in model.js).
+const IDLE_AWAY_OPACITY = 0.35;
 const SUBAGENT_COLOR = "#3fb950"; // green: the subagent is the one doing the work
 const FOCUS_STROKE = "#58a6ff";
 
@@ -973,6 +977,12 @@ function computeOperatorTime(data) {
     running, occupied, free,
     runningMs, freeMs,
     occupiedMs: sum(occupied),
+    // present/hasActivity: the presence union (active spans + the away decay)
+    // and whether an activity stream backed it at all. The idle-while-away fade
+    // reads presence through these — hasActivity false means "no evidence you
+    // ever left", which every consumer must fail open on, NOT "away all day".
+    present,
+    hasActivity: ((data && data.activity) || []).length > 0,
     // hasAttention: did we observe the operator at all? Without a focus stream
     // occupied is 0 for lack of evidence, not because you were never at the
     // keyboard, and any figure that subtracts it must fall back instead.
@@ -991,7 +1001,7 @@ function computeOperatorTime(data) {
 function render(data) {
   const op = computeOperatorTime(data);
   renderTopline(data.summary || {}, op);
-  renderStatusKey(data.summary || {});
+  renderStatusKey(data.summary || {}, awayIdleTotalNs(data, op));
   renderProviderKey(data.lanes || []);
   renderChartArea(data);
   renderAttentionCard(data.summary || {}, op);
@@ -1345,29 +1355,69 @@ function renderTopline(summary, op) {
   attachFormulaTips(el.topline);
 }
 
+// awayIdleTotalNs: Σ idle-while-away across ALL lanes (not just renderable
+// ones), because it is subtracted from summary.by_status.idle, which counts
+// every lane. 0 without an activity stream — no evidence the operator ever
+// left means nothing may be written off as unattended.
+function awayIdleTotalNs(data, op) {
+  if (!op || !op.hasActivity) return 0;
+  let totalMs = 0;
+  for (const lane of (data && data.lanes) || []) totalMs += awayIdleMs(lane, op.present);
+  return totalMs * 1e6;
+}
+
 // renderStatusKey: the time-by-status list doubles as the swimlane legend; show
 // every status incl. zeros, in fixed order, then any unknown future statuses.
-function renderStatusKey(summary) {
+// Idle is the one status with a carve-out: the share of it during which the
+// operator was away (awayIdleNs) is a session parked with nobody waiting on
+// anyone, so the idle clock excludes it and a dim "idle (away)" row carries it
+// instead, keyed by swatch to the darkened bars on the timeline.
+function renderStatusKey(summary, awayIdleNs) {
   const byStatus = summary.by_status || {};
   const seen = new Set(STATUS_ORDER);
   const extra = Object.keys(byStatus).filter((k) => !seen.has(k)).sort();
   const keys = STATUS_ORDER.concat(extra);
+  // clamped both ways: the client-side away figure must never drive the idle
+  // row negative if a provider's summary and its lanes ever disagree.
+  const away = Math.min(Math.max(0, awayIdleNs || 0), byStatus.idle || 0);
   el.statusKey.innerHTML = keys.map((k) => {
     const op = k === "delegating" ? DELEGATING_OPACITY : k === "dormant" ? DORMANT_OPACITY : 1;
     const swatchStyle = `background:${statusColor(k)}` + (op !== 1 ? `;opacity:${op}` : "");
+    const splitIdle = k === "idle" && away > 0;
+    const shown = splitIdle ? (byStatus[k] || 0) - away : byStatus[k] || 0;
     const tip = formulaTipHTML({
       title: statusLabel(k),
-      formula: `Σ time in '${statusLabel(k)}' across all sessions`,
-      result: humanDuration(byStatus[k] || 0),
+      formula: splitIdle
+        ? `Σ time in 'idle' across all sessions − idle while you were away`
+        : `Σ time in '${statusLabel(k)}' across all sessions`,
+      substitution: splitIdle
+        ? `${humanDuration(byStatus[k] || 0)} − ${humanDuration(away)}`
+        : undefined,
+      result: humanDuration(shown),
       why: STATUS_MEANING[k] || "",
       color: statusColor(k),
     });
-    return `<span class="sk has-tip" data-tip="${escapeHTML(tip)}">
+    const row = `<span class="sk has-tip" data-tip="${escapeHTML(tip)}">
         <span class="sk-left">
           <span class="swatch" style="${swatchStyle}"></span>
           <span class="sk-name">${statusLabel(k)}</span>
         </span>
-        <span class="sk-val">${humanDuration(byStatus[k] || 0)}</span>
+        <span class="sk-val">${humanDuration(shown)}</span>
+      </span>`;
+    if (!splitIdle) return row;
+    const awayTip = formulaTipHTML({
+      title: "idle (away)",
+      formula: "Σ idle time while you were inferred away",
+      result: humanDuration(away),
+      why: "Sessions parked while you were away from the machine (overnight, typically). Drawn darkened on the timeline and excluded from the idle clock above — nothing was waiting on anyone.",
+      color: statusColor("idle"),
+    });
+    return row + `<span class="sk sk-away has-tip" data-tip="${escapeHTML(awayTip)}">
+        <span class="sk-left">
+          <span class="swatch" style="background:${statusColor("idle")};opacity:${IDLE_AWAY_OPACITY}"></span>
+          <span class="sk-name">idle (away)</span>
+        </span>
+        <span class="sk-val">${humanDuration(away)}</span>
       </span>`;
   }).join("");
   attachFormulaTips(el.statusKey);
@@ -1634,6 +1684,9 @@ function renderTimeline(data) {
   const idleBands = unionMs(spansToMs(activity.filter((a) => a.state === "idle")));
   const activeGlobal = unionMs(spansToMs(activity.filter((a) => a.state === "active")));
   const haveActivity = activity.length > 0;
+  // presence for the idle-while-away fade: null (fail open, nothing fades)
+  // whenever there is no activity stream to infer absence from.
+  const presentGlobal = haveActivity ? op.present : null;
   for (const [s, e] of idleBands) {
     el.svg.appendChild(svgEl("rect", {
       class: "idle-band", x: x(s), y: GEO.PLOT_TOP, width: Math.max(1, x(e) - x(s)),
@@ -1677,7 +1730,7 @@ function renderTimeline(data) {
   drawOperatorLane(op, opTop, x, W);
 
   for (const g of groups) for (const row of g.rows) {
-    drawRow(row, x, W, haveActivity, activeGlobal);
+    drawRow(row, x, W, haveActivity, activeGlobal, presentGlobal);
   }
   // context switches (optional, off by default): red verticals at each real
   // (≥0.5s-dwell) switch — toggled via the "show context switches" chart option.
@@ -1877,7 +1930,7 @@ function drawOperatorLane(op, rowTop, x, W) {
 // longer carries per-session identity (a packed row can hold several sessions) —
 // identity is reachable on hover via each session's name-span tooltip, and only
 // the cost is drawn, on the identifier line (see drawSession / nameSegTipHTML).
-function drawRow(row, x, W, haveActivity, activeGlobal) {
+function drawRow(row, x, W, haveActivity, activeGlobal, presentGlobal) {
   const rowTop = row.top;
 
   // row background (subtle alternation per ROW) + separator (group header rules the top edge)
@@ -1886,14 +1939,14 @@ function drawRow(row, x, W, haveActivity, activeGlobal) {
   }));
   if (!row.firstInGroup) el.svg.appendChild(svgEl("line", { class: "lane-sep", x1: 0, y1: rowTop, x2: W, y2: rowTop }));
 
-  for (const lane of row.lanes) drawSession(lane, rowTop, x, haveActivity, activeGlobal);
+  for (const lane of row.lanes) drawSession(lane, rowTop, x, haveActivity, activeGlobal, presentGlobal);
 }
 
 // drawSession draws ONE session at its own x-range (its lifespan) on a packed
 // row: the name-span band (with the cost on its right edge), the status bars, the
 // focus overlay, and the subagent sub-bars. Multiple non-overlapping sessions can
 // share a row, so this never paints a full-width background (drawRow owns that).
-function drawSession(lane, rowTop, x, haveActivity, activeGlobal) {
+function drawSession(lane, rowTop, x, haveActivity, activeGlobal, presentGlobal) {
   const nameY = rowTop + GEO.PAD_TOP;
   const barY = nameY + GEO.NAME_H;
   const subTop = barY + GEO.BAR_H + GEO.GAP;
@@ -1949,6 +2002,28 @@ function drawSession(lane, rowTop, x, haveActivity, activeGlobal) {
   for (const iv of lane.intervals || []) {
     const start = Date.parse(iv.start);
     const end = Date.parse(iv.end);
+    // idle is the one status that splits on operator presence: the stretch you
+    // were away for (a session parked overnight) draws darkened, because bright
+    // idle orange is a request for attention and nobody was there to ask. With
+    // no activity stream, presentGlobal is null and nothing fades — no evidence
+    // you ever left. Each piece carries its own tooltip so the away stretch
+    // reads with its own bounds and the not-counted note.
+    const pieces = iv.status === "idle" && presentGlobal
+      ? presenceSplitMs(start, end, presentGlobal) : null;
+    if (pieces && pieces.length) {
+      for (const p of pieces) {
+        const px = x(p.s);
+        const attrs = {
+          class: "bar", x: px, y: barY, width: Math.max(1, x(p.e) - px),
+          height: GEO.BAR_H, rx: 2, fill: statusColor(iv.status),
+        };
+        if (p.away) attrs["fill-opacity"] = IDLE_AWAY_OPACITY;
+        const rect = svgEl("rect", attrs);
+        attachTip(rect, () => intervalTipHTML(lane, iv, p));
+        el.svg.appendChild(rect);
+      }
+      continue;
+    }
     const bx = x(start);
     const bw = Math.max(1, x(end) - bx);
     const attrs = {
@@ -2715,16 +2790,24 @@ function pressureRowHTML(p) {
   return `<div class="t-row">machine stalled <b>${humanDurationMs(p.totalStallUs / 1000)}</b>${pct}${head}</div>`;
 }
 
-function intervalTipHTML(lane, iv) {
-  const startMs = Date.parse(iv.start), endMs = Date.parse(iv.end);
+// intervalTipHTML describes one status interval. `piece` (optional) narrows it
+// to one presence piece of a split idle interval ({s, e, away} from
+// presenceSplitMs): the tooltip then reads with the piece's own bounds, and an
+// away piece names itself and says it is off the clock.
+function intervalTipHTML(lane, iv, piece) {
+  const startMs = piece ? piece.s : Date.parse(iv.start);
+  const endMs = piece ? piece.e : Date.parse(iv.end);
   const durMs = endMs - startMs;
   const sub = iv.subagents || 0;
+  const away = !!(piece && piece.away);
   const note = iv.status === "delegating" ? " (delegating — faded)"
-    : iv.status === "dormant" ? " (waiting on subagent)" : "";
+    : iv.status === "dormant" ? " (waiting on subagent)"
+    : away ? " (you were away)" : "";
   return tipHead(`${statusLabel(iv.status)}${note}`, statusColor(iv.status),
-      `${fmtClock(iv.start)} – ${fmtClock(iv.end)}`, durMs,
+      `${fmtClock(new Date(startMs).toISOString())} – ${fmtClock(new Date(endMs).toISOString())}`, durMs,
       intervalTaskHTML(lane, startMs, endMs))
     + (sub > 0 ? `<div class="t-sub">${sub} subagent${sub === 1 ? "" : "s"} at start</div>` : "")
+    + (away ? `<div class="t-hint">parked while you were away — not counted as idle clock time</div>` : "")
     + memoryRowsHTML(memoryWindow(lane, lastMemory, startMs, endMs))
     + pressureRowHTML(pressureWindow(lastMemory, startMs, endMs));
 }

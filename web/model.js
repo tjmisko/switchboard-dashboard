@@ -150,6 +150,61 @@
     return waited / dur;
   }
 
+  // presenceSplitMs tiles one [startMs, endMs] span against the operator's
+  // presence: it returns ordered, contiguous pieces [{s, e, away}] covering the
+  // whole span, where `away: true` marks the parts no presence interval covers.
+  // presentPairs must be sorted, disjoint ms pairs (a unionMs result — the
+  // activity-active spans extended by the away decay). An empty array means the
+  // operator was never present, so the whole span is one away piece; callers
+  // with NO activity evidence at all must not call this (no stream ≠ "you were
+  // gone all day"). Returns [] for a non-positive or unparseable span. Pure.
+  function presenceSplitMs(startMs, endMs, presentPairs) {
+    if (!(Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs)) return [];
+    const pieces = [];
+    let cursor = startMs;
+    for (const [ps, pe] of presentPairs || []) {
+      if (pe <= cursor) continue;
+      if (ps >= endMs) break;
+      if (ps > cursor) {
+        pieces.push({ s: cursor, e: ps, away: true });
+        cursor = ps;
+      }
+      const covered = Math.min(pe, endMs);
+      if (covered > cursor) {
+        pieces.push({ s: cursor, e: covered, away: false });
+        cursor = covered;
+      }
+      if (cursor >= endMs) break;
+    }
+    if (cursor < endMs) pieces.push({ s: cursor, e: endMs, away: true });
+    return pieces;
+  }
+
+  // awayIdleMs is the lane's idle time while the operator was away — a session
+  // parked overnight, not one waiting on you. This is the time the timeline
+  // draws as darkened orange and the cumulative-time card excludes, so both
+  // must derive it from this one function. presentPairs carries the same
+  // semantics as presenceSplitMs, with one addition: null/undefined means "no
+  // activity stream was recorded", which fails open to 0 — with no evidence the
+  // operator ever left, no idle time may be written off as unattended. Idle
+  // spans are clipped to the lane's evidence bound (clipSpanMs) so the figure
+  // subtracts cleanly from a by_status total that already excluded the
+  // synthesized tail.
+  function awayIdleMs(lane, presentPairs) {
+    if (presentPairs == null) return 0;
+    const cut = suspectSinceMs(lane);
+    let total = 0;
+    for (const iv of (lane && lane.intervals) || []) {
+      if (iv.status !== "idle") continue;
+      const span = clipSpanMs(Date.parse(iv.start), Date.parse(iv.end), cut);
+      if (!span) continue;
+      for (const p of presenceSplitMs(span[0], span[1], presentPairs)) {
+        if (p.away) total += p.e - p.s;
+      }
+    }
+    return total;
+  }
+
   // switchArrivals identifies the operator's real context switches from focus
   // spans. A context switch is a focus ARRIVAL you actually landed on — the span's
   // dwell (end − start) ≥ flickerMs — which filters ONLY sub-flicker focus noise
@@ -1154,7 +1209,8 @@
   return {
     scaleGeometry,
     laneIdentity, rawSessionId, leadLabel, nameSegments, buildBar, buildBars,
-    spanInefficiency, switchArrivals, packLanes, aloftSpans, workIntervalsMs, concurrencyProfile,
+    spanInefficiency, switchArrivals, presenceSplitMs, awayIdleMs,
+    packLanes, aloftSpans, workIntervalsMs, concurrencyProfile,
     alignLiveTail,
     projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs, suspectTailMs,
     fmtBytes, spawnedBytes, laneMemory, memoryWindow, pressureWindow,

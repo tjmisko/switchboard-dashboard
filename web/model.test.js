@@ -8,7 +8,8 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
-  laneIdentity, rawSessionId, leadLabel, nameSegments, buildBars, spanInefficiency, switchArrivals, packLanes,
+  laneIdentity, rawSessionId, leadLabel, nameSegments, buildBars, spanInefficiency, switchArrivals,
+  presenceSplitMs, awayIdleMs, packLanes,
   aloftSpans, workIntervalsMs, concurrencyProfile, alignLiveTail,
   projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs,
   suspectTailMs, normalizeView, VIEW_ORDER, stepView, scaleGeometry,
@@ -230,6 +231,73 @@ test("switchArrivals ignores unparseable spans and empty/absent input", () => {
   assert.deepEqual(switchArrivals([], 500), []);
   assert.deepEqual(switchArrivals(null, 500), []);
   assert.deepEqual(switchArrivals([{ start: "nope", end: "nope" }], 500), []);
+});
+
+// presenceSplitMs / awayIdleMs: the idle-while-away carve-out (issue #20). A
+// session parked overnight draws darkened and its idle time comes off the
+// clock, but ONLY where an activity stream gives evidence the operator left.
+
+test("presenceSplitMs marks the whole span away when the operator was never present", () => {
+  assert.deepEqual(presenceSplitMs(baseMs, baseMs + 60000, []), [
+    { s: baseMs, e: baseMs + 60000, away: true },
+  ]);
+});
+
+test("presenceSplitMs yields one attended piece when presence covers the whole span", () => {
+  assert.deepEqual(presenceSplitMs(baseMs, baseMs + 60000, [[baseMs - 1000, baseMs + 61000]]), [
+    { s: baseMs, e: baseMs + 60000, away: false },
+  ]);
+});
+
+test("presenceSplitMs tiles away/present/away around a mid-span presence window", () => {
+  const present = [[baseMs + 20000, baseMs + 40000]];
+  assert.deepEqual(presenceSplitMs(baseMs, baseMs + 60000, present), [
+    { s: baseMs, e: baseMs + 20000, away: true },
+    { s: baseMs + 20000, e: baseMs + 40000, away: false },
+    { s: baseMs + 40000, e: baseMs + 60000, away: true },
+  ]);
+});
+
+test("presenceSplitMs ignores presence outside the span and returns [] for an empty span", () => {
+  assert.deepEqual(presenceSplitMs(baseMs, baseMs + 10000, [[baseMs - 5000, baseMs - 1000], [baseMs + 20000, baseMs + 30000]]), [
+    { s: baseMs, e: baseMs + 10000, away: true },
+  ]);
+  assert.deepEqual(presenceSplitMs(baseMs, baseMs, [[baseMs - 1000, baseMs + 1000]]), []);
+  assert.deepEqual(presenceSplitMs(NaN, baseMs, []), []);
+});
+
+test("awayIdleMs fails open to 0 without an activity stream (presentPairs null)", () => {
+  const lane = { intervals: [interval("idle", baseMs, baseMs + 3600000)] };
+  assert.equal(awayIdleMs(lane, null), 0);
+  assert.equal(awayIdleMs(lane, undefined), 0);
+});
+
+test("awayIdleMs counts only the idle time the presence union does not cover", () => {
+  // parked overnight: present for the first 10s and the last 10s, away between
+  const lane = {
+    intervals: [
+      interval("idle", baseMs, baseMs + 100000),
+      interval("working", baseMs + 100000, baseMs + 160000), // away but working — not idle parking
+    ],
+  };
+  const present = [[baseMs, baseMs + 10000], [baseMs + 90000, baseMs + 100000]];
+  assert.equal(awayIdleMs(lane, present), 80000);
+});
+
+test("awayIdleMs writes off all idle time when the stream shows the operator never active", () => {
+  const lane = { intervals: [interval("idle", baseMs, baseMs + 50000)] };
+  assert.equal(awayIdleMs(lane, []), 50000);
+});
+
+test("awayIdleMs clips idle at the evidence bound so it subtracts cleanly from by_status", () => {
+  // idle 0–100s, but everything past 40s is a synthesized tail the summary
+  // already excluded; only the trusted 40s may be written off as away.
+  const lane = {
+    suspect: true,
+    suspect_since: new Date(baseMs + 40000).toISOString(),
+    intervals: [interval("idle", baseMs, baseMs + 100000)],
+  };
+  assert.equal(awayIdleMs(lane, []), 40000);
 });
 
 // packLanes: greedy interval partitioning of a group's lanes into shared rows.
