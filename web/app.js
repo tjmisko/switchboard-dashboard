@@ -1720,6 +1720,22 @@ function renderTimeline(data) {
   el.svg.appendChild(svgEl("line", { class: "axis-line", x1: GEO.GUTTER, y1: GEO.PLOT_TOP, x2: GEO.GUTTER, y2: plotBottom }));
   el.svg.appendChild(svgEl("line", { class: "axis-line", x1: GEO.GUTTER, y1: plotBottom, x2: GEO.GUTTER + plotW, y2: plotBottom }));
 
+  // context switches (optional, off by default): red verticals at each real
+  // (≥0.5s-dwell) switch — toggled via the "show context switches" chart option.
+  // Drawn HERE, before the lanes, so the markers sit behind the bars: a burst of
+  // switches is exactly when the timeline is busiest, and painting the cluster
+  // over the bars made the very stretch it explains unreadable. The row
+  // backgrounds above are translucent, so the verticals still read in the open
+  // canvas between sessions. The operator lane already carries the switch cost;
+  // this is an opt-in overlay.
+  if (el.optCtxSwitches && el.optCtxSwitches.checked) {
+    for (const t of op.switchTimes) {
+      el.svg.appendChild(svgEl("line", {
+        class: "ctx-switch", x1: x(t), y1: GEO.PLOT_TOP, x2: x(t), y2: plotBottom,
+      }));
+    }
+  }
+
   // project group headers: an expanded group gets a rule + caret/label (click to
   // fold); a too-small group gets a single folded summary row instead.
   for (const g of groups) {
@@ -1731,16 +1747,6 @@ function renderTimeline(data) {
 
   for (const g of groups) for (const row of g.rows) {
     drawRow(row, x, W, haveActivity, activeGlobal, presentGlobal);
-  }
-  // context switches (optional, off by default): red verticals at each real
-  // (≥0.5s-dwell) switch — toggled via the "show context switches" chart option.
-  // The operator lane already carries the switch cost; this is an opt-in overlay.
-  if (el.optCtxSwitches && el.optCtxSwitches.checked) {
-    for (const t of op.switchTimes) {
-      el.svg.appendChild(svgEl("line", {
-        class: "ctx-switch", x1: x(t), y1: GEO.PLOT_TOP, x2: x(t), y2: plotBottom,
-      }));
-    }
   }
   // on view entry, the sweep's curtain rides on top of everything drawn above
   drawSweepCurtain(W, H, GEO.PLOT_TOP, plotBottom);
