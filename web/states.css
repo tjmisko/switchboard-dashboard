@@ -94,6 +94,8 @@
 .sw-green { background: var(--c-working); }
 .sw-orange { background: var(--c-idle); }
 .sw-gray { background: #7d8590; }
+/* idle-while-away: the dashboard draws it as idle orange at low alpha */
+.sw-dim { opacity: 0.35; }
 .sw-susp { background: transparent; box-shadow: inset 0 0 0 1.5px var(--c-suspended); }
 .sw-hidden { background: transparent; box-shadow: inset 0 0 0 1px var(--border); }
 

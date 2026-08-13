@@ -585,7 +585,7 @@ function buildLaneMap() {
   document.getElementById("lanemap").innerHTML = LANE_MAP.map(
     (l) => `
       <div class="lanerow">
-        <span class="sw ${swatchClass(l.color)}" aria-hidden="true"></span>
+        <span class="sw ${swatchClass(l.color)}${l.dim ? " sw-dim" : ""}" aria-hidden="true"></span>
         <span class="ln-name">${l.lane}${l.badge ? `<span class="ln-badge">${l.badge}</span>` : ""}</span>
         <span class="ln-note">${esc(l.note)}</span>
       </div>`

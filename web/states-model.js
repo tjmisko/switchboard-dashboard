@@ -224,6 +224,10 @@ const LANE_MAP = [
   { color: "green", lane: "working", note: "The session is producing." },
   { color: "green", lane: "dormant", note: "It handed off; the subagent bar underneath carries the work.", badge: "delegating" },
   { color: "orange", lane: "idle", note: "Alive, waiting on a prompt from you." },
+  // dim is a render flag, not a fold color: an away-parked session still folds
+  // orange — the dashboard darkens it because the operator's absence, not the
+  // session's state, is what changed.
+  { color: "orange", dim: true, lane: "idle (away)", note: "Parked while you were away (overnight, typically) — darkened, and off the idle clock." },
   { color: "red", lane: "permission", note: "Waiting on your approval — the only status that asks for anything." },
   { color: "suspended", lane: "suspended", note: "You paused the process (Ctrl-Z)." },
   { color: "gray", lane: "unknown", note: "Nothing observed. Drawn as an empty lane." },
