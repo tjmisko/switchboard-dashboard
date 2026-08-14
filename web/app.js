@@ -3778,9 +3778,90 @@ function renderCostCard(data, plan) {
         </div>
         ${gaugeBar(wkPct)}
       ` : ""}
-    </div>`;
+    </div>
+
+    ${tokensBlockHTML(totals)}`;
 
   attachFormulaTips(el.cardCost);
+}
+
+// ---------------------------------------------------------------------------
+// cost card: the token block
+//
+// The dollars above are DERIVED (tokens × model price); this is what they were
+// derived from, which is why it sits under them rather than in a card of its
+// own. Two figures lead — what the agents wrote, and what they had to be told
+// to write it — with the cache split beneath, because on this workload the
+// split is the whole shape of the bill: input runs three orders of magnitude
+// over output, and all but a sliver of it is cache reads at roughly a tenth the
+// price. One undifferentiated "input" number would read as a bill ten times the
+// real one, which is exactly the mistake model.js's tokenBilled exists to stop.
+// ---------------------------------------------------------------------------
+function tokensBlockHTML(totals) {
+  const out = totals.tok_out || 0;
+  const fresh = totals.tok_in || 0;
+  const read = totals.tok_cache_read || 0;
+  const written = totals.tok_cache_create || 0;
+  const billedIn = fresh + read + written; // model.js tokenBilled, at window scale
+  if (!(out || billedIn)) {
+    return `<div class="kv-sep"></div><div class="kv-head">tokens</div>`
+      + `<div class="kv muted-note">no token counts for this window</div>`;
+  }
+  const tip = (obj) => escapeHTML(formulaTipHTML(obj));
+  const cachedFrac = billedIn > 0 ? read / billedIn : null;
+  const cachedPct = cachedFrac == null ? null : Math.round(cachedFrac * 100);
+
+  const row = (label, valHTML, tipObj, cls = "") =>
+    `<div class="kv ${cls} has-tip" data-tip="${tip(tipObj)}"><span class="k">${label}</span><span class="v">${valHTML}</span></div>`;
+
+  // cached vs fresh input, at the same scale as the engagement split above it:
+  // the sliver on the right is everything the conversation had not already paid
+  // to cache.
+  const cacheBar = billedIn > 0
+    ? `<div class="split-bar tok-bar" role="img" aria-label="cached vs uncached input">`
+      + `<span class="sb-seg" style="width:${((read / billedIn) * 100).toFixed(3)}%;background:var(--c-working)"></span>`
+      + `<span class="sb-seg" style="width:${((written / billedIn) * 100).toFixed(3)}%;background:var(--accent)"></span>`
+      + `<span class="sb-seg" style="width:${((fresh / billedIn) * 100).toFixed(3)}%;background:var(--c-idle)"></span>`
+      + `</div>`
+    : "";
+
+  return `<div class="kv-sep"></div>
+    <div class="kv-head">tokens</div>
+    <div class="kv-list">
+      ${row("output · generated", `<b>${fmtTokens(out)}</b>`, {
+        title: "output tokens",
+        formula: "Σ output over every session in the window",
+        result: fmtTokens(out) + ` (${out.toLocaleString()})`,
+        why: "Everything the agents actually wrote this window — the expensive half of the bill, per token.",
+        color: "var(--c-working)",
+      })}
+      ${row("input · billed", `<b>${fmtTokens(billedIn)}</b>`, {
+        title: "billed input tokens",
+        formula: "fresh + cache written + cache read",
+        substitution: `${fmtTokens(fresh)} + ${fmtTokens(written)} + ${fmtTokens(read)}`,
+        result: fmtTokens(billedIn) + ` (${billedIn.toLocaleString()})`,
+        why: "Every turn resends the whole conversation, so billed input counts the cache reads too. The uncached remainder alone would understate it by orders of magnitude.",
+      })}
+      ${cacheBar}
+      ${row(`<span class="dot-k" style="background:var(--c-working)"></span>cache read`,
+        `${fmtTokens(read)}${cachedPct != null ? ` <span class="dim">${cachedPct}%</span>` : ""}`, {
+        title: "cache reads",
+        formula: "cache read ÷ billed input",
+        substitution: `${fmtTokens(read)} ÷ ${fmtTokens(billedIn)}`,
+        result: cachedPct == null ? "—" : cachedPct + "%",
+        why: "Share of billed input served from the prompt cache, at roughly a tenth the price of fresh input. High is good: it is the same context being re-sent cheaply.",
+        color: "var(--c-working)",
+      }, "deemph")}
+      ${row(`<span class="dot-k" style="background:var(--accent)"></span>cache written`
+        + ` <span class="dim">· fresh</span>`,
+        `${fmtTokens(written)} <span class="dim">· ${fmtTokens(fresh)}</span>`, {
+        title: "cache written · fresh",
+        formula: "cache creation · uncached remainder",
+        result: `${fmtTokens(written)} written · ${fmtTokens(fresh)} fresh`,
+        why: "What it cost to put context INTO the cache, and the genuinely new tokens that were never cached at all.",
+        color: "var(--accent)",
+      }, "deemph")}
+    </div>`;
 }
 
 // ---------------------------------------------------------------------------

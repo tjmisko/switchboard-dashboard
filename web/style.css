@@ -805,6 +805,9 @@ main { padding: 16px 18px 36px; }
   background: linear-gradient(180deg, #f0a24e, #e07c33);
 }
 .gauge-foot { display: flex; justify-content: space-between; gap: 12px; font-size: 11px; color: var(--fg-dim); margin-top: 5px; }
+/* cached / written / fresh input, in the engagement split's pill. Thinner than
+   that one: it explains the row above it rather than heading a section. */
+.tok-bar { height: 7px; margin: 3px 0 6px; }
 .session-costs { margin-top: 6px; border-top: 1px solid var(--border-soft); padding-top: 10px; }
 
 /* ---------- tooltip ---------- */
