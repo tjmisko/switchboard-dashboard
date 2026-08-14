@@ -3964,17 +3964,21 @@ function freeShapeHTML(op) {
     if (i >= 0) segs[i] = segs[i].replace(" data-share=", ' data-slack="1" data-share=');
   }
 
-  // The legend is the point of the plot: four cells, in the plot's own order,
-  // each printing the share of your time back that arrived at that length.
-  const key = buckets.map((b) => {
-    const pct = pctOf(b.frac);
-    const dis = b.count ? "" : " empty";
-    return `<div class="fbk${dis} has-tip" data-tip="${tip(bucketTip(b, s))}">`
-      + `<span class="fbk-top"><span class="fbk-sw fb-${b.key}"></span>`
-      + `<span class="fbk-range">${b.label}</span></span>`
-      + `<span class="fbk-pct">${pct == null || !b.count ? "—" : pct + "%"}</span>`
-      + `<span class="fbk-sub">${b.count ? `${humanDurationCoarseMs(b.ms)} · ${b.count} block${b.count === 1 ? "" : "s"}` : "none"}</span>`
-      + `</div>`;
+  // The key is the point of the plot, and every proportion in it is ATTACHED to
+  // the stretch of track it describes: one bracket per bucket, spanning exactly
+  // that bucket's bars (layoutFreeBlocks sets the pixels), with the percentage
+  // underneath it. A four-cell legend in even columns would have made the reader
+  // match colours to find which run of bars a number was about; a bracket points
+  // at it. Empty buckets get no bracket — there is nothing to point at.
+  const key = buckets.filter((b) => b.count).map((b) => {
+    return `<span class="fbk has-tip" data-bucket="${b.key}" data-tip="${tip(bucketTip(b, s))}">`
+      + `<span class="fbk-rule"></span>`
+      + `<span class="fbk-lab"><span class="fbk-inner">`
+      + `<span class="fbk-line"><span class="fbk-sw fb-${b.key}"></span>`
+      + `<b>${pctOf(b.frac)}%</b><span class="fbk-w"> in</span>`
+      + ` <span class="fbk-range">${b.label}</span><span class="fbk-w"> blocks</span></span>`
+      + `<span class="fbk-sub">${humanDurationCoarseMs(b.ms)} · ${b.count} block${b.count === 1 ? "" : "s"}</span>`
+      + `</span></span></span>`;
   }).join("");
 
   // The usable share is the one figure here that survives being quoted on its
@@ -4100,7 +4104,74 @@ function layoutFreeBlocks(root) {
     else if (used < total) { px[i]++; used++; }
   }
 
-  segs.forEach((el, i) => { el.style.width = px[i] + "px"; });
+  const edges = [0];
+  segs.forEach((el, i) => { el.style.width = px[i] + "px"; edges.push(edges[i] + px[i]); });
+
+  // Each bucket's bracket spans its own run of segments, inset a pixel either
+  // side so two adjacent brackets read as two.
+  const span = {};
+  segs.forEach((el, i) => {
+    const k = el.dataset.bucket;
+    if (!k) return;
+    if (!span[k]) span[k] = [edges[i], edges[i + 1]];
+    else span[k][1] = edges[i + 1];
+  });
+  const keys = [...(root || document).querySelectorAll(".fbk[data-bucket]")];
+  const placed = [];
+  for (const el of keys) {
+    const s = span[el.dataset.bucket];
+    if (!s) { el.hidden = true; continue; }
+    el.hidden = false;
+    const w = Math.max(2, s[1] - s[0] - 2);
+    el.style.left = (s[0] + 1) + "px";
+    el.style.width = w + "px";
+    placed.push([el, s[0] + 1, w]);
+  }
+  layoutBracketLabels(placed);
+}
+
+// layoutBracketLabels fits each bracket's label to the bracket, then keeps two
+// labels from landing on top of each other.
+//
+// Both halves matter. A label wider than its bracket slides under the NEXT
+// bucket's bars and starts pointing at the wrong ones, which is the one thing a
+// bracket exists to prevent; and two neighbouring slivers both wanting a label
+// collide however narrow you make them. So: shed the label's least important
+// parts first — prose ("in", "blocks"), then the second line, then the range,
+// then the colour dot, leaving the PERCENTAGE, which is the number the reader
+// came for. Then, if it still overlaps its left-hand neighbour, drop it to a
+// second row rather than dropping it: a 2% bucket that shows no number is a
+// bucket the reader has to hover to read, and four readable numbers is the
+// whole point of the key.
+const BRACKET_LABEL_SLOP = 8; // px a label may overhang its bracket
+function layoutBracketLabels(placed) {
+  const rowRight = [-Infinity, -Infinity];
+  let twoRow = false;
+  for (const [el, left, w] of placed) {
+    const lab = el.querySelector(".fbk-inner");
+    if (!lab) continue;
+    el.classList.remove("tight", "nosub", "mini", "nodot", "hide", "row2");
+    // Shedding decides how MUCH label there is, never whether there is one: a
+    // 4px bucket cannot hold even "1%", and hiding it here would throw away a
+    // number that the second row can carry perfectly well. Only a real overlap
+    // (below) hides anything.
+    for (const step of ["tight", "nosub", "mini", "nodot"]) {
+      if (lab.offsetWidth <= w + BRACKET_LABEL_SLOP) break;
+      el.classList.add(step);
+    }
+    // .fbk-inner is an inline-block around nowrap lines, so its offsetWidth is
+    // the TEXT's width — not the bracket's. Measuring the bracket instead would
+    // have every label collide with its neighbour, since adjacent buckets share
+    // an edge by construction.
+    const half = lab.offsetWidth / 2;
+    const mid = left + w / 2;
+    const row = mid - half >= rowRight[0] + 6 ? 0 : mid - half >= rowRight[1] + 6 ? 1 : -1;
+    if (row < 0) { el.classList.add("hide"); continue; }
+    if (row === 1) { el.classList.add("row2"); twoRow = true; }
+    rowRight[row] = mid + half;
+  }
+  const key = placed.length ? placed[0][0].parentElement : null;
+  if (key) key.classList.toggle("two-row", twoRow);
 }
 
 // suspectNoteHTML footnotes the figures above with what the producer refused to

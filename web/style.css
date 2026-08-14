@@ -851,28 +851,52 @@ body.view-projects .boxes { grid-template-columns: minmax(0, 2.15fr) minmax(0, 0
   );
 }
 
-/* the legend: four cells in the plot's own order, each printing the share of the
-   time back that arrived at that length. This is the surface the section exists
-   for — the plot shows the shape, this is where you read the numbers off. */
-.fb-key {
-  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 4px 12px; margin-top: 10px;
+/* the key: one BRACKET per bucket, spanning exactly the run of bars it
+   describes, with its proportion hanging underneath. The percentages are the
+   surface the section exists for, and a bracket is what attaches each one to
+   the stretch of track it is about — a legend in even columns makes you match
+   colours to find out which bars a number is talking about. Left/width are set
+   in pixels by layoutFreeBlocks, which is the only place that knows where the
+   segment boundaries landed. */
+.fb-key { position: relative; height: 38px; margin-top: 7px; }
+/* a sliver bucket's label drops to a second row rather than vanishing */
+.fb-key.two-row { height: 56px; }
+.fbk.row2 .fbk-lab { margin-top: 22px; }
+.fbk { position: absolute; top: 0; cursor: help; }
+.fbk-rule {
+  display: block; height: 5px;
+  border: 1px solid var(--fg-dim);
+  border-top: 0;
+  border-radius: 0 0 3px 3px;
+  opacity: 0.7;
 }
-.fbk { display: flex; flex-direction: column; gap: 4px; cursor: help; min-width: 0; }
-.fbk-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.fbk-sw { flex: none; width: 9px; height: 9px; border-radius: 2px; background: var(--fb-block); }
+.fbk:hover .fbk-rule { border-color: var(--fg-muted); opacity: 1; }
+.fbk-lab { display: block; margin-top: 4px; text-align: center; }
+/* shrink-wraps the text, so its offsetWidth is what the label really occupies —
+   which is what layoutBracketLabels needs to know to keep two of them apart. */
+.fbk-inner { display: inline-block; white-space: nowrap; text-align: center; }
+.fbk-line { display: block; font-size: 11.5px; color: var(--fg-muted); line-height: 1.2; }
+.fbk-line b { font-family: var(--mono); font-size: 13.5px; font-weight: 700; color: var(--fg); }
+.fbk-range { font-family: var(--mono); }
+.fbk-sub { display: block; font-family: var(--mono); font-size: 10px; color: var(--fg-dim); line-height: 1.35; }
+/* the colour key, inline on the proportion line rather than on a line of its
+   own — the dot is one glyph and it does not need a row to itself. */
+.fbk-sw {
+  display: inline-block; width: 8px; height: 8px; border-radius: 2px;
+  margin-right: 6px; vertical-align: baseline;
+  background: var(--fb-block);
+}
 .fbk-sw.fb-clear { background: var(--fb-clear); }
 .fbk-sw.fb-block { background: var(--fb-block); }
 .fbk-sw.fb-look { background: var(--fb-look); }
 .fbk-sw.fb-gap { background: var(--fb-gap); }
-.fbk-range {
-  font-family: var(--mono); font-size: 11.5px; color: var(--fg-muted);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.fbk-pct { font-family: var(--mono); font-size: 17px; font-weight: 700; color: var(--fg); line-height: 1; }
-.fbk-sub { font-family: var(--mono); font-size: 10.5px; color: var(--fg-dim); line-height: 1; }
-.fbk.empty .fbk-pct { color: var(--fg-dim); }
-.fbk:hover .fbk-range, .fbk:hover .fbk-sub { color: var(--fg-muted); }
+/* progressive shedding as the bracket narrows (see layoutBracketLabels) */
+.fbk.tight .fbk-w { display: none; }
+.fbk.nosub .fbk-sub { display: none; }
+.fbk.mini .fbk-range { display: none; }
+.fbk.nodot .fbk-sw { display: none; }
+.fbk.hide .fbk-lab { display: none; }
+.fbk:hover .fbk-line { color: var(--fg); }
 
 /* the three figures that summarise the distribution, as one dim line under the
    legend rather than a column beside the plot — the legend is the reading now,
