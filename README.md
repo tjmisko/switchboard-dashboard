@@ -31,15 +31,15 @@ invocation, so it loads instantly and runs offline.
   popout.
 - **Focus/attention overlay** highlighting spans where the session was focused and
   active; global idle periods are dimmed.
-- **Operator lane** partitioning the running window into time back and time spent
-  typing or recovering from a context switch.
+- **Operator lane** partitioning the running window into work blocks and time
+  spent typing or recovering from a context switch.
 - **Topline** headline: the effective time gained and the force multiplier from
   running agents in parallel.
-- **Attention and cost cards**: delegation effectiveness with the
-  union / per-session / delegated / attended / prompt breakdown, the switching
-  cost, and the **time back** plot — every uninterrupted block the agents handed
-  you, ranked longest first and coloured by length bucket (1h+ / 15m–1h / 5–15m /
-  &lt;5m), so the share of it that arrived usable is a width you can read off.
+- **Attention and cost cards**: delegation effectiveness, the switching cost, and
+  your **wall clock while the agents ran** split four ways — work blocks /
+  prompting / supervising / re-focusing — over the **work-block plot**: every
+  uninterrupted block ranked longest first, coloured by length bucket, with a
+  bracket under each bucket carrying its share (1h+ / 15m–1h / 5–15m / &lt;5m).
   Alongside: the window cost, a per-session breakdown, a rolling 5h plan-usage
   gauge, and the token card's output / cache-read / cache-written / fresh split.
 - **Hover any figure** for a descriptor showing its formula, result, and meaning.

@@ -883,7 +883,7 @@ function lens(...minutes) {
   return { s, by };
 }
 
-test("freeBucketStats should split time back into the four buckets, longest first", () => {
+test("freeBucketStats should split the blocks into the four buckets, longest first", () => {
   const { s } = lens(90, 30, 10, 2);
   assert.deepEqual(s.buckets.map((b) => b.label), ["1h+", "15m–1h", "5–15m", "<5m"],
     "the legend reads left to right in the same order the ranked plot draws");
@@ -891,7 +891,7 @@ test("freeBucketStats should split time back into the four buckets, longest firs
   assert.equal(s.totalMs, 132 * MIN);
 });
 
-test("freeBucketStats should report each bucket's share of the total time back", () => {
+test("freeBucketStats should report each bucket's share of all block time", () => {
   const { by, s } = lens(60, 20, 10, 10);
   assert.equal(s.totalMs, 100 * MIN);
   assert.deepEqual(s.buckets.map((b) => b.frac), [0.6, 0.2, 0.2, 0]);
@@ -928,7 +928,7 @@ test("freeBucketStats should hand each bucket its own blocks, longest first", ()
   assert.equal(by["1h+"].blocksMs.length, 0);
 });
 
-test("freeBucketStats should return empty buckets rather than nothing for a day with no time back", () => {
+test("freeBucketStats should return empty buckets rather than nothing for a day with no blocks", () => {
   const s = freeBucketStats([]);
   assert.equal(s.totalMs, 0);
   assert.deepEqual(s.buckets.map((b) => b.count), [0, 0, 0, 0], "the legend still has four cells to draw");

@@ -733,7 +733,7 @@
     };
   }
 
-  // The four buckets the card reads its time back off in. The six-bin histogram
+  // The four buckets the card reads its work blocks off in. The six-bin histogram
   // above describes a distribution; this answers the question actually being
   // asked, which is "how much of it came back in a form I could use" — and four
   // is the most a legend can carry while still being readable at a glance.

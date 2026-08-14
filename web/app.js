@@ -1126,6 +1126,36 @@ function computeOperatorTime(data) {
   const runningMs = sum(running);
   const freeMs = sum(free);
 
+  // The four-way partition of the running wall clock, for the attention card's
+  // proportion bar. DISJOINT by construction and summing to runningMs exactly,
+  // which is the whole point — a bar whose parts overlap is not a proportion.
+  //
+  //   prompt    = attending ∩ running ∩ raw activity  — at a window, typing
+  //   supervise = attending ∩ running − raw activity  — at a window, hands off
+  //   refocus   = ctxRecovery ∩ running − attending   — the switch tax, elsewhere
+  //   free      = running − attending − ctxRecovery   — the work blocks
+  //
+  // ATTENDING WINS THE OVERLAP, and the choice is not cosmetic. Every recovery
+  // window opens at a focus arrival, which is also where a focus span starts, so
+  // charging the overlap to recovery buries every visit shorter than the 90s
+  // recovery inside "re-focusing": on a real day that read as 11m of prompting
+  // against 3h53m of recovery, when 1h55m of it was measured typing. Observed
+  // input beats a modelled penalty; the penalty keeps whatever is left over.
+  //
+  // Consequence to keep in mind: refocusMs is therefore SMALLER than lostMs (the
+  // whole recovery ∩ running, which the switching-cost box quotes). Both are
+  // real, they answer different questions, and the row's label and descriptor
+  // say which one this is.
+  //
+  // prompt vs supervise is the raw activity stream (keyboard/mouse), not the
+  // decayed presence union: reading a diff with your hands off the keys is
+  // supervision, and presence deliberately outlives input by awayAfterMs.
+  const activeRaw = unionMs(active);
+  const attendSpans = intersectMs(attending, running);
+  const promptSpans = intersectMs(attendSpans, activeRaw);
+  const superviseSpans = subtractMs(attendSpans, activeRaw);
+  const recoverSpans = subtractMs(intersectMs(ctxRecovery, running), attending);
+
   // COUNT + overlay reuse the recovery set exactly, so the red lines you see are
   // the switches charged against free time — no more, no fewer.
   const switchTimes = recoveryStarts;
@@ -1146,7 +1176,12 @@ function computeOperatorTime(data) {
     hasAttention: focusSpans.length > 0,
     switches,
     switchTimes,
+    // lostMs is the whole switch tax (the box); refocusMs is the disjoint part
+    // of it that the proportion bar can carry without double-counting.
     lostMs: sum(intersectMs(ctxRecovery, running)),
+    promptMs: sum(promptSpans),
+    superviseMs: sum(superviseSpans),
+    refocusMs: sum(recoverSpans),
     freeFrac: runningMs > 0 ? freeMs / runningMs : null,
   };
 }
@@ -3619,7 +3654,7 @@ function renderAttentionCard(summary, op) {
     substitution: da == null && aa == null && pa == null ? null
       : `${humanDuration(da || 0)} ÷ (${humanDuration(da || 0)} + ${humanDuration(aa || 0)} + ${humanDuration(pa || 0)})`,
     result: effPct == null ? "—" : effPct + "%",
-    why: "Share of your agent engagement that ran hands-off (delegated) vs. hands-on (supervising + prompting) — higher = more leverage.",
+    why: "Share of your agent engagement that ran hands-off rather than with you at the window — higher = more leverage. AGENT-HOURS, summed per session: two agents working unattended for an hour count two hours. That is why it is not the green share of the wall-clock bar below, which counts that same hour once.",
     color: effColor,
   });
   const ctxTip = tip({
@@ -3647,32 +3682,18 @@ function renderAttentionCard(summary, op) {
     color: "var(--c-permission)",
   });
 
-  // engagement split: delegated (you away) / attended (you watching) / prompt (you driving)
-  const del = da || 0, att = aa || 0, prm = pa || 0;
-  const engage = del + att + prm;
-  const pctOf = (v) => (engage > 0 ? Math.round((v / engage) * 100) : 0);
-  const seg = (w, color) => (w > 0 ? `<span class="sb-seg" style="width:${((w / engage) * 100).toFixed(3)}%;background:${color}"></span>` : "");
-  const splitBar = engage > 0
-    ? `<div class="split-bar" role="img" aria-label="engagement split">${seg(del, "var(--c-working)")}${seg(att, "var(--c-idle)")}${seg(prm, "var(--accent)")}</div>`
-    : "";
-  // Every split row is one word for WHAT the time was, then a dim gloss for what
-  // you were doing in it. Two halves at the same weight (the old form) read as
-  // one long label and made the column of them hard to scan.
-  const dotK = (color, text, gloss) => `<span class="dot-k" style="background:${color}"></span>${text}`
-    + `<span class="dim"> · ${gloss}</span>`;
-  const timePct = (t, pct) => `${humanDuration(t)} <span class="dim">${pct}%</span>`;
-
   // parallelism factor: agent-hours ÷ wall-clock-active ≈ average simultaneous agents
   const union = summary.attention_union, perSession = summary.attention_per_session;
   const parallel = union && perSession && union > 0 ? perSession / union : null;
 
+  const wallBlock = wallSplitHTML(op);
   const shapeBlock = freeShapeHTML(op);
 
-  // The switching cost rides in the headline's right half rather than in a box
-  // of its own below it. It is the counterweight to the big percentage — what
-  // the leverage cost you — and the headline row was empty air anyway. Coarse
-  // durations: this is 90s × switches with the overlaps merged out, an estimate,
-  // and quoting it to the second would dress an estimate up as a measurement.
+  // The switching cost rides in the headline's right half rather than under it.
+  // It is the counterweight to the big percentage — what the leverage cost you —
+  // and the headline row was empty air anyway. Coarse durations: this is 90s ×
+  // switches with the overlaps merged out, an estimate, and quoting it to the
+  // second would dress an estimate up as a measurement.
   const opBox = `
     <div class="switch-cost">
       <div class="sc-head">switching cost</div>
@@ -3692,51 +3713,17 @@ function renderAttentionCard(summary, op) {
       <div class="headline has-tip" data-tip="${effTip}">
         <div class="hv" style="color:${effColor}">${haveDeleg && effPct != null ? effPct + "%" : "—"}</div>
         <div class="hk">delegation effectiveness</div>
-        <div class="hsub">hands-off share of the time agents ran</div>
+        <div class="hsub">share of agent-hours that ran without you</div>
       </div>
       ${opBox}
     </div>
 
-    ${haveDeleg ? `
-      <div class="time-went">
-      <div class="kv-head">while the agents ran</div>
-      ${splitBar}
-      <div class="kv-list">
-        ${row(dotK("var(--c-working)", "delegated", "you away"), timePct(del, pctOf(del)), {
-          title: "delegated",
-          formula: "agent active while you were away",
-          result: humanDuration(da),
-          why: "Agent kept working without supervision — pure leverage.",
-          color: "var(--c-working)",
-        })}
-        ${row(dotK("var(--c-idle)", "attended", "you watching"), timePct(att, pctOf(att)), {
-          title: "attended",
-          formula: "agent active while you supervised",
-          result: humanDuration(aa),
-          why: "Agent worked while you watched — useful, but not leverage.",
-          color: "var(--c-idle)",
-        })}
-        ${row(dotK("var(--accent)", "prompt", "you driving"), timePct(prm, pctOf(prm)), {
-          title: "prompt",
-          formula: "you actively driving (typing)",
-          result: humanDuration(pa),
-          why: "Hands-on time where you were actively prompting.",
-          color: "var(--accent)",
-        })}
-      </div>
-      </div>
-    ` : `<div class="kv muted-note">delegation metrics not recorded for this window</div>`}
+    ${wallBlock}
 
     ${shapeBlock}
 
     <div class="kv-sep"></div>
     <div class="kv-list">
-      ${row(`active <span class="dim">· ≥1 agent running</span>`, humanDuration(union), {
-        title: "active",
-        formula: "wall-clock with ≥1 session active",
-        result: humanDuration(union),
-        why: "Real time elapsed while at least one agent was running.",
-      })}
       ${row(`agent-hours <span class="dim">· parallel work</span>`, `${humanDuration(perSession)}${parallel ? ` <span class="dim">${parallel.toFixed(1)}×</span>` : ""}`, {
         title: "agent-hours",
         formula: "Σ per-session active time · ×N = agent-hours ÷ active",
@@ -3752,19 +3739,115 @@ function renderAttentionCard(summary, op) {
 }
 
 // ---------------------------------------------------------------------------
-// TIME BACK: every uninterrupted block, ranked longest to shortest, coloured by
-// how usable its length made it.
+// the wall clock while the agents ran
 //
-// The card above says how MUCH time the agents handed back. This says what it
-// was worth. Sixty one-minute gaps and four fifteen-minute blocks are the same
-// hour on every total in this dashboard, and they are not the same hour: only
-// one of them is time you could have started something in.
+// This used to be the provider's engagement split — delegated / attended /
+// prompt — and those are AGENT-HOURS: summed per session, so on a day with two
+// agents running in parallel they add to more hours than the day has. As a
+// proportion bar that is a category error. You cannot look at "21h delegated"
+// and learn anything about your afternoon.
+//
+// So the bar is the operator's own wall clock now: the running window (≥1 agent
+// working) partitioned four ways, disjoint, summing to exactly the hours that
+// elapsed. What you were doing in each of them is the reading:
+//
+//   work blocks  agents running, nobody waiting on you — the hours the plot
+//                below chops into sizes
+//   prompting    at an agent window, typing
+//   supervising  at an agent window, hands off the keys
+//   re-focusing  inside a switch's recovery window and NOT at a window — the
+//                part of the switch tax the other three don't already account
+//                for (the box above quotes the whole of it)
+//
+// The delegation-effectiveness headline above is still agent-hours, and says so:
+// the two answer different questions and would otherwise look like the same
+// question answered twice with different numbers.
+// ---------------------------------------------------------------------------
+function wallSplitHTML(op) {
+  const head = (right) =>
+    `<div class="kv-head fs-head"><span class="fs-head-l">while the agents ran`
+    + `<span class="fs-head-gloss"> · your wall clock</span></span>`
+    + `<span class="fs-head-r">${right}</span></div>`;
+
+  // No focus stream ⇒ attending and recovery are 0 for lack of evidence, and the
+  // bar would report a day spent entirely in work blocks. Refused, not drawn.
+  if (!op || !op.hasAttention || !(op.runningMs > 0)) {
+    return `<div class="wall">${head("")}`
+      + `<div class="kv muted-note">no focus stream for this window — your wall clock can't be split</div></div>`;
+  }
+
+  const tip = (obj) => escapeHTML(formulaTipHTML(obj));
+  const total = op.runningMs;
+  // Without an activity stream there is no evidence of typing, so prompting
+  // would read as a flat zero and supervising would absorb it. Merged instead,
+  // and the descriptor says why.
+  const split = op.hasActivity
+    ? [
+        { k: "prompting", g: "you typing", ms: op.promptMs, c: "var(--accent)",
+          f: "at an agent window ∩ keyboard/mouse activity",
+          w: "Hands-on time: you were at the window and typing." },
+        { k: "supervising", g: "watching a window", ms: op.superviseMs, c: "var(--c-idle)",
+          f: "at an agent window, minus typing",
+          w: "You were at an agent window with your hands off the keys — reading a diff, watching it work. Useful, but it is not leverage." },
+      ]
+    : [
+        { k: "at a window", g: "supervising or prompting", ms: op.promptMs + op.superviseMs, c: "var(--c-idle)",
+          f: "focused on an agent window while present",
+          w: "No activity stream for this window, so watching and typing can't be told apart — they are reported together." },
+      ];
+  const atWindow = Math.max(0, op.lostMs - op.refocusMs); // recovery spent at a window
+  const parts = [
+    { k: "work blocks", g: "you elsewhere", ms: op.freeMs, c: "var(--c-working)",
+      f: "running − attending − re-focusing",
+      w: "Agents running and nobody waiting on you: the hours you could spend on your own work. The plot below is this slice, chopped into the sizes it actually arrived in." },
+    ...split,
+    { k: "re-focusing", g: "away from a window", ms: op.refocusMs, c: "var(--c-refocus)",
+      f: `⋃ ${humanDurationMs(OP.switchRecoveryMs)} recovery per switch, merged, ∩ running − attending`,
+      w: `Still paying for a context switch, and not at an agent window while paying. The switching-cost box counts the whole recovery window (${humanDurationMs(op.lostMs)}); the other ${humanDurationMs(atWindow)} of it you spent at a window, and it is counted there rather than twice.` },
+  ];
+
+  const pctOf = (ms) => Math.round((ms / total) * 100);
+  const seg = (p) => (p.ms > 0
+    ? `<span class="sb-seg" style="width:${((p.ms / total) * 100).toFixed(3)}%;background:${p.c}"></span>` : "");
+  const rowTip = (p) => tip({
+    title: p.k,
+    formula: p.f,
+    substitution: `${humanDurationMs(p.ms)} ÷ ${humanDurationMs(total)}`,
+    result: `${pctOf(p.ms)}% · ${humanDurationMs(p.ms)}`,
+    why: p.w,
+    color: p.c,
+  });
+  const rows = parts.map((p) =>
+    `<div class="kv has-tip" data-tip="${rowTip(p)}">`
+    + `<span class="k"><span class="dot-k" style="background:${p.c}"></span>${p.k}`
+    + `<span class="dim"> · ${p.g}</span></span>`
+    + `<span class="v">${humanDurationMs(p.ms)} <span class="dim">${pctOf(p.ms)}%</span></span></div>`).join("");
+
+  const aria = "your wall clock while the agents ran: "
+    + parts.map((p) => `${p.k} ${pctOf(p.ms)}%`).join(", ");
+  return `<div class="wall">`
+    + head(humanDurationMs(total))
+    + `<div class="split-bar" role="img" aria-label="${escapeHTML(aria)}">${parts.map(seg).join("")}</div>`
+    + `<div class="kv-list">${rows}</div>`
+    + `</div>`;
+}
+
+// ---------------------------------------------------------------------------
+// WORK BLOCKS: the bar above says how much of the wall clock you got back while
+// the agents ran; this says what shape it arrived in — every uninterrupted block
+// ranked longest to shortest, coloured by how usable its length made it.
+//
+// It is the same slice of time, twice: the green segment of the proportion bar
+// is this plot's whole width. Sixty one-minute gaps and four fifteen-minute
+// blocks are the same hour on every total in this dashboard, and they are not
+// the same hour — only one of them is time you could have started something in.
 //
 // One bar per block, ranked longest first, widths carrying TIME — so the row
-// laid end to end is the whole of your time back, and any run of it is a share
+// laid end to end is the whole of the block time, and any run of it is a share
 // of that total. Rank order is what makes the four length buckets CONTIGUOUS:
-// each is a single stretch of the track, so its width IS its percentage and the
-// legend under it is reading off the picture rather than annotating it.
+// each is a single stretch of the track, which is what lets a BRACKET under it
+// carry that bucket's percentage — the number is attached to the bars it is
+// about rather than parked in a legend you have to match colours against.
 //
 // AREA IS TIME, and only width is allowed to carry it. Height is constant, which
 // looks like a missed opportunity for a decay curve and is not: scaling height by
@@ -3776,9 +3859,10 @@ function renderAttentionCard(summary, op) {
 // hues. Red and amber are spoken for on this page — they mean permission-blocked
 // and idle everywhere else you look — so a red→green fragmentation ramp said
 // "your short blocks are permission-blocked", which is not a thing. Every block
-// here is time back; time back is green; the question is only how much of it you
-// could spend, and that is brightness: an hour-plus block is the brightest green
-// on the page and a sub-five-minute gap is a dark, half-dissolved one.
+// here is a work block and work blocks are green; the question is only how much
+// of one you could spend, and that is brightness: an hour-plus block is the
+// brightest green on the page and a sub-five-minute gap is a dark, half-dissolved
+// one.
 // ---------------------------------------------------------------------------
 
 // A bucket stops drawing one bar per block and becomes one combed segment when
@@ -3802,8 +3886,8 @@ const FREE_MIN_BAR_SHARE = 0.9; // % of the track; ≈5px on a typical card
 
 function freeShapeHTML(op) {
   const head = (right) =>
-    `<div class="kv-head fs-head"><span class="fs-head-l">time back`
-    + `<span class="fs-head-gloss"> · nobody waiting on you</span></span>`
+    `<div class="kv-head fs-head"><span class="fs-head-l">work blocks`
+    + `<span class="fs-head-gloss"> · that slice, by size</span></span>`
     + `<span class="fs-head-r">${right}</span></div>`;
 
   // No focus stream ⇒ "occupied" is 0 for lack of evidence, so every running
@@ -3811,12 +3895,12 @@ function freeShapeHTML(op) {
   // with a flattering shape, so it is refused rather than drawn.
   if (!op || !op.hasAttention) {
     return `<div class="freeshape">${head("")}`
-      + `<div class="kv muted-note">no focus stream for this window — time back can't be shaped</div></div>`;
+      + `<div class="kv muted-note">no focus stream for this window — the blocks can't be sized</div></div>`;
   }
   const s = freeBlockStats(op.free);
   if (!s.count) {
     return `<div class="freeshape">${head("")}`
-      + `<div class="kv muted-note">no blocks — you were with the agents the whole time they ran</div></div>`;
+      + `<div class="kv muted-note">no work blocks — you were with the agents the whole time they ran</div></div>`;
   }
 
   const tip = (obj) => escapeHTML(formulaTipHTML(obj));
@@ -3906,8 +3990,8 @@ function freeShapeHTML(op) {
     + `<span class="fs-foot-k">${label}</span></span>`;
   const footer =
       foot("usable", `<b style="color:${deepColor}">${deepPct == null ? "—" : deepPct + "%"}</b>`, {
-        title: `usable time back · blocks ≥ ${deepStr}`,
-        formula: `Σ blocks ≥ ${deepStr} ÷ total time back`,
+        title: `usable · blocks ≥ ${deepStr}`,
+        formula: `Σ blocks ≥ ${deepStr} ÷ all block time`,
         substitution: `${humanDurationCoarseMs(s.deepMs)} ÷ ${humanDurationCoarseMs(s.totalMs)}`,
         result: (deepPct == null ? "—" : deepPct + "%")
           + ` · ${s.deepCount} block${s.deepCount === 1 ? "" : "s"}`,
@@ -3928,7 +4012,7 @@ function freeShapeHTML(op) {
         why: "The typical block. Median, not mean — one three-hour stretch would otherwise speak for a day of one-minute gaps.",
       });
 
-  const aria = `time back by block length: `
+  const aria = `work blocks by length: `
     + buckets.map((b) => `${b.label} ${b.count ? pctOf(b.frac) + "%" : "none"}`).join(", ");
   return `<div class="freeshape">`
     + head(`${s.count} block${s.count === 1 ? "" : "s"} · ${humanDurationCoarseMs(s.totalMs)}`)
@@ -3940,7 +4024,7 @@ function freeShapeHTML(op) {
     + `</div>`;
 }
 
-// bucketTip: the descriptor behind both a bucket's legend cell and its combed
+// bucketTip: the descriptor behind both a bucket's bracket and its combed
 // segment — one definition, so the two can never say different things.
 function bucketTip(b, s) {
   const pct = b.frac == null ? null : Math.round(b.frac * 100);
@@ -3949,7 +4033,7 @@ function bucketTip(b, s) {
     : `${humanDurationCoarseMs(b.minMs)} – ${humanDurationCoarseMs(b.maxMs)}`;
   return {
     title: `${b.label} blocks · ${b.gloss}`,
-    formula: `Σ blocks ${range} ÷ total time back`,
+    formula: `Σ blocks ${range} ÷ all block time`,
     substitution: b.count
       ? `${humanDurationCoarseMs(b.ms)} ÷ ${humanDurationCoarseMs(s.totalMs)}`
       : null,
@@ -3957,13 +4041,14 @@ function bucketTip(b, s) {
       ? `${pct}% · ${b.count} block${b.count === 1 ? "" : "s"} · ${humanDurationCoarseMs(b.ms)}`
       : "none",
     why: b.key === "gap"
-      ? "Counted as time back by every total on this page, and spendable as none of it: the gaps between interruptions, long enough to notice and too short to start anything in."
-      : `Time the agents handed back in ${b.label} stretches: ${b.note}.`,
+      ? "Work blocks by the arithmetic and by nothing else: the gaps between interruptions, long enough to notice and too short to start anything in."
+      : `Blocks of ${b.label} — ${b.note}.`,
     color: `var(--fb-${b.key})`,
   };
 }
 
-// layoutFreeBlocks assigns the free-block segments their WHOLE-PIXEL widths.
+// layoutFreeBlocks assigns the block segments their WHOLE-PIXEL widths, then
+// spans each bucket's bracket across the segments it owns.
 //
 // It cannot be done in the HTML, because percentages are resolved by the browser
 // against a track width the markup does not know, and the result is fractional
@@ -3971,10 +4056,9 @@ function bucketTip(b, s) {
 // out grey instead of crisp. So the shares ride along in data-share and the
 // pixels are handed out here, once the track has a width to measure.
 //
-// Largest-remainder, so the integer widths still sum to EXACTLY the track: floor
-// every share, then hand the leftover pixels to whoever was rounded down hardest.
-// Anything else either leaves a gap at the right edge or overflows it, and both
-// read as a bug rather than as rounding.
+// The brackets are the same story one level up: a bracket has to START and END
+// on a real segment boundary, which is only knowable after the rounding, so it
+// is measured from the segment edges rather than re-derived from percentages.
 function layoutFreeBlocks(root) {
   const bars = (root || document).querySelector(".fb-bars");
   if (!bars) return;
