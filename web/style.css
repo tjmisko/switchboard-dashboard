@@ -380,6 +380,10 @@ main { padding: 16px 18px 36px; }
 .timeline-section.view-line #timeline { display: none; }
 .timeline-section.view-line #concurrency { display: block; }
 .timeline-section.view-line .sessions-only { display: none; }
+/* the sessions gutter belongs to the swimlanes; the aloft view freezes its own
+   y-axis inside the canvas, and the projects ranking has no time axis at all */
+.timeline-section.view-line .gutter-stick,
+.timeline-section.view-projects .gutter-stick { display: none; }
 .timeline-section.view-projects #timeline { display: none; }
 .timeline-section.view-projects #projects { display: flex; }
 .timeline-section.view-projects .sessions-only { display: none; }
@@ -430,6 +434,17 @@ main { padding: 16px 18px 36px; }
   overflow-x: auto;
 }
 #timeline { display: block; width: 100%; }
+
+/* the frozen gutter's carrier. A zero-size sticky box: it takes no space in the
+   wrap's flow (so the plot still starts at the top-left) and its absolutely
+   positioned svg rides along, which leaves the column parked against the
+   scrollport's left edge with no scroll handler involved. z-index puts it over
+   the plot, so bars slide underneath. */
+.gutter-stick {
+  position: sticky; left: 0; z-index: 3;
+  width: 0; height: 0;
+}
+#timeline-gutter { position: absolute; top: 0; left: 0; display: block; }
 
 .empty {
   padding: 56px 20px;
@@ -551,13 +566,16 @@ main { padding: 16px 18px 36px; }
 .lane-sub { fill: var(--fg-dim); font-family: var(--mono); font-size: 11.5px; }
 
 /* ---------- the frozen project gutter ----------
-   Every element left of the axis lives in one <g class="tl-gutter"> that app.js
-   translates by the wrap's scrollLeft, so the column holding each row's identity
-   stays against the viewport's left edge however far into the afternoon you
-   scroll. It is painted last, so it needs its own opaque ground (the wrap's
-   background) and a soft cast edge to say it is floating. */
+   Every element left of the axis lives in #timeline-gutter, a second svg that
+   position:sticky holds against the scrollport's left edge (see .gutter-stick),
+   so the column holding each row's identity stays put however far into the
+   afternoon you scroll. It paints over the plot, so it needs its own opaque
+   ground (the wrap's background) and a soft cast edge to say it is floating.
+   The edge is only drawn once something is behind it — app.js flips .scrolled
+   at the 0 boundary, and nothing else in this file needs the scroll position. */
 .tl-gutter-bg { fill: var(--bg-elev); }
-.tl-gutter-shadow { pointer-events: none; transition: opacity 0.15s linear; }
+.tl-gutter-shadow { pointer-events: none; opacity: 0; transition: opacity 0.15s linear; }
+#timeline-gutter.scrolled .tl-gutter-shadow { opacity: 1; }
 .gutter-shadow-near { stop-color: var(--gutter-shadow); stop-opacity: 0.5; }
 .gutter-shadow-far { stop-color: var(--gutter-shadow); stop-opacity: 0; }
 

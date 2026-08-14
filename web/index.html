@@ -82,6 +82,28 @@
          bit off those classes. -->
     <section class="timeline-section" id="timeline-section">
       <div class="timeline-wrap" id="timeline-wrap">
+        <!-- The frozen project gutter: its OWN svg, held against the scrollport's
+             left edge by position:sticky on the zero-size wrapper (see
+             .gutter-stick). It used to be a <g> inside #timeline that JS
+             re-translated on every scroll event, which re-rasterized a few
+             hundred SVG nodes per wheel tick and made scrolling stutter. Sticky
+             is the same picture, on the compositor, for no script at all.
+             FIRST child of the wrap on purpose: the wrapper takes no space, so
+             its absolutely positioned svg lands on the plot's own origin — put
+             it after the plot and it starts one plot-height too low. -->
+        <div class="gutter-stick">
+          <svg id="timeline-gutter" role="img" aria-label="project and session labels">
+            <defs>
+              <!-- cast off the right edge of the gutter, so the column reads as
+                   floating over the bars passing behind it. Only painted once
+                   there is something behind it (see app.js syncGutterFreeze). -->
+              <linearGradient id="gutterShadow" x1="0" y1="0" x2="1" y2="0">
+                <stop class="gutter-shadow-near" offset="0"></stop>
+                <stop class="gutter-shadow-far" offset="1"></stop>
+              </linearGradient>
+            </defs>
+          </svg>
+        </div>
         <svg id="timeline" role="img" aria-label="session swimlanes">
           <defs>
             <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
@@ -94,14 +116,6 @@
               <rect width="5" height="5" fill="none"></rect>
               <line class="suspect-hatch-line" x1="0" y1="0" x2="0" y2="5" stroke-width="1.4"></line>
             </pattern>
-            <!-- cast off the right edge of the frozen project gutter, so the
-                 column reads as floating over the bars passing behind it. Only
-                 painted once there is something behind it (see app.js
-                 syncGutterFreeze). -->
-            <linearGradient id="gutterShadow" x1="0" y1="0" x2="1" y2="0">
-              <stop class="gutter-shadow-near" offset="0"></stop>
-              <stop class="gutter-shadow-far" offset="1"></stop>
-            </linearGradient>
           </defs>
         </svg>
         <canvas id="concurrency" role="img" aria-label="number of agents working over time"></canvas>

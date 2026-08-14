@@ -265,6 +265,7 @@ const el = {
   statusKey: document.getElementById("status-key"),
   providerKey: document.getElementById("provider-key"),
   svg: document.getElementById("timeline"),
+  gutterSvg: document.getElementById("timeline-gutter"),
   canvas: document.getElementById("concurrency"),
   projects: document.getElementById("projects"),
   wrap: document.getElementById("timeline-wrap"),
@@ -587,7 +588,7 @@ function renderSkeleton() {
 
 function renderSessionsSkeleton() {
   while (el.svg.childNodes.length > 1) el.svg.removeChild(el.svg.lastChild);
-  gutterLayer = null; // the frozen column went with them
+  clearGutter(); // the frozen column is the outgoing day's, and it lives elsewhere now
   const n = ghostRowCount();
   const rowH = GEO.PAD_TOP + GEO.NAME_H + GEO.BAR_H + GEO.PAD_BOTTOM + GEO.GAP;
 
@@ -1577,31 +1578,78 @@ const NAME_LABEL_STYLE = { size: 12.5, weight: 600, spacing: 0 };
 
 // ---- the frozen gutter ---------------------------------------------------
 // The plot scrolls horizontally, and the identity of every row lives in the
-// gutter — so scrolling to the afternoon used to take the answer to "which
-// project is this?" off the left edge with it. The gutter is now a LAYER: every
-// element left of GEO.GUTTER is collected here instead of going straight onto
-// the SVG, the layer is appended last (so it paints over bars sliding under it),
-// and a scroll translates it by exactly the distance the page moved — which
-// leaves it parked against the viewport's left edge, a sticky column in a
-// coordinate system that has no position:sticky.
+// gutter — so scrolling to the afternoon would take the answer to "which
+// project is this?" off the left edge with it. Every element left of
+// GEO.GUTTER is therefore collected into a SEPARATE svg (#timeline-gutter),
+// which a zero-size position:sticky wrapper holds against the scrollport's left
+// edge. Same coordinate system as the plot (gutter geometry is already
+// 0..GEO.GUTTER), so nothing here had to move but the parent.
+//
+// It used to be a <g> inside #timeline that this file re-translated from the
+// scroll handler. That is one attribute write, but it is an attribute write on
+// the parent of a few hundred SVG nodes, and Chrome answers it by
+// re-rasterizing all of them — on every wheel tick, ahead of the frame. A
+// hundred-lane day stuttered. Sticky is the same picture, computed by the
+// compositor, for no script at all.
 //
 // Nothing else lives there to fight over: the plot's x() clamps every bar to
-// x ≥ GEO.GUTTER, so the layer's opaque backing hides only what scrolled behind
-// it.
+// x ≥ GEO.GUTTER, so the gutter's opaque backing hides only what scrolled
+// behind it.
+const GUTTER_SHADOW_W = 10; // the cast edge, drawn past GEO.GUTTER
+
 let gutterLayer = null;
 function addGutter(node) { (gutterLayer || el.svg).appendChild(node); }
 
-// syncGutterFreeze parks the layer against the viewport's left edge. Called on
-// every scroll (a transform, not a repaint) and at the end of each render, so a
-// live repaint landing while scrolled doesn't drop the column back to 0.
-function syncGutterFreeze() {
+// openGutter empties the gutter svg (its <defs> stays), sizes it to the plot,
+// and returns the layer every addGutter() call posts into.
+function openGutter(H) {
+  const svg = el.gutterSvg;
+  while (svg.childNodes.length > 1) svg.removeChild(svg.lastChild);
+  const W = GEO.GUTTER + GUTTER_SHADOW_W;
+  svg.setAttribute("width", W);
+  svg.setAttribute("height", H);
+  svg.style.width = W + "px";
+  svg.style.height = H + "px";
+  const layer = svgEl("g", { class: "tl-gutter" });
+  layer.appendChild(svgEl("rect", { class: "tl-gutter-bg", x: 0, y: 0, width: GEO.GUTTER, height: H }));
+  svg.appendChild(layer);
+  return layer;
+}
+
+// closeGutter caps the column with its cast edge. Called once the plot is drawn
+// (the shadow has to be the last thing painted, over the labels as well as the
+// bars) — the layer itself needs no re-parenting, since its svg already sits
+// above the plot's.
+function closeGutter(H) {
   if (!gutterLayer) return;
-  const dx = Math.max(0, el.wrap.scrollLeft);
-  gutterLayer.setAttribute("transform", dx ? `translate(${dx},0)` : "");
-  const shadow = gutterLayer.querySelector(".tl-gutter-shadow");
-  // the drop shadow is what says "this column is floating over the plot", so it
-  // only exists once there is something underneath it
-  if (shadow) shadow.setAttribute("opacity", dx > 0 ? 1 : 0);
+  gutterLayer.appendChild(svgEl("rect", {
+    class: "tl-gutter-shadow", x: GEO.GUTTER, y: 0, width: GUTTER_SHADOW_W, height: H,
+    fill: "url(#gutterShadow)",
+  }));
+}
+
+// clearGutter takes the column off the page (a skeleton, or a window with
+// nothing in it) so a stale one cannot sit over the incoming day's rows.
+function clearGutter() {
+  gutterLayer = null;
+  const svg = el.gutterSvg;
+  while (svg.childNodes.length > 1) svg.removeChild(svg.lastChild);
+  svg.setAttribute("height", 0);
+  svg.style.height = "0px";
+  syncGutterFreeze();
+}
+
+// syncGutterFreeze keeps the cast edge honest: it is what says "this column is
+// floating over the plot", so it is only painted once something is actually
+// behind it. Called from the scroll handler, and the state is cached — a wheel
+// tick that does not cross the 0 boundary touches no DOM at all. The column's
+// POSITION is CSS's business now (see .gutter-stick); this no longer moves it.
+let gutterScrolled = false;
+function syncGutterFreeze() {
+  const scrolled = el.wrap.scrollLeft > 0;
+  if (scrolled === gutterScrolled) return;
+  gutterScrolled = scrolled;
+  el.gutterSvg.classList.toggle("scrolled", scrolled);
 }
 
 // per-lane vertical layout. Each session is a compact bar: a name-span band
@@ -1793,6 +1841,7 @@ function renderTimeline(data) {
     el.empty.hidden = false;
     el.svg.setAttribute("height", 0);
     el.svg.style.height = "0px";
+    clearGutter(); // an empty window has no rows to label
     scaleGeo = null; // nothing drawn to fit: the setting stands on its own
     return;
   }
@@ -1856,9 +1905,8 @@ function renderTimeline(data) {
   el.svg.style.height = H + "px";
 
   // the frozen column: opened here so every draw below can post its gutter-side
-  // half into it, appended (with its shadow) once the plot is drawn.
-  gutterLayer = svgEl("g", { class: "tl-gutter" });
-  gutterLayer.appendChild(svgEl("rect", { class: "tl-gutter-bg", x: 0, y: 0, width: GEO.GUTTER, height: H }));
+  // half into it, capped with its cast edge once the plot is drawn.
+  gutterLayer = openGutter(H);
 
   // Remember the frame so the NEXT day's skeleton can hold the same shape. A
   // switch then keeps the page's geometry put and only swaps its contents,
@@ -1946,12 +1994,7 @@ function renderTimeline(data) {
     drawRow(row, x, W, haveActivity, activeGlobal, presentGlobal);
   }
 
-  // the frozen column goes on LAST, so bars scrolling behind it pass underneath
-  gutterLayer.appendChild(svgEl("rect", {
-    class: "tl-gutter-shadow", x: GEO.GUTTER, y: 0, width: 10, height: H,
-    fill: "url(#gutterShadow)", opacity: 0,
-  }));
-  el.svg.appendChild(gutterLayer);
+  closeGutter(H);
   syncGutterFreeze();
 
   // on view entry, the sweep's curtain rides on top of everything drawn above
