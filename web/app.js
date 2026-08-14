@@ -277,6 +277,7 @@ const el = {
   popout: document.getElementById("popout"),
   cardAttention: document.getElementById("card-attention"),
   cardCost: document.getElementById("card-cost"),
+  cardTokens: document.getElementById("card-tokens"),
   optCtxSwitches: document.getElementById("opt-ctx-switches"),
   optFocus: document.getElementById("opt-focus"),
   optSmooth: document.getElementById("opt-smooth"),
@@ -718,7 +719,7 @@ function renderFiguresSkeleton() {
     `<span class="sk" style="--ghost-i:${i}">`
     + `<span class="sk-left">${block("sk-name", 62)}</span>${block("sk-val", 48)}</span>`).join("");
   if (el.providerKey) el.providerKey.hidden = true;
-  for (const card of [el.cardAttention, el.cardCost]) {
+  for (const card of [el.cardAttention, el.cardCost, el.cardTokens]) {
     card.innerHTML = `<div class="box-label ghost-text" style="width:112px"></div>`
       + [172, 140, 156, 120].map((w, i) => block("card-ghost-line", w)).join("");
   }
@@ -3648,9 +3649,11 @@ function renderAttentionCard(summary, op) {
       </div>
     </div>
 
+    <div class="attn-split">
     ${opBox}
 
     ${haveDeleg ? `
+      <div class="time-went">
       <div class="kv-head">where your time went</div>
       ${splitBar}
       <div class="kv-list">
@@ -3676,7 +3679,9 @@ function renderAttentionCard(summary, op) {
           color: "var(--accent)",
         })}
       </div>
+      </div>
     ` : `<div class="kv muted-note">delegation metrics not recorded for this window</div>`}
+    </div>
 
     ${shapeBlock}
 
@@ -3936,19 +3941,22 @@ function renderCostCard(data, plan) {
         </div>
         ${gaugeBar(wkPct)}
       ` : ""}
-    </div>
+    </div>`;
 
-    ${tokensBlockHTML(totals)}`;
+  el.cardTokens.innerHTML = tokensBlockHTML(totals);
 
   attachFormulaTips(el.cardCost);
+  attachFormulaTips(el.cardTokens);
 }
 
 // ---------------------------------------------------------------------------
-// cost card: the token block
+// the token card
 //
 // The dollars above are DERIVED (tokens × model price); this is what they were
-// derived from, which is why it sits under them rather than in a card of its
-// own. Two figures lead — what the agents wrote, and what they had to be told
+// derived from, which is why it sits directly under them — its own card in the
+// same column, not a ruled-off tail of the cost card, so the two read as two
+// facts rather than one long one. Two figures lead — what the agents wrote, and
+// what they had to be told
 // to write it — with the cache split beneath, because on this workload the
 // split is the whole shape of the bill: input runs three orders of magnitude
 // over output, and all but a sliver of it is cache reads at roughly a tenth the
@@ -3962,7 +3970,7 @@ function tokensBlockHTML(totals) {
   const written = totals.tok_cache_create || 0;
   const billedIn = fresh + read + written; // model.js tokenBilled, at window scale
   if (!(out || billedIn)) {
-    return `<div class="kv-sep"></div><div class="kv-head">tokens</div>`
+    return `<div class="card-label">tokens</div>`
       + `<div class="kv muted-note">no token counts for this window</div>`;
   }
   const tip = (obj) => escapeHTML(formulaTipHTML(obj));
@@ -3983,8 +3991,7 @@ function tokensBlockHTML(totals) {
       + `</div>`
     : "";
 
-  return `<div class="kv-sep"></div>
-    <div class="kv-head">tokens</div>
+  return `<div class="card-label">tokens</div>
     <div class="kv-list">
       ${row("output · generated", `<b>${fmtTokens(out)}</b>`, {
         title: "output tokens",

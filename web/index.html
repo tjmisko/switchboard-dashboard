@@ -163,7 +163,11 @@
       </div>
     </section>
 
-    <!-- Bottom boxes: legend · attention/delegation · cost. -->
+    <!-- Bottom boxes: legend · attention/delegation · cost over tokens.
+         Cost and tokens are two cards in one column rather than one card with a
+         rule through it: the dollars are DERIVED from the tokens, and stacking
+         them as peers reads as two facts where a single card read as one long
+         one. -->
     <section class="boxes" id="boxes" aria-label="summary">
       <div class="box legend-box">
         <div class="box-label">cumulative time</div>
@@ -171,7 +175,10 @@
         <div class="provider-key" id="provider-key" aria-label="providers (key)" hidden></div>
       </div>
       <div class="card attention" id="card-attention"></div>
-      <div class="card cost" id="card-cost"></div>
+      <div class="card-stack">
+        <div class="card cost" id="card-cost"></div>
+        <div class="card tokens" id="card-tokens"></div>
+      </div>
     </section>
   </main>
 

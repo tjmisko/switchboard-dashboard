@@ -630,17 +630,51 @@ main { padding: 16px 18px 36px; }
 /* ---------- cards strip ---------- */
 .boxes {
   display: grid;
-  /* legend column is sized to the narrow legend (≤300px); the two data cards
-     split the rest UNEVENLY. The attention card now carries a plot as well as
-     its figures and wants the room; the cost card is a stack of short mono
-     rows that reads better narrow than stretched. */
-  grid-template-columns: minmax(230px, 285px) minmax(0, 1.45fr) minmax(0, 1fr);
+  /* legend column is sized to the narrow legend (≤300px); the two data columns
+     split the rest UNEVENLY. The attention card carries a plot as well as its
+     figures and lays its two halves side by side, so it wants the room; cost and
+     tokens are stacks of short mono rows that read better narrow than stretched.
+     0.7fr rather than 1fr puts the cost/token column at 80% of the width it had
+     — the 20% goes to attention, which is where the horizontal room is used. */
+  grid-template-columns: minmax(230px, 285px) minmax(0, 1.45fr) minmax(0, 0.7fr);
   gap: 12px;
   align-items: start;
 }
-@media (max-width: 860px) {
+/* Collapse to one column while there is still room to spare. At three columns
+   the cost/token stack is the narrowest track, and 20% off it means the squeeze
+   arrives sooner than it used to — below ~1150px "cache written · fresh" starts
+   wrapping to three lines. One full-width column reads better than three starved
+   ones, so the strip gives up on three before that happens rather than after. */
+@media (max-width: 1150px) {
   .boxes { grid-template-columns: 1fr; }
+  .legend-box { max-width: none; }
 }
+/* cost over tokens: two cards, one column, same gap as the grid they sit in */
+.card-stack { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+
+/* ---------- summary type scale ----------
+   The three summary boxes were set a step below the rest of the page — 11px
+   labels over 13px rows — which read as fine print on the one strip you are
+   meant to be able to take in at a glance. Everything here goes up ~1px, held
+   in one place and scoped to .boxes so the same class names keep their old size
+   in the popout and the tooltip, where the density is wanted. */
+.boxes .box-label,
+.boxes .card-label,
+.boxes .kv-head,
+.boxes .headline .hk,
+.boxes .op-overhead-head { font-size: 12px; }
+.boxes .kv,
+.boxes .op-overhead-row { font-size: 14px; }
+.boxes .status-key .sk,
+.boxes .gauge-head,
+.boxes .muted-note { font-size: 13px; }
+.boxes .gauge-foot { font-size: 12px; }
+.boxes .fs-head-r { font-size: 11.5px; }
+.boxes .fs-count { font-size: 12px; }
+.boxes .fs-tick { font-size: 10.5px; }
+.boxes .fs-axis { font-size: 10px; }
+.boxes .fs-v { font-size: 16px; }
+.boxes .fs-k { font-size: 10px; }
 .box {
   background: var(--bg-elev);
   border: 1px solid var(--border-soft);
@@ -800,6 +834,23 @@ main { padding: 16px 18px 36px; }
   background: rgba(179, 32, 42, 0.13);
 }
 .op-overhead.danger .op-overhead-head { color: #ef5a58; }
+
+/* Operator overhead and the engagement split side by side. They answer adjacent
+   questions — what the switching cost you, and where the time actually went —
+   and stacked they left the card's right half empty while pushing the free-time
+   histogram below the fold. Two equal columns; the overhead box stops eating the
+   margin that separated it from the stack it no longer sits in. */
+.attn-split { display: flex; gap: 16px; align-items: flex-start; margin: 2px 0 14px; }
+.attn-split > * { flex: 1 1 0; min-width: 0; }
+.attn-split .op-overhead.danger { margin: 0; }
+.attn-split .time-went .kv-head { margin-bottom: 6px; }
+/* Whether the halves fit is a fact about the CARD, not the viewport — the card
+   is a grid track at three columns and nearly the full page at one, so the same
+   viewport width means two very different card widths. Ask the card. */
+.card.attention { container-type: inline-size; }
+@container (max-width: 620px) {
+  .attn-split { flex-direction: column; gap: 14px; }
+}
 
 /* ---------- cost gauge ---------- */
 .gauge-block { margin: 4px 0 14px; }
