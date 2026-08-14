@@ -3800,7 +3800,22 @@ function freeShapeHTML(op) {
   }
 
   const tip = (obj) => escapeHTML(formulaTipHTML(obj));
-  const pctOfTime = (ms) => (s.totalMs > 0 ? (ms / s.totalMs) * 100 : 0);
+
+  // Widths are computed from durations rounded to the NEAREST MINUTE, not from
+  // raw milliseconds. A minute is the resolution this plot can actually express
+  // — at a typical track a minute is a couple of pixels — so seconds below it
+  // only ever showed up as two bars differing by a hair for no reason the eye
+  // could use. Rounding first means bars that LOOK equal ARE equal, in the unit
+  // the figures beside them are quoted in.
+  //
+  // The tooltips still carry the exact duration: this is the drawing's
+  // resolution, not a loss of the underlying number.
+  const MINUTE_MS = 60e3;
+  const drawMs = (ms) => Math.max(MINUTE_MS, Math.round(ms / MINUTE_MS) * MINUTE_MS);
+  // Shares are relative, and layoutFreeBlocks renormalises by their sum, so
+  // rounding the parts without rounding the whole cannot drift the row off the
+  // track — it just moves a pixel or two between neighbours.
+  const pctOfTime = (ms) => (s.totalMs > 0 ? (drawMs(ms) / s.totalMs) * 100 : 0);
 
   // Widths carry TIME, so the segments laid end to end are the whole free-time
   // total and any run of them is its share of it. Heights are CONSTANT: width is
@@ -3870,7 +3885,9 @@ function freeShapeHTML(op) {
         : "The short tail of the distribution, batched into one segment so the bars that carry real time stay legible.",
       color: "var(--fg-dim)",
     });
-    segs.push(`<span class="fb-b fringe has-tip" data-tip="${t}"`
+    // data-slack: the fringe absorbs the pixel rounding, so the drawn bars can
+    // each round independently and equal minutes can stay equal on screen.
+    segs.push(`<span class="fb-b fringe has-tip" data-tip="${t}" data-slack="1"`
       + ` data-share="${pctOfTime(foldedMs).toFixed(4)}"></span>`);
   }
 
@@ -3969,18 +3986,33 @@ function layoutFreeBlocks(root) {
   const shares = segs.map((el) => parseFloat(el.dataset.share) || 0);
   const sum = shares.reduce((a, b) => a + b, 0) || 1;
   const ideal = shares.map((v) => (v / sum) * total);
-  const px = ideal.map((v) => Math.max(MIN_PX, Math.floor(v)));
+
+  // ROUND each bar on its own, rather than flooring and handing out the leftover
+  // by largest remainder. Largest-remainder fills the track exactly but decides
+  // ties by position: two blocks the width computation has already agreed are
+  // both fourteen minutes came out 40px and 39px, because only one spare pixel
+  // was going and one of them had to have it. Independent rounding cannot do
+  // that — equal shares round to equal widths, always — which is the property
+  // that makes the minute rounding upstream mean anything on screen.
+  const px = ideal.map((v) => Math.max(MIN_PX, Math.round(v)));
   let used = px.reduce((a, b) => a + b, 0);
 
-  // hand out the remainder to the largest fractional parts first
-  const byRemainder = ideal.map((v, i) => i)
-    .sort((a, b) => (ideal[b] - Math.floor(ideal[b])) - (ideal[a] - Math.floor(ideal[a])));
-  for (let k = 0; used < total && k < byRemainder.length; k++) { px[byRemainder[k]]++; used++; }
-  // and claw back from the widest if the MIN_PX floor overspent the track
+  // Independent rounding does not sum to the track, so the difference goes to
+  // ONE designated slack segment — the fringe, which is a batch of many blocks
+  // and the one place a pixel means least. A gap at the right edge or an
+  // overflow would both read as a bug rather than as rounding.
+  const slack = segs.findIndex((el) => el.dataset.slack === "1");
+  if (slack >= 0 && px[slack] + (total - used) >= MIN_PX) {
+    px[slack] += total - used;
+    used = total;
+  }
+  // No fringe (or it would go under MIN_PX): fall back to shaving the widest,
+  // which are the bars least changed by a pixel.
   const byWidth = px.map((v, i) => i).sort((a, b) => px[b] - px[a]);
-  for (let k = 0; used > total && k < byWidth.length * 32; k++) {
+  for (let k = 0; used !== total && k < byWidth.length * 64; k++) {
     const i = byWidth[k % byWidth.length];
-    if (px[i] > MIN_PX) { px[i]--; used--; }
+    if (used > total && px[i] > MIN_PX) { px[i]--; used--; }
+    else if (used < total) { px[i]++; used++; }
   }
 
   const edges = [0];
