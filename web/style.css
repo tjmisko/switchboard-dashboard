@@ -788,20 +788,38 @@ body.view-projects .boxes { grid-template-columns: minmax(0, 2.15fr) minmax(0, 0
 }
 .fb-b {
   flex: none;
-  min-width: 1px;
   border-radius: 2px 2px 0 0;
   background: var(--c-working);
-  /* a hairline of the card showing between bars is what separates sixty blocks
-     into sixty blocks rather than one green wash; box-shadow rather than a gap
-     or a margin so it never steals from the width, which is carrying time. */
+  /* a hairline of the card showing between bars is what separates the blocks
+     into blocks rather than one green wash; box-shadow rather than a gap or a
+     margin so it never steals from the width, which is carrying time. Widths are
+     whole pixels (layoutFreeBlocks), so this lands on the grid instead of
+     smearing across two columns at half strength. */
   box-shadow: inset -1px 0 0 var(--bg-elev);
   transition: width 0.35s cubic-bezier(0.25, 1, 0.35, 1);
 }
 .fb-b.has-tip { cursor: help; }
 .fb-b:hover { filter: brightness(1.25); }
-/* the fringe: still green, still free time by every total on this page, but
-   dimmed to say it is not time you could spend. The bracket below says why. */
-.fb-b.frag { opacity: 0.42; }
+
+/* The fringe: one segment carrying every block too short to draw, combed with a
+   FIXED-PITCH gradient. The pitch is a constant of the texture and not a count —
+   it says "many small things, none of them worth a bar" at any width, where
+   sixty real sub-pixel bars said it once and then aliased into a moiré that
+   changed when you resized the window. Dimmed, because this is free time by
+   every total on the page and spendable as none of it; the bracket says why. */
+.fb-b.fringe {
+  opacity: 0.58;
+  /* 6px pitch, not 4: fine enough to read as "many", coarse enough that the
+     stripe still lands on a pixel once the 0.8 page scale is applied. The comb
+     is a texture, so whatever it loses to rounding it loses uniformly — unlike
+     sixty real bars, where the rounding lands differently on each one and the
+     row shimmers. */
+  background-image: repeating-linear-gradient(
+    90deg,
+    var(--bg-elev) 0 1px,
+    transparent 1px 6px
+  );
+}
 
 /* the ≥15m boundary. Everything left of it is time you could start something in,
    and because the bars are ranked that is a single edge rather than a scatter. */
@@ -817,10 +835,10 @@ body.view-projects .boxes { grid-template-columns: minmax(0, 2.15fr) minmax(0, 0
   line-height: 1; white-space: nowrap; pointer-events: none;
 }
 
-/* the bracket under the fringe. Runs to the plot's right edge by definition —
-   the fringe is the tail, so it ends where the data does. */
+/* the bracket under the fringe. Its left edge and width are set in pixels by
+   layoutFreeBlocks so it spans exactly the fringe segment above it. */
 .fb-rail { position: relative; height: 20px; margin-top: 3px; }
-.fb-bracket { position: absolute; top: 0; right: 0; cursor: help; }
+.fb-bracket { position: absolute; top: 0; cursor: help; }
 .fb-bracket-rule {
   display: block; height: 5px;
   border: 1px solid var(--fg-dim);

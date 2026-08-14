@@ -3729,6 +3729,7 @@ function renderAttentionCard(summary, op) {
     ${suspectNoteHTML(summary)}`;
 
   attachFormulaTips(el.cardAttention);
+  layoutFreeBlocks(el.cardAttention); // percentages cannot land on whole pixels; this can
 }
 
 // ---------------------------------------------------------------------------
@@ -3789,89 +3790,96 @@ function freeShapeHTML(op) {
   const tip = (obj) => escapeHTML(formulaTipHTML(obj));
   const pctOfTime = (ms) => (s.totalMs > 0 ? (ms / s.totalMs) * 100 : 0);
 
-  // Widths carry TIME, so the bars laid end to end are the whole free-time
-  // total and any run of them is its share of it.
-  //
-  // Slivers are floored — a 40-second block is 0.02% of a six-hour day and would
-  // not survive rounding — and the whole row is then rescaled so it still adds to
-  // exactly 100%. Without that renormalisation a shredded day's floors would sum
-  // past the track and quietly push the tail off the end of the plot. The floor
-  // is the one place this plot is not area-true, and it errs toward showing the
-  // fringe rather than hiding it, which is the direction that does not flatter.
-  const blocks = s.blocksMs;
-  const rawW = blocks.map((ms) => Math.max(FREE_BLOCK_MIN_W, pctOfTime(ms)));
-  const norm = 100 / rawW.reduce((a, b) => a + b, 0);
-  const widths = rawW.map((w) => w * norm);
-  const lefts = [];
-  let acc = 0;
-  for (const w of widths) { lefts.push(acc); acc += w; }
-
-  // Heights are CONSTANT, and that is load-bearing rather than lazy: width is
+  // Widths carry TIME, so the segments laid end to end are the whole free-time
+  // total and any run of them is its share of it. Heights are CONSTANT: width is
   // already carrying time, so area = width × height ∝ time only while height is
-  // held. An earlier draft scaled height by length as well, which read nicely as
-  // a decay curve and made every area ∝ time² — the longest block drew forty
-  // times the ink of a block a sixth its length, and the plot lied in the
-  // direction that flatters the day. One encoding per quantity.
+  // held. Scaling height by length too would make every area ∝ time², drawing
+  // the longest block at forty times the ink of one a sixth its length.
+  //
+  // But the FRINGE is not drawn block by block, and that is the other half of
+  // the design. A shredded day has sixty-odd blocks under five minutes, each a
+  // fraction of a percent of the track: drawn individually they are sub-pixel,
+  // and sixty sub-pixel bars against a pixel grid is a moiré, not a reading. The
+  // browser renders that shimmer identically whether the day had forty gaps or
+  // eighty. So they are BATCHED — one segment carrying their whole time, combed
+  // with a fixed-pitch texture that says "many small things" without pretending
+  // each stripe is one of them, and labelled underneath with the count that the
+  // texture deliberately does not encode.
+  //
+  // That is a trade made on purpose: even spacing over per-block fidelity in the
+  // tail, where per-block fidelity was never legible anyway.
+  const FOLD_MIN_MS = FREE_BLOCK_FRAG_MS; // below this, a block joins the fringe
+  const MAX_DRAWN = 26;                   // ...and so does the surplus past this
 
-  // Where the usable time stops. Because the blocks are ranked, every block ≥15m
-  // precedes every block below it, so this boundary is a single edge and the
-  // ground it covers IS deepFrac — the figure to the right of the plot is the
-  // same fact as the width of the plot's left end.
-  let deepEnd = 0;
-  for (let i = 0; i < blocks.length; i++) {
-    if (blocks[i] >= FREE_BLOCK_DEEP_MS) deepEnd = lefts[i] + widths[i];
+  const blocks = s.blocksMs;
+  let foldAt = FOLD_MIN_MS;
+  let drawn = blocks.filter((ms) => ms >= foldAt);
+  // A day that is all long blocks would otherwise draw ninety bars at three
+  // pixels each, which is the same aliasing by a different route. Raise the fold
+  // line until the drawn set is a set of bars rather than a hatch.
+  if (drawn.length > MAX_DRAWN) {
+    foldAt = drawn[MAX_DRAWN - 1];
+    drawn = blocks.filter((ms) => ms >= foldAt).slice(0, MAX_DRAWN);
   }
-  // ...and where the fragments start, by the same ranking argument.
-  let fragStart = null;
-  for (let i = 0; i < blocks.length; i++) {
-    if (blocks[i] < FREE_BLOCK_FRAG_MS) { fragStart = lefts[i]; break; }
-  }
+  const foldedCount = s.count - drawn.length;
+  const drawnMs = drawn.reduce((a, b) => a + b, 0);
+  const foldedMs = Math.max(0, s.totalMs - drawnMs);
 
-  // A bar narrower than this cannot be hovered, so it is not given a tip it
-  // would only fail to show. The fringe is covered by the bracket's tip instead.
-  const TIPPABLE_W = 1.1;
-  const bars = blocks.map((ms, i) => {
-    const frag = ms < FREE_BLOCK_FRAG_MS;
+  // Each drawn block, then the fringe as ONE segment. data-share is the time
+  // share; the pixel widths are assigned after layout by layoutFreeBlocks, which
+  // is the only place that knows how wide the track actually is and therefore
+  // the only place that can land every edge on a whole pixel.
+  const deepStr = humanDurationCoarseMs(FREE_BLOCK_DEEP_MS);
+  const segs = drawn.map((ms, i) => {
     const deep = ms >= FREE_BLOCK_DEEP_MS;
-    const cls = "fb-b" + (frag ? " frag" : deep ? " deep" : "");
-    const style = `width:${widths[i].toFixed(3)}%`;
-    if (widths[i] < TIPPABLE_W) return `<span class="${cls}" style="${style}"></span>`;
     const t = tip({
       title: `block ${i + 1} of ${s.count}`,
       formula: "one uninterrupted stretch with no agent waiting on you",
       result: humanDurationMs(ms),
       why: deep
         ? "Long enough to start something in — this is the free time that counts."
-        : "Free, but under the 15m floor for starting something: a look-away, not a stretch of work.",
+        : `Free, but under the ${deepStr} floor for starting something: a look-away, not a stretch of work.`,
       color: "var(--c-working)",
     });
-    return `<span class="${cls} has-tip" data-tip="${t}" style="${style}"></span>`;
-  }).join("");
+    return `<span class="fb-b${deep ? " deep" : ""} has-tip" data-tip="${t}"`
+      + ` data-share="${pctOfTime(ms).toFixed(4)}"></span>`;
+  });
 
-  // The rule, the bracket and their labels. The rule is suppressed at the
-  // extremes: at 0% and 100% it is the plot's own edge, and an axis line drawn
-  // on top of a border reads as a rendering fault rather than a threshold.
-  const deepStr = humanDurationCoarseMs(FREE_BLOCK_DEEP_MS);
-  const deepRule = deepEnd > 0.5 && deepEnd < 99.5
-    ? `<span class="fb-rule" style="left:${deepEnd.toFixed(3)}%"></span>`
-      + `<span class="fb-rule-k" style="left:${deepEnd.toFixed(3)}%">≥${deepStr}</span>`
-    : "";
-
-  const fragStr = humanDurationCoarseMs(FREE_BLOCK_FRAG_MS);
-  const bracket = fragStart == null ? "" : (() => {
+  const foldStr = humanDurationCoarseMs(foldAt);
+  const foldedIsFringe = foldAt === FOLD_MIN_MS; // folded purely by the 5m rule
+  if (foldedCount > 0) {
     const t = tip({
-      title: `the fringe · under ${fragStr}`,
-      formula: `Σ blocks < ${fragStr} ÷ total free time`,
-      substitution: `${humanDurationCoarseMs(s.fragMs)} ÷ ${humanDurationCoarseMs(s.totalMs)}`,
-      result: `${s.fragCount} block${s.fragCount === 1 ? "" : "s"} · ${humanDurationCoarseMs(s.fragMs)}`,
-      why: `Counted as free time by every total on this page, and spendable as none of it. These are the gaps between interruptions — long enough to notice, too short to start anything in.`,
+      title: `the fringe · under ${foldStr}`,
+      formula: `Σ blocks < ${foldStr} ÷ total free time`,
+      substitution: `${humanDurationCoarseMs(foldedMs)} ÷ ${humanDurationCoarseMs(s.totalMs)}`,
+      result: `${foldedCount} block${foldedCount === 1 ? "" : "s"} · ${humanDurationCoarseMs(foldedMs)}`,
+      why: foldedIsFringe
+        ? "Counted as free time by every total on this page, and spendable as none of it. These are the gaps between interruptions — long enough to notice, too short to start anything in. Drawn as one combed segment rather than one bar apiece: at this many, per-block bars are thinner than a pixel and read as a shimmer instead of a count."
+        : "The short tail of the distribution, batched into one segment so the bars that carry real time stay legible.",
       color: "var(--fg-dim)",
     });
-    return `<span class="fb-bracket has-tip" data-tip="${t}" style="left:${fragStart.toFixed(3)}%">`
-      + `<span class="fb-bracket-rule"></span>`
-      + `<span class="fb-bracket-k">${s.fragCount} under ${fragStr} · ${humanDurationCoarseMs(s.fragMs)} · not really free</span>`
-      + `</span>`;
-  })();
+    segs.push(`<span class="fb-b fringe has-tip" data-tip="${t}"`
+      + ` data-share="${pctOfTime(foldedMs).toFixed(4)}"></span>`);
+  }
+
+  // The rule sits on the boundary between the last ≥15m block and the first
+  // below it — an INDEX, not a percentage, so that after the pixel snapping it
+  // still lands exactly on an edge rather than a pixel or two off one.
+  let deepIdx = 0;
+  for (const ms of drawn) if (ms >= FREE_BLOCK_DEEP_MS) deepIdx++;
+  const deepRule = deepIdx > 0 && deepIdx < segs.length
+    ? `<span class="fb-rule" data-after="${deepIdx}"></span>`
+      + `<span class="fb-rule-k" data-after="${deepIdx}">≥${deepStr}</span>`
+    : "";
+
+  // The bracket spans the fringe segment, so it is anchored by index too.
+  const bracket = foldedCount <= 0 ? "" :
+    `<span class="fb-bracket" data-after="${segs.length - 1}">`
+    + `<span class="fb-bracket-rule"></span>`
+    + `<span class="fb-bracket-k">${foldedCount} under ${foldStr} · ${humanDurationCoarseMs(foldedMs)}`
+    + `${foldedIsFringe ? " · not really free" : ""}</span>`
+    + `</span>`;
+  const bars = segs.join("");
 
   // the deep-work share is the figure that survives being quoted on its own, so
   // it carries the color: the same 66/33 ramp the delegation headline uses.
@@ -3923,6 +3931,60 @@ function freeShapeHTML(op) {
     + `</div>`
     + `<div class="fs-figs">${figs}</div>`
     + `</div></div>`;
+}
+
+// layoutFreeBlocks assigns the free-block segments their WHOLE-PIXEL widths.
+//
+// It cannot be done in the HTML, because percentages are resolved by the browser
+// against a track width the markup does not know, and the result is fractional
+// edges — the thing that makes a row of bars shimmer and their separators come
+// out grey instead of crisp. So the shares ride along in data-share and the
+// pixels are handed out here, once the track has a width to measure.
+//
+// Largest-remainder, so the integer widths still sum to EXACTLY the track: floor
+// every share, then hand the leftover pixels to whoever was rounded down hardest.
+// Anything else either leaves a gap at the right edge or overflows it, and both
+// read as a bug rather than as rounding.
+function layoutFreeBlocks(root) {
+  const bars = (root || document).querySelector(".fb-bars");
+  if (!bars) return;
+  const segs = [...bars.querySelectorAll(".fb-b")];
+  if (!segs.length) return;
+  const total = Math.floor(bars.clientWidth);
+  if (total <= 0) return; // not laid out yet (hidden card, pending window)
+
+  const MIN_PX = 5; // narrower than this is not a bar, and cannot be hovered
+  const shares = segs.map((el) => parseFloat(el.dataset.share) || 0);
+  const sum = shares.reduce((a, b) => a + b, 0) || 1;
+  const ideal = shares.map((v) => (v / sum) * total);
+  const px = ideal.map((v) => Math.max(MIN_PX, Math.floor(v)));
+  let used = px.reduce((a, b) => a + b, 0);
+
+  // hand out the remainder to the largest fractional parts first
+  const byRemainder = ideal.map((v, i) => i)
+    .sort((a, b) => (ideal[b] - Math.floor(ideal[b])) - (ideal[a] - Math.floor(ideal[a])));
+  for (let k = 0; used < total && k < byRemainder.length; k++) { px[byRemainder[k]]++; used++; }
+  // and claw back from the widest if the MIN_PX floor overspent the track
+  const byWidth = px.map((v, i) => i).sort((a, b) => px[b] - px[a]);
+  for (let k = 0; used > total && k < byWidth.length * 32; k++) {
+    const i = byWidth[k % byWidth.length];
+    if (px[i] > MIN_PX) { px[i]--; used--; }
+  }
+
+  const edges = [0];
+  segs.forEach((el, i) => { el.style.width = px[i] + "px"; edges.push(edges[i] + px[i]); });
+
+  // The rule and the bracket are anchored to an INDEX, not a percentage, so they
+  // land on a real segment boundary rather than a pixel or two off one.
+  bars.parentElement.querySelectorAll("[data-after]").forEach((el) => {
+    const i = Math.min(edges.length - 1, Math.max(0, parseInt(el.dataset.after, 10) || 0));
+    if (el.classList.contains("fb-bracket")) {
+      el.style.left = edges[i] + "px";
+      el.style.width = (total - edges[i]) + "px";
+    } else {
+      el.style.left = edges[i] + "px";
+    }
+  });
 }
 
 // suspectNoteHTML footnotes the figures above with what the producer refused to
@@ -4577,6 +4639,10 @@ function init() {
     resizeTimer = setTimeout(() => {
       if (win.pending) renderSkeleton();     // the frame has to follow the window too
       else if (lastData) renderChartArea(lastData);
+      // the free-block widths are pixels, so they are wrong the moment the track
+      // changes width — and re-running the whole card to fix a row of widths
+      // would throw away its tooltips for nothing
+      layoutFreeBlocks(el.cardAttention);
     }, 120);
   });
 
