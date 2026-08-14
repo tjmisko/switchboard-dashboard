@@ -206,6 +206,11 @@ Subagent spans are what make the fanout figure and the "agents aloft" chart mean
 anything: a parent that is `dormant` contributes nothing, and its subagent's span
 contributes instead, so parallel work is counted once and only once.
 
+That is also why `end` carries real weight here: a span that closes early does
+not just shorten one bar, it deletes delegated work from the topline while the
+parent's `dormant` interval credits nothing in its place. See §5.1 for the
+acknowledgement trap that produces exactly that.
+
 ### Activity — the operator stream (optional, top level)
 
 ```jsonc
@@ -333,6 +338,61 @@ Providers compiled in this repo use the calibrated caps in
 silence ≥ 4h on an unclosed lane, an unpaired subagent span ≥ 2h. Omitting the
 fields entirely is fine and means "I don't run this check"; such a lane is
 merged exactly as before and never silently clipped.
+
+### 5.1 The opposite ghost: a span that ends too early
+
+Everything above is about spans that run too **long**. The more dangerous
+failure runs the other way, because nothing downstream can catch it.
+
+**A `subagent_stop` must mean the delegated work ended.** Do not derive one
+from a spawn acknowledgement. Claude Code answers every `Agent` dispatch with
+a `tool_result` ~2s after launch that only says the agent has *started* — the
+outcome arrives much later as a `<task-notification>` entry, never as a second
+`tool_result`. A provider that pairs the dispatch against that ack emits a
+perfectly well-formed two-second span for an agent that then works for an hour.
+
+That shape is invisible to §5: the span is closed, `suspect` is false, and the
+duration is short rather than implausibly long. There is no consumer-side check
+that separates it from a genuinely fast agent, which is why it is stated here
+as a producer obligation rather than handled downstream. **The dashboard adds
+no guard against short spans, deliberately** — a threshold would silently
+suppress real fast agents while hiding the producer defect it was papering
+over.
+
+The diagnostic signature, if you suspect a stream has this: compare flat
+subagent spans against workflow-agent spans, which are paired from a run
+journal and never see an ack. In switchboard's own 31-day history, workflow
+agents produced **no** span under 30s, while flat agents produced 94 (66 of
+them under 5 seconds) out of 419.
+
+Known corrupted window: switchboard's history log carries these truncated
+spans for every `Agent` fanout up to 2026-08-14, and its `delegating` intervals
+are correspondingly missing. Both are repaired in place by
+`switchboard/scripts/repair-launch-ack-spans`; the producer fix is in
+`switchboard/docs/async-agent-launch-ack.md`.
+
+### 5.2 Known limitation: a span is in-flight time, not work time
+
+A subagent span runs spawn-to-finish, and an agent parked on a permission
+prompt is still in flight. So a span can include time the agent did nothing but
+wait for a human, and every consumer of these spans — the fanout figure, the
+agents-aloft chart, the force-multiplier headline — currently credits that wait
+as delegated work.
+
+Measured across every subagent transcript on the development machine
+(2026-08-14): **17.6 h of 127.5 h of total span time (13.8%) was spent parked on
+an unanswered `tool_use`.** Normally the distortion is small, but it is
+unbounded and concentrates badly — a single overnight wait produced two spans
+that were 92% and 97% dead time, and those two alone are 15.4 h of that 17.6 h.
+
+This is not repaired, and deliberately not papered over with a heuristic. The
+information needed is per-span blocked intervals, which no producer currently
+emits: the history log records a permission `transition` at session level, not
+per delegated writer, so the overlap cannot be reconstructed after the fact for
+a session with more than one agent. Closing it properly means a producer-side
+field (blocked intervals on the subagent span) rather than a consumer-side
+guess, and until then the honest reading of the fanout figure is "agent time in
+flight", not "agent time working".
 
 ## 6. What the merge does to your envelope
 
