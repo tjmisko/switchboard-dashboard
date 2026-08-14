@@ -733,6 +733,56 @@
     };
   }
 
+  // The four buckets the card reads its time back off in. The six-bin histogram
+  // above describes a distribution; this answers the question actually being
+  // asked, which is "how much of it came back in a form I could use" — and four
+  // is the most a legend can carry while still being readable at a glance.
+  //
+  // The edges are not new numbers. 5m is FREE_BLOCK_FRAG_MS (the interruption
+  // gap that was never really free) and 15m is FREE_BLOCK_DEEP_MS (the floor for
+  // starting something), so buckets 1+2 are exactly the "usable" share the card
+  // brackets, and 4 is exactly the fringe. The hour on top splits the usable
+  // half into "a clear run" and "a work block", which is the distinction between
+  // a day you could take a project into and one you could only take a task into.
+  //
+  // Ordered LONGEST FIRST, matching the ranked plot's left-to-right. `gloss` is
+  // the bucket in three words (it goes in a tooltip title beside the label);
+  // `note` is the clause that says what that length is good for, kept separate
+  // so a renderer can join the two without ending up with two dashes in one
+  // sentence.
+  const FREE_BUCKETS = [
+    { key: "clear", label: "1h+",    minMs: 60 * 60e3,    maxMs: Infinity,
+      gloss: "a clear run", note: "long enough to take a project into" },
+    { key: "block", label: "15m–1h", minMs: FREE_BLOCK_DEEP_MS, maxMs: 60 * 60e3,
+      gloss: "a work block", note: "long enough to start something in" },
+    { key: "look",  label: "5–15m",  minMs: FREE_BLOCK_FRAG_MS, maxMs: FREE_BLOCK_DEEP_MS,
+      gloss: "a breather", note: "time to finish a thought, not to start one" },
+    { key: "gap",   label: "<5m",    minMs: 0,            maxMs: FREE_BLOCK_FRAG_MS,
+      gloss: "the gaps between interruptions", note: "free on paper, spendable on nothing" },
+  ];
+
+  // freeBucketStats folds block LENGTHS (ms, any order) into those four buckets.
+  // Each bucket carries its own blocks, longest first, so a renderer can draw
+  // them per bucket without re-sorting; frac is the bucket's share of total time
+  // back, which is the figure the card exists to print. Pure and DOM-free.
+  function freeBucketStats(blocksMs) {
+    const out = FREE_BUCKETS.map((b) => ({ ...b, count: 0, ms: 0, frac: null, blocksMs: [] }));
+    let totalMs = 0;
+    for (const ms of blocksMs || []) {
+      if (!Number.isFinite(ms) || !(ms > 0)) continue;
+      const b = out.find((x) => ms >= x.minMs && ms < x.maxMs) || out[out.length - 1];
+      b.count++;
+      b.ms += ms;
+      b.blocksMs.push(ms);
+      totalMs += ms;
+    }
+    for (const b of out) {
+      b.blocksMs.sort((x, y) => y - x);
+      b.frac = totalMs > 0 ? b.ms / totalMs : null;
+    }
+    return { buckets: out, totalMs };
+  }
+
   // -------------------------------------------------------------------------
   // memory (/api/memory — its own surface, deliberately NOT the timeline
   // envelope; see README "Memory"). Shape:
@@ -1446,6 +1496,7 @@
     alignLiveTail,
     projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs, suspectTailMs,
     freeBlockStats, FREE_BLOCK_DEEP_MS, FREE_BLOCK_FRAG_MS,
+    freeBucketStats, FREE_BUCKETS,
     fmtBytes, spawnedBytes, laneMemory, memoryWindow, pressureWindow,
     summaryTasks, summaryBodyHTML, summaryHintText, normalizeView,
     fmtTokens, shortModel, tokenBilled, tokenTotals, tokenRowsHTML,

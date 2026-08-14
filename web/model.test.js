@@ -14,6 +14,7 @@ const {
   aloftSpans, workIntervalsMs, concurrencyProfile, alignLiveTail,
   projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs,
   freeBlockStats, FREE_BLOCK_DEEP_MS, FREE_BLOCK_FRAG_MS,
+  freeBucketStats, FREE_BUCKETS,
   suspectTailMs, normalizeView, VIEW_ORDER, stepView, scaleGeometry,
   parseISODate, stepISODate, stepISOMonth, clampISODate, monthGrid,
   localDayBoundsMs, dayWindowMs,
@@ -868,6 +869,77 @@ test("freeBlockStats should drop malformed and non-positive intervals", () => {
   ]);
   assert.equal(s.count, 1);
   assert.equal(s.totalMs, 10 * MIN);
+});
+
+// ---------------------------------------------------------------------------
+// freeBucketStats — the four buckets the card reads its percentages off
+// ---------------------------------------------------------------------------
+
+// lens(minutes...) → the bucket table for those block lengths, keyed by label.
+function lens(...minutes) {
+  const s = freeBucketStats(minutes.map((m) => m * MIN));
+  const by = {};
+  for (const b of s.buckets) by[b.label] = b;
+  return { s, by };
+}
+
+test("freeBucketStats should split time back into the four buckets, longest first", () => {
+  const { s } = lens(90, 30, 10, 2);
+  assert.deepEqual(s.buckets.map((b) => b.label), ["1h+", "15m–1h", "5–15m", "<5m"],
+    "the legend reads left to right in the same order the ranked plot draws");
+  assert.deepEqual(s.buckets.map((b) => b.count), [1, 1, 1, 1]);
+  assert.equal(s.totalMs, 132 * MIN);
+});
+
+test("freeBucketStats should report each bucket's share of the total time back", () => {
+  const { by, s } = lens(60, 20, 10, 10);
+  assert.equal(s.totalMs, 100 * MIN);
+  assert.deepEqual(s.buckets.map((b) => b.frac), [0.6, 0.2, 0.2, 0]);
+  assert.equal(by["5–15m"].ms, 20 * MIN, "two ten-minute blocks, not one twenty");
+  assert.equal(by["5–15m"].count, 2);
+});
+
+test("freeBucketStats should place a block exactly on an edge in the longer bucket", () => {
+  const { s } = lens(60, 15, 5);
+  assert.deepEqual(s.buckets.map((b) => b.count), [1, 1, 1, 0],
+    "each edge opens its bucket, matching freeBlockStats' bins");
+});
+
+test("freeBucketStats should agree with the deep and fragment lines the card brackets", () => {
+  // The two usable buckets ARE the ≥15m share, and the last bucket IS the
+  // fringe — the card prints both, so they must not drift apart.
+  const mins = [90, 20, 16, 9, 3, 1];
+  const { s } = lens(...mins);
+  const blocks = freeBlockStats(mins.map((m) => [baseMs, baseMs + m * MIN]));
+  const usableMs = s.buckets[0].ms + s.buckets[1].ms;
+  assert.equal(usableMs, blocks.deepMs);
+  assert.equal(s.buckets[0].count + s.buckets[1].count, blocks.deepCount);
+  assert.equal(s.buckets[3].ms, blocks.fragMs);
+  assert.equal(s.buckets[3].count, blocks.fragCount);
+  assert.equal(FREE_BUCKETS[1].minMs, FREE_BLOCK_DEEP_MS);
+  assert.equal(FREE_BUCKETS[2].minMs, FREE_BLOCK_FRAG_MS);
+});
+
+test("freeBucketStats should hand each bucket its own blocks, longest first", () => {
+  const { by } = lens(7, 40, 6, 25, 12);
+  assert.deepEqual(by["15m–1h"].blocksMs.map((ms) => ms / MIN), [40, 25]);
+  assert.deepEqual(by["5–15m"].blocksMs.map((ms) => ms / MIN), [12, 7, 6],
+    "the renderer draws a bucket's bars without re-sorting them");
+  assert.equal(by["1h+"].blocksMs.length, 0);
+});
+
+test("freeBucketStats should return empty buckets rather than nothing for a day with no time back", () => {
+  const s = freeBucketStats([]);
+  assert.equal(s.totalMs, 0);
+  assert.deepEqual(s.buckets.map((b) => b.count), [0, 0, 0, 0], "the legend still has four cells to draw");
+  assert.deepEqual(s.buckets.map((b) => b.frac), [null, null, null, null], "no share, rather than a fabricated 0%");
+  assert.equal(freeBucketStats(null).buckets.length, 4);
+});
+
+test("freeBucketStats should drop non-positive and malformed lengths", () => {
+  const s = freeBucketStats([0, -5 * MIN, NaN, null, undefined, 30 * MIN]);
+  assert.equal(s.totalMs, 30 * MIN);
+  assert.deepEqual(s.buckets.map((b) => b.count), [0, 1, 0, 0]);
 });
 
 // ---------------------------------------------------------------------------
