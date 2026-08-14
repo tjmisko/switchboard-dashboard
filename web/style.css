@@ -11,6 +11,16 @@
   --c-unknown: #3a414c;
   --c-subagent: #a371f7;
 
+  /* the token card's input split: the cache pair are two strengths of one hue
+     (two halves of one mechanism), fresh takes amber as the priciest per token,
+     and green is left to mean "output" alone. */
+  --tok-read: color-mix(in srgb, var(--accent) 52%, var(--bg-elev));
+
+  /* The time-back bucket ramp (--fb-*) is NOT here: unlike the status hues it is
+     a data ramp, and a ramp has to keep its DIRECTION across themes. Brightest
+     reads as strongest on a dark card and as weakest on a light one, so the four
+     steps are defined per theme below — strong to faint either way. */
+
   --mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 
@@ -65,6 +75,15 @@
   --shadow-1: rgba(0, 0, 0, 0.5);
   --shadow-2: rgba(0, 0, 0, 0.6);
   --gutter-shadow: #000000;   /* cast by the frozen gutter over the scrolling plot */
+
+  /* time-back buckets, longest to shortest: the working green at its brightest,
+     then the same hue losing ground to the card behind it. Mixed with --bg-elev
+     rather than given an alpha so the hairline that separates the bars (itself
+     painted in --bg-elev) stays crisp against them. */
+  --fb-clear: #56d364;
+  --fb-block: #2ea043;
+  --fb-look: color-mix(in srgb, #238636 72%, var(--bg-elev));
+  --fb-gap: color-mix(in srgb, #1a7f37 36%, var(--bg-elev));
 }
 
 @media (prefers-color-scheme: light) {
@@ -89,6 +108,13 @@
     --shadow-1: rgba(31, 35, 40, 0.16);
     --shadow-2: rgba(31, 35, 40, 0.24);
     --gutter-shadow: #1f2328;
+
+    /* the same ramp, re-pointed: on a light card the STRONGEST step is the
+       deepest green, not the brightest, and the faint end fades to the card. */
+    --fb-clear: #1a7f37;
+    --fb-block: #2da44e;
+    --fb-look: color-mix(in srgb, #2da44e 58%, var(--bg-elev));
+    --fb-gap: color-mix(in srgb, #2da44e 24%, var(--bg-elev));
   }
 }
 
@@ -113,6 +139,11 @@
   --shadow-1: rgba(31, 35, 40, 0.16);
   --shadow-2: rgba(31, 35, 40, 0.24);
   --gutter-shadow: #1f2328;
+
+  --fb-clear: #1a7f37;
+  --fb-block: #2da44e;
+  --fb-look: color-mix(in srgb, #2da44e 58%, var(--bg-elev));
+  --fb-gap: color-mix(in srgb, #2da44e 24%, var(--bg-elev));
 }
 
 * { box-sizing: border-box; }
@@ -690,18 +721,13 @@ body.view-projects .boxes { grid-template-columns: minmax(0, 2.15fr) minmax(0, 0
 .boxes .card-label,
 .boxes .kv-head,
 .boxes .headline .hk,
-.boxes .op-overhead-head { font-size: 12px; }
-.boxes .kv,
-.boxes .op-overhead-row { font-size: 14px; }
+.boxes .sc-head { font-size: 12px; }
+.boxes .kv { font-size: 14px; }
+.boxes .sc-row { font-size: 13px; }
 .boxes .status-key .sk,
 .boxes .gauge-head,
 .boxes .muted-note { font-size: 13px; }
 .boxes .gauge-foot { font-size: 12px; }
-.boxes .fs-head-r { font-size: 11.5px; }
-.boxes .fs-v { font-size: 16px; }
-.boxes .fs-k { font-size: 10px; }
-.boxes .fb-rule-k,
-.boxes .fb-bracket-k { font-size: 10px; }
 .box {
   background: var(--bg-elev);
   border: 1px solid var(--border-soft);
@@ -755,26 +781,18 @@ body.view-projects .boxes { grid-template-columns: minmax(0, 2.15fr) minmax(0, 0
 .stale { color: var(--c-idle); }
 .v .dim { font-family: var(--mono); }
 
-/* ---------- attention card: the free-block rank plot ----------
-   One bar per uninterrupted block, ranked longest to shortest. Widths carry
-   TIME, so the row laid end to end is the whole free-time total and any run of
-   it is a share of that total — which is what lets the ≥15m rule double as the
-   deep-work figure printed beside the plot. Heights carry length against the
-   day's best block, so the day's decay is its silhouette.
-
-   ONE colour. Red and amber are spoken for on this page — they are status
-   colours meaning permission-blocked and idle — so a fragmentation ramp built
-   from them said things about free time that were not true. Every block here is
-   free time, free time is green, and the fringe is marked with a bracket and
-   words instead of a hue that means something else. */
-.freeshape { margin-top: 15px; }
+/* ---------- attention card: the time-back plot ----------
+   One bar per uninterrupted block, ranked longest to shortest, coloured by which
+   of the four length buckets it fell in. Widths carry TIME, so the row laid end
+   to end is the whole of the time back and any run of it is a share of that
+   total; rank order makes each bucket a single contiguous stretch, so a bucket's
+   width IS its percentage and the legend under the track is reading the picture
+   rather than annotating it. Height is constant — width already carries time,
+   and letting height carry it too would make area ∝ time². */
+.freeshape { margin-top: 16px; }
 .fs-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
-.fs-head-r { font-family: var(--mono); font-size: 10.5px; color: var(--fg-dim); letter-spacing: 0; text-transform: none; }
-
-/* plot left, figures right: the plot is a wide short thing and the figures are a
-   narrow column, so they interlock rather than stack. */
-.fs-body { display: flex; align-items: flex-end; gap: 20px; margin-top: 9px; }
-.fs-plot { flex: 1 1 auto; min-width: 0; }
+.fs-head-gloss { opacity: 0.72; }
+.fs-head-r { font-family: var(--mono); font-size: 11.5px; color: var(--fg-dim); letter-spacing: 0; text-transform: none; }
 
 .fb { position: relative; }
 /* The row is one partitioned strip, not a set of columns: every bar is full
@@ -783,13 +801,14 @@ body.view-projects .boxes { grid-template-columns: minmax(0, 2.15fr) minmax(0, 0
 .fb-bars {
   position: relative;
   display: flex; align-items: stretch;
-  height: 44px;
+  height: 40px;
+  margin-top: 9px;
   border-bottom: 1px solid var(--border-soft);
 }
 .fb-b {
   flex: none;
   border-radius: 2px 2px 0 0;
-  background: var(--c-working);
+  background: var(--fb-block);
   /* a hairline of the card showing between bars is what separates the blocks
      into blocks rather than one green wash; box-shadow rather than a gap or a
      margin so it never steals from the width, which is carrying time. Widths are
@@ -798,17 +817,24 @@ body.view-projects .boxes { grid-template-columns: minmax(0, 2.15fr) minmax(0, 0
   box-shadow: inset -1px 0 0 var(--bg-elev);
   transition: width 0.35s cubic-bezier(0.25, 1, 0.35, 1);
 }
+.fb-b.fb-clear { background: var(--fb-clear); }
+.fb-b.fb-block { background: var(--fb-block); }
+.fb-b.fb-look { background: var(--fb-look); }
+.fb-b.fb-gap { background: var(--fb-gap); }
+/* the first bar of each bucket after the first: a 2px notch of card colour, so
+   the four groups read as four groups even where two steps of the ramp sit next
+   to each other. Painted INSIDE the bar (inset shadow), so it costs the reading
+   nothing — the width still carries the whole of that block's time. */
+.fb-b.bstart { box-shadow: inset -1px 0 0 var(--bg-elev), inset 2px 0 0 var(--bg-elev); }
 .fb-b.has-tip { cursor: help; }
 .fb-b:hover { filter: brightness(1.25); }
 
-/* The fringe: one segment carrying every block too short to draw, combed with a
-   FIXED-PITCH gradient. The pitch is a constant of the texture and not a count —
-   it says "many small things, none of them worth a bar" at any width, where
-   sixty real sub-pixel bars said it once and then aliased into a moiré that
-   changed when you resized the window. Dimmed, because this is free time by
-   every total on the page and spendable as none of it; the bracket says why. */
-.fb-b.fringe {
-  opacity: 0.58;
+/* A COMBED bucket: one segment carrying every block in a bucket that has too
+   many of them to draw one apiece, textured at a FIXED PITCH. The pitch is a
+   constant of the texture and not a count — it says "many small things, none of
+   them worth a bar" at any width, where sixty real sub-pixel bars said it once
+   and then aliased into a moiré that changed when you resized the window. */
+.fb-b.comb {
   /* 6px pitch, not 4: fine enough to read as "many", coarse enough that the
      stripe still lands on a pixel once the 0.8 page scale is applied. The comb
      is a texture, so whatever it loses to rounding it loses uniformly — unlike
@@ -821,122 +847,105 @@ body.view-projects .boxes { grid-template-columns: minmax(0, 2.15fr) minmax(0, 0
   );
 }
 
-/* the ≥15m boundary. Everything left of it is time you could start something in,
-   and because the bars are ranked that is a single edge rather than a scatter. */
-.fb-rule {
-  position: absolute; top: -3px; bottom: 0; width: 1px;
-  background: var(--fg-muted); opacity: 0.55;
-  pointer-events: none;
+/* the legend: four cells in the plot's own order, each printing the share of the
+   time back that arrived at that length. This is the surface the section exists
+   for — the plot shows the shape, this is where you read the numbers off. */
+.fb-key {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px 12px; margin-top: 10px;
 }
-.fb-rule-k {
-  position: absolute; top: -4px;
-  transform: translateX(4px);
-  font-family: var(--mono); font-size: 9px; color: var(--fg-muted);
-  line-height: 1; white-space: nowrap; pointer-events: none;
+.fbk { display: flex; flex-direction: column; gap: 4px; cursor: help; min-width: 0; }
+.fbk-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.fbk-sw { flex: none; width: 9px; height: 9px; border-radius: 2px; background: var(--fb-block); }
+.fbk-sw.fb-clear { background: var(--fb-clear); }
+.fbk-sw.fb-block { background: var(--fb-block); }
+.fbk-sw.fb-look { background: var(--fb-look); }
+.fbk-sw.fb-gap { background: var(--fb-gap); }
+.fbk-range {
+  font-family: var(--mono); font-size: 11.5px; color: var(--fg-muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+.fbk-pct { font-family: var(--mono); font-size: 17px; font-weight: 700; color: var(--fg); line-height: 1; }
+.fbk-sub { font-family: var(--mono); font-size: 10.5px; color: var(--fg-dim); line-height: 1; }
+.fbk.empty .fbk-pct { color: var(--fg-dim); }
+.fbk:hover .fbk-range, .fbk:hover .fbk-sub { color: var(--fg-muted); }
 
-/* the bracket under the fringe. Its left edge and width are set in pixels by
-   layoutFreeBlocks so it spans exactly the fringe segment above it. */
-.fb-rail { position: relative; height: 20px; margin-top: 3px; }
-.fb-bracket { position: absolute; top: 0; cursor: help; }
-.fb-bracket-rule {
-  display: block; height: 5px;
-  border: 1px solid var(--fg-dim);
-  border-top: 0;
-  border-radius: 0 0 3px 3px;
-  opacity: 0.75;
+/* the three figures that summarise the distribution, as one dim line under the
+   legend rather than a column beside the plot — the legend is the reading now,
+   and these are its footnote. */
+.fs-foot {
+  display: flex; flex-wrap: wrap; gap: 4px 16px; justify-content: flex-end;
+  margin-top: 10px; font-family: var(--mono); font-size: 10.5px; color: var(--fg-dim);
 }
-.fb-bracket-k {
-  display: block; margin-top: 3px;
-  font-size: 9px; letter-spacing: 0.2px; color: var(--fg-dim);
-  line-height: 1; white-space: nowrap;
-  /* anchored to the bracket's RIGHT edge, so a wide fringe grows leftward into
-     the plot's empty air instead of off the card. */
-  text-align: right;
+.fs-foot-i { cursor: help; white-space: nowrap; }
+.fs-foot-i b { color: var(--fg); font-weight: 700; }
+.fs-foot-k { margin-left: 5px; text-transform: uppercase; letter-spacing: 0.4px; }
+
+/* the token card's four headline figures, 2×2. What the agents wrote, then the
+   three quantities the one-number "input · billed" used to stand for — they
+   differ by orders of magnitude in size and by an order of magnitude in unit
+   price, so the single figure was the biggest number on the page and the least
+   informative one. Equal cells: none of the four leads, the sizes do the
+   ranking. */
+.tk-figs {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 13px 14px; margin: 2px 0 13px;
 }
-.fb-bracket:hover .fb-bracket-rule { border-color: var(--fg-muted); }
-.fb-bracket:hover .fb-bracket-k { color: var(--fg-muted); }
-
-/* three figures beside the plot: value over key, the topline's voice at card
-   scale. Stacked, because the third (the usable share) is the one that gets
-   quoted and a column puts it last rather than lost in a row. */
-.fs-figs { flex: 0 0 auto; display: flex; flex-direction: column; gap: 9px; }
-.fs-fig { display: flex; flex-direction: column; gap: 3px; cursor: help; }
-.fs-v { font-family: var(--mono); font-size: 15px; font-weight: 700; color: var(--fg); line-height: 1; }
-.fs-k { font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--fg-dim); line-height: 1; }
-
-/* the token card's two headline figures, side by side. They are the two halves
-   of one comparison — what the agents wrote against what they had to be told to
-   write it — and the point is the gap between them, which stacked rows make you
-   read twice to find. Equal columns so neither leads. */
-.tk-figs { display: flex; gap: 18px; margin: 2px 0 12px; }
-.tk-fig { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 4px; cursor: help; }
+.tk-fig { min-width: 0; display: flex; flex-direction: column; gap: 4px; cursor: help; }
 .tk-v {
-  font-family: var(--mono); font-size: 22px; font-weight: 700; color: var(--fg);
+  font-family: var(--mono); font-size: 20px; font-weight: 700; color: var(--fg);
   line-height: 1; letter-spacing: -0.4px;
 }
-.tk-k { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--fg-dim); line-height: 1; }
-
-/* stacked cards (or a narrow one): the figures go under the plot rather than
-   squeezing it to a smear */
-@media (max-width: 880px) { /* 1100 layout px × the 0.8 global scale */
-  .fs-body { flex-wrap: wrap; }
-  .fs-plot { flex-basis: 100%; }
-  .fs-figs { flex-direction: row; gap: 18px; }
+.tk-k {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+  color: var(--fg-dim); line-height: 1.15;
 }
 
 @media (prefers-reduced-motion: reduce) {
   .fb-b { transition: none; }
 }
 
-/* ---------- attention card: operator-overhead block ----------
-   Own visual weight: a subtly accent-tinted box with a left accent rule, so the
-   two operator-cost metrics read as a distinct block rather than more kv rows. */
-.op-overhead {
-  margin-top: 14px;
-  padding: 10px 12px;
-  border-radius: 7px;
-  border: 1px solid var(--border-soft);
-  border-left: 3px solid var(--accent);
-  background: rgba(88, 166, 255, 0.06);
+/* ---------- attention card: the headline and what it cost ----------
+   The big percentage is leverage; the switching cost is what the leverage was
+   paid for with. They belong on one line, facing each other — the headline row
+   was empty air to its right, and the cost had been sitting in a filled red box
+   underneath, shouting over the figure it qualifies. Same information, an
+   eighth of the ink: a red rule, a red label, and two figures in a column. */
+.attn-top {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 20px; margin-bottom: 16px;
 }
-.op-overhead-head {
+.headline .hsub { font-size: 11px; color: var(--fg-dim); margin-top: 3px; }
+.switch-cost {
+  flex: 0 0 auto;
+  padding: 1px 10px 2px 11px;
+  border-left: 2px solid #b3202a;
+  background: linear-gradient(90deg, rgba(179, 32, 42, 0.11), rgba(179, 32, 42, 0) 90%);
+}
+.sc-head {
   font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
-  color: var(--accent); font-weight: 600; margin-bottom: 8px;
+  color: #ef5a58; font-weight: 600; margin-bottom: 7px;
 }
-.op-overhead-row {
-  display: flex; align-items: baseline; justify-content: space-between;
-  gap: 12px; font-size: 13px;
+.sc-row { display: flex; align-items: baseline; gap: 9px; font-size: 12.5px; cursor: help; }
+.sc-row + .sc-row { margin-top: 5px; }
+.sc-v {
+  flex: none; min-width: 62px; text-align: right;
+  font-family: var(--mono); font-weight: 700; color: var(--fg); white-space: nowrap;
 }
-.op-overhead-row + .op-overhead-row { margin-top: 6px; }
-.op-overhead-row .oo-k { color: var(--fg-muted); }
-.op-overhead-row .oo-v { font-family: var(--mono); color: var(--fg); font-weight: 600; white-space: nowrap; }
+.sc-k { color: var(--fg-muted); white-space: nowrap; }
+.sc-row:hover .sc-k { color: var(--fg); }
 
-/* dark-red variant: operator overhead is waste, not leverage — call it out and
-   prioritize it near the top of the card. */
-.op-overhead.danger {
-  margin: 2px 0 14px;
-  border-left-width: 4px;
-  border-left-color: #b3202a;
-  background: rgba(179, 32, 42, 0.13);
-}
-.op-overhead.danger .op-overhead-head { color: #ef5a58; }
-
-/* Operator overhead and the engagement split side by side. They answer adjacent
-   questions — what the switching cost you, and where the time actually went —
-   and stacked they left the card's right half empty while pushing the free-time
-   histogram below the fold. Two equal columns; the overhead box stops eating the
-   margin that separated it from the stack it no longer sits in. */
-.attn-split { display: flex; gap: 16px; align-items: flex-start; margin: 2px 0 14px; }
-.attn-split > * { flex: 1 1 0; min-width: 0; }
-.attn-split .op-overhead.danger { margin: 0; }
-.attn-split .time-went .kv-head { margin-bottom: 6px; }
-/* Whether the halves fit is a fact about the CARD, not the viewport — the card
-   is a grid track at three columns and nearly the full page at one, so the same
-   viewport width means two very different card widths. Ask the card. */
+.time-went .kv-head { margin-bottom: 6px; }
+/* Whether the two halves fit is a fact about the CARD, not the viewport — the
+   card is a grid track at three columns and nearly the full page at one, so the
+   same viewport width means two very different card widths. Ask the card. */
 .card.attention { container-type: inline-size; }
-@container (max-width: 620px) {
-  .attn-split { flex-direction: column; gap: 14px; }
+@container (max-width: 560px) {
+  .attn-top { flex-direction: column; gap: 14px; }
+  .switch-cost { align-self: stretch; }
+}
+@container (max-width: 420px) {
+  .fb-key { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 12px; }
 }
 
 /* ---------- cost gauge ---------- */

@@ -3655,7 +3655,11 @@ function renderAttentionCard(summary, op) {
   const splitBar = engage > 0
     ? `<div class="split-bar" role="img" aria-label="engagement split">${seg(del, "var(--c-working)")}${seg(att, "var(--c-idle)")}${seg(prm, "var(--accent)")}</div>`
     : "";
-  const dotK = (color, text) => `<span class="dot-k" style="background:${color}"></span>${text}`;
+  // Every split row is one word for WHAT the time was, then a dim gloss for what
+  // you were doing in it. Two halves at the same weight (the old form) read as
+  // one long label and made the column of them hard to scan.
+  const dotK = (color, text, gloss) => `<span class="dot-k" style="background:${color}"></span>${text}`
+    + `<span class="dim"> · ${gloss}</span>`;
   const timePct = (t, pct) => `${humanDuration(t)} <span class="dim">${pct}%</span>`;
 
   // parallelism factor: agent-hours ÷ wall-clock-active ≈ average simultaneous agents
@@ -3664,51 +3668,55 @@ function renderAttentionCard(summary, op) {
 
   const shapeBlock = freeShapeHTML(op);
 
-  // operator-overhead callout — the cost of context switching. Prioritized near the
-  // top and styled dark red (this is waste, not leverage).
+  // The switching cost rides in the headline's right half rather than in a box
+  // of its own below it. It is the counterweight to the big percentage — what
+  // the leverage cost you — and the headline row was empty air anyway. Coarse
+  // durations: this is 90s × switches with the overlaps merged out, an estimate,
+  // and quoting it to the second would dress an estimate up as a measurement.
   const opBox = `
-    <div class="op-overhead danger">
-      <div class="op-overhead-head">operator overhead</div>
-      <div class="op-overhead-row has-tip" data-tip="${ctxTip}">
-        <span class="oo-k">context switches</span><span class="oo-v">${op ? op.switches : "—"}</span>
+    <div class="switch-cost">
+      <div class="sc-head">switching cost</div>
+      <div class="sc-row has-tip" data-tip="${ctxTip}">
+        <span class="sc-v">${op ? op.switches : "—"}</span>
+        <span class="sc-k">context switches</span>
       </div>
-      <div class="op-overhead-row has-tip" data-tip="${lostTip}">
-        <span class="oo-k">operator time lost to AI</span><span class="oo-v">${op ? humanDurationMs(op.lostMs) : "—"}</span>
+      <div class="sc-row has-tip" data-tip="${lostTip}">
+        <span class="sc-v">${op ? humanDurationCoarseMs(op.lostMs) : "—"}</span>
+        <span class="sc-k">lost re-focusing</span>
       </div>
     </div>`;
 
   el.cardAttention.innerHTML = `
     <div class="card-label">attention &amp; delegation</div>
-    <div class="headline-row">
+    <div class="attn-top">
       <div class="headline has-tip" data-tip="${effTip}">
         <div class="hv" style="color:${effColor}">${haveDeleg && effPct != null ? effPct + "%" : "—"}</div>
-        <div class="hk">delegation effectiveness · hands-off share of your engagement</div>
+        <div class="hk">delegation effectiveness</div>
+        <div class="hsub">hands-off share of the time agents ran</div>
       </div>
+      ${opBox}
     </div>
-
-    <div class="attn-split">
-    ${opBox}
 
     ${haveDeleg ? `
       <div class="time-went">
-      <div class="kv-head">where your time went</div>
+      <div class="kv-head">while the agents ran</div>
       ${splitBar}
       <div class="kv-list">
-        ${row(dotK("var(--c-working)", "delegated · you away"), timePct(del, pctOf(del)), {
+        ${row(dotK("var(--c-working)", "delegated", "you away"), timePct(del, pctOf(del)), {
           title: "delegated",
           formula: "agent active while you were away",
           result: humanDuration(da),
           why: "Agent kept working without supervision — pure leverage.",
           color: "var(--c-working)",
         })}
-        ${row(dotK("var(--c-idle)", "attended · you watching"), timePct(att, pctOf(att)), {
+        ${row(dotK("var(--c-idle)", "attended", "you watching"), timePct(att, pctOf(att)), {
           title: "attended",
           formula: "agent active while you supervised",
           result: humanDuration(aa),
           why: "Agent worked while you watched — useful, but not leverage.",
           color: "var(--c-idle)",
         })}
-        ${row(dotK("var(--accent)", "prompt · you driving"), timePct(prm, pctOf(prm)), {
+        ${row(dotK("var(--accent)", "prompt", "you driving"), timePct(prm, pctOf(prm)), {
           title: "prompt",
           formula: "you actively driving (typing)",
           result: humanDuration(pa),
@@ -3718,19 +3726,18 @@ function renderAttentionCard(summary, op) {
       </div>
       </div>
     ` : `<div class="kv muted-note">delegation metrics not recorded for this window</div>`}
-    </div>
 
     ${shapeBlock}
 
     <div class="kv-sep"></div>
     <div class="kv-list">
-      ${row("active · ≥1 agent running", humanDuration(union), {
+      ${row(`active <span class="dim">· ≥1 agent running</span>`, humanDuration(union), {
         title: "active",
         formula: "wall-clock with ≥1 session active",
         result: humanDuration(union),
         why: "Real time elapsed while at least one agent was running.",
       })}
-      ${row("agent-hours · parallel work", `${humanDuration(perSession)}${parallel ? ` <span class="dim">${parallel.toFixed(1)}×</span>` : ""}`, {
+      ${row(`agent-hours <span class="dim">· parallel work</span>`, `${humanDuration(perSession)}${parallel ? ` <span class="dim">${parallel.toFixed(1)}×</span>` : ""}`, {
         title: "agent-hours",
         formula: "Σ per-session active time · ×N = agent-hours ÷ active",
         substitution: parallel ? `${humanDuration(perSession)} ÷ ${humanDuration(union)} = ${parallel.toFixed(1)}×` : null,
@@ -3745,25 +3752,19 @@ function renderAttentionCard(summary, op) {
 }
 
 // ---------------------------------------------------------------------------
-// free-time SHAPE: every uninterrupted block, ranked longest to shortest
+// TIME BACK: every uninterrupted block, ranked longest to shortest, coloured by
+// how usable its length made it.
 //
-// The card above says how MUCH free time the agents handed back. This says what
-// it was worth. Sixty one-minute gaps and four fifteen-minute blocks are the
-// same hour on every total in this dashboard, and they are not the same hour:
-// only one of them is time you could have started something in.
+// The card above says how MUCH time the agents handed back. This says what it
+// was worth. Sixty one-minute gaps and four fifteen-minute blocks are the same
+// hour on every total in this dashboard, and they are not the same hour: only
+// one of them is time you could have started something in.
 //
-// This was a six-bucket histogram on a red→green ramp, and the ramp was the
-// problem. Red, amber and green are SPOKEN FOR on this page — they are the
-// status colours, and they mean permission-blocked, idle and working everywhere
-// else you look. A histogram borrowing them said "your short blocks are
-// permission-blocked", which is not a thing. Every block is free time; free time
-// is green; that is the whole colour vocabulary this plot needs.
-//
-// So: one bar per block, ranked longest first. The x-axis is CUMULATIVE FREE
-// TIME rather than an index, which is what makes the reading direct — the
-// horizontal reach of the blocks left of the ≥15m rule *is* the deep-work share,
-// so the figure beside the plot and the shape of the plot are the same fact told
-// twice.
+// One bar per block, ranked longest first, widths carrying TIME — so the row
+// laid end to end is the whole of your time back, and any run of it is a share
+// of that total. Rank order is what makes the four length buckets CONTIGUOUS:
+// each is a single stretch of the track, so its width IS its percentage and the
+// legend under it is reading off the picture rather than annotating it.
 //
 // AREA IS TIME, and only width is allowed to carry it. Height is constant, which
 // looks like a missed opportunity for a decay curve and is not: scaling height by
@@ -3771,19 +3772,38 @@ function renderAttentionCard(summary, op) {
 // times the ink of one a sixth its length. The eye reads area whether or not you
 // meant it to, so the one quantity this plot is about gets exactly one channel.
 //
-// The fringe gets a bracket rather than a colour. Blocks under 5m are not free
-// time you could spend, they are the gaps between interruptions, and the bracket
-// says so in words instead of borrowing a hue that means something else.
+// COLOUR carries usability, and it is one hue in four steps, not a ramp across
+// hues. Red and amber are spoken for on this page — they mean permission-blocked
+// and idle everywhere else you look — so a red→green fragmentation ramp said
+// "your short blocks are permission-blocked", which is not a thing. Every block
+// here is time back; time back is green; the question is only how much of it you
+// could spend, and that is brightness: an hour-plus block is the brightest green
+// on the page and a sub-five-minute gap is a dark, half-dissolved one.
 // ---------------------------------------------------------------------------
 
-// Below this share of the total, a block is too thin to draw honestly. It still
-// occupies its slot — a fringe that vanished would make a shredded day look
-// whole — but it stops shrinking, and the tail reads as the hairline comb it is.
-const FREE_BLOCK_MIN_W = 0.22; // %
+// A bucket stops drawing one bar per block and becomes one combed segment when
+// it has more blocks than FREE_BUCKET_MAX_BARS, or when it has at least
+// FREE_COMB_MIN_BLOCKS of them AND its smallest would come out under
+// FREE_MIN_BAR_SHARE of the track. Sixty sub-pixel bars against a pixel grid is
+// a moiré rather than a reading — the browser renders that shimmer identically
+// whether the day had forty gaps or eighty — so the comb says "many small
+// things" at a fixed pitch and the legend underneath carries the count the
+// texture deliberately does not encode.
+//
+// The count floor is what keeps that honest, and it is not a nicety: the comb's
+// pitch is fixed, so a two-block bucket drawn as a comb showed a picket fence of
+// twenty teeth and read as a shredded day. A comb may only be reached for when
+// "many" is TRUE. Below the floor the blocks are drawn as bars however thin they
+// are — layoutFreeBlocks holds them at a hoverable minimum, and the couple of
+// pixels that costs is borrowed from the widest bar, where it does not show.
+const FREE_BUCKET_MAX_BARS = 14;
+const FREE_COMB_MIN_BLOCKS = 6;
+const FREE_MIN_BAR_SHARE = 0.9; // % of the track; ≈5px on a typical card
 
 function freeShapeHTML(op) {
   const head = (right) =>
-    `<div class="kv-head fs-head"><span>free time · uninterrupted blocks</span>`
+    `<div class="kv-head fs-head"><span class="fs-head-l">time back`
+    + `<span class="fs-head-gloss"> · nobody waiting on you</span></span>`
     + `<span class="fs-head-r">${right}</span></div>`;
 
   // No focus stream ⇒ "occupied" is 0 for lack of evidence, so every running
@@ -3791,12 +3811,12 @@ function freeShapeHTML(op) {
   // with a flattering shape, so it is refused rather than drawn.
   if (!op || !op.hasAttention) {
     return `<div class="freeshape">${head("")}`
-      + `<div class="kv muted-note">no focus stream for this window — free time can't be shaped</div></div>`;
+      + `<div class="kv muted-note">no focus stream for this window — time back can't be shaped</div></div>`;
   }
   const s = freeBlockStats(op.free);
   if (!s.count) {
     return `<div class="freeshape">${head("")}`
-      + `<div class="kv muted-note">no free blocks — you were with the agents the whole time they ran</div></div>`;
+      + `<div class="kv muted-note">no blocks — you were with the agents the whole time they ran</div></div>`;
   }
 
   const tip = (obj) => escapeHTML(formulaTipHTML(obj));
@@ -3817,149 +3837,130 @@ function freeShapeHTML(op) {
   // track — it just moves a pixel or two between neighbours.
   const pctOfTime = (ms) => (s.totalMs > 0 ? (drawMs(ms) / s.totalMs) * 100 : 0);
 
-  // Widths carry TIME, so the segments laid end to end are the whole free-time
-  // total and any run of them is its share of it. Heights are CONSTANT: width is
-  // already carrying time, so area = width × height ∝ time only while height is
-  // held. Scaling height by length too would make every area ∝ time², drawing
-  // the longest block at forty times the ink of one a sixth its length.
-  //
-  // But the FRINGE is not drawn block by block, and that is the other half of
-  // the design. A shredded day has sixty-odd blocks under five minutes, each a
-  // fraction of a percent of the track: drawn individually they are sub-pixel,
-  // and sixty sub-pixel bars against a pixel grid is a moiré, not a reading. The
-  // browser renders that shimmer identically whether the day had forty gaps or
-  // eighty. So they are BATCHED — one segment carrying their whole time, combed
-  // with a fixed-pitch texture that says "many small things" without pretending
-  // each stripe is one of them, and labelled underneath with the count that the
-  // texture deliberately does not encode.
-  //
-  // That is a trade made on purpose: even spacing over per-block fidelity in the
-  // tail, where per-block fidelity was never legible anyway.
-  const FOLD_MIN_MS = FREE_BLOCK_FRAG_MS; // below this, a block joins the fringe
-  const MAX_DRAWN = 26;                   // ...and so does the surplus past this
+  const { buckets } = freeBucketStats(s.blocksMs);
+  const pctOf = (frac) => (frac == null ? null : Math.round(frac * 100));
 
-  const blocks = s.blocksMs;
-  let foldAt = FOLD_MIN_MS;
-  let drawn = blocks.filter((ms) => ms >= foldAt);
-  // A day that is all long blocks would otherwise draw ninety bars at three
-  // pixels each, which is the same aliasing by a different route. Raise the fold
-  // line until the drawn set is a set of bars rather than a hatch.
-  if (drawn.length > MAX_DRAWN) {
-    foldAt = drawn[MAX_DRAWN - 1];
-    drawn = blocks.filter((ms) => ms >= foldAt).slice(0, MAX_DRAWN);
+  // Fold decision is per BUCKET, not across the whole row: the buckets are what
+  // the reader is counting up, so a fold must never move time from one into
+  // another. Inside a bucket it is bars or a comb, never both.
+  const segs = [];
+  let slackKey = null, slackMs = -1;
+  for (const b of buckets) {
+    if (!b.count) continue;
+    const thinnest = pctOfTime(b.blocksMs[b.blocksMs.length - 1]);
+    const fold = b.count > FREE_BUCKET_MAX_BARS
+      || (b.count >= FREE_COMB_MIN_BLOCKS && thinnest < FREE_MIN_BAR_SHARE);
+    const first = segs.length === 0 ? "" : " bstart";
+    if (fold) {
+      if (b.ms > slackMs) { slackMs = b.ms; slackKey = b.key; }
+      segs.push(`<span class="fb-b fb-${b.key} comb${first} has-tip"`
+        + ` data-tip="${tip(bucketTip(b, s))}" data-bucket="${b.key}"`
+        + ` data-share="${pctOfTime(b.ms).toFixed(4)}"></span>`);
+      continue;
+    }
+    b.blocksMs.forEach((ms, i) => {
+      const t = tip({
+        title: `${humanDurationMs(ms)} · ${b.label}`,
+        formula: "one uninterrupted stretch with no agent waiting on you",
+        substitution: `block ${i + 1} of ${b.count} in this bucket · ${s.count} in the day`,
+        result: humanDurationMs(ms),
+        why: b.gloss.charAt(0).toUpperCase() + b.gloss.slice(1) + " — " + b.note + ".",
+        color: `var(--fb-${b.key})`,
+      });
+      segs.push(`<span class="fb-b fb-${b.key}${i === 0 ? first : ""} has-tip" data-tip="${t}"`
+        + ` data-bucket="${b.key}" data-share="${pctOfTime(ms).toFixed(4)}"></span>`);
+    });
   }
-  const foldedCount = s.count - drawn.length;
-  const drawnMs = drawn.reduce((a, b) => a + b, 0);
-  const foldedMs = Math.max(0, s.totalMs - drawnMs);
+  // data-slack: one segment absorbs the whole-pixel rounding, so every other bar
+  // can round independently and equal minutes stay equal on screen. The widest
+  // combed bucket is where a pixel means least; with no comb, layoutFreeBlocks
+  // shaves the widest bars instead.
+  if (slackKey) {
+    const i = segs.findIndex((h) => h.includes(`data-bucket="${slackKey}"`));
+    if (i >= 0) segs[i] = segs[i].replace(" data-share=", ' data-slack="1" data-share=');
+  }
 
-  // Each drawn block, then the fringe as ONE segment. data-share is the time
-  // share; the pixel widths are assigned after layout by layoutFreeBlocks, which
-  // is the only place that knows how wide the track actually is and therefore
-  // the only place that can land every edge on a whole pixel.
+  // The legend is the point of the plot: four cells, in the plot's own order,
+  // each printing the share of your time back that arrived at that length.
+  const key = buckets.map((b) => {
+    const pct = pctOf(b.frac);
+    const dis = b.count ? "" : " empty";
+    return `<div class="fbk${dis} has-tip" data-tip="${tip(bucketTip(b, s))}">`
+      + `<span class="fbk-top"><span class="fbk-sw fb-${b.key}"></span>`
+      + `<span class="fbk-range">${b.label}</span></span>`
+      + `<span class="fbk-pct">${pct == null || !b.count ? "—" : pct + "%"}</span>`
+      + `<span class="fbk-sub">${b.count ? `${humanDurationCoarseMs(b.ms)} · ${b.count} block${b.count === 1 ? "" : "s"}` : "none"}</span>`
+      + `</div>`;
+  }).join("");
+
+  // The usable share is the one figure here that survives being quoted on its
+  // own — it is the top two buckets added up, which is exactly the reading the
+  // legend invites — so it leads the footer and carries the colour.
   const deepStr = humanDurationCoarseMs(FREE_BLOCK_DEEP_MS);
-  const segs = drawn.map((ms, i) => {
-    const deep = ms >= FREE_BLOCK_DEEP_MS;
-    const t = tip({
-      title: `block ${i + 1} of ${s.count}`,
-      formula: "one uninterrupted stretch with no agent waiting on you",
-      result: humanDurationMs(ms),
-      why: deep
-        ? "Long enough to start something in — this is the free time that counts."
-        : `Free, but under the ${deepStr} floor for starting something: a look-away, not a stretch of work.`,
-      color: "var(--c-working)",
-    });
-    return `<span class="fb-b${deep ? " deep" : ""} has-tip" data-tip="${t}"`
-      + ` data-share="${pctOfTime(ms).toFixed(4)}"></span>`;
-  });
-
-  const foldStr = humanDurationCoarseMs(foldAt);
-  const foldedIsFringe = foldAt === FOLD_MIN_MS; // folded purely by the 5m rule
-  if (foldedCount > 0) {
-    const t = tip({
-      title: `the fringe · under ${foldStr}`,
-      formula: `Σ blocks < ${foldStr} ÷ total free time`,
-      substitution: `${humanDurationCoarseMs(foldedMs)} ÷ ${humanDurationCoarseMs(s.totalMs)}`,
-      result: `${foldedCount} block${foldedCount === 1 ? "" : "s"} · ${humanDurationCoarseMs(foldedMs)}`,
-      why: foldedIsFringe
-        ? "Counted as free time by every total on this page, and spendable as none of it. These are the gaps between interruptions — long enough to notice, too short to start anything in. Drawn as one combed segment rather than one bar apiece: at this many, per-block bars are thinner than a pixel and read as a shimmer instead of a count."
-        : "The short tail of the distribution, batched into one segment so the bars that carry real time stay legible.",
-      color: "var(--fg-dim)",
-    });
-    // data-slack: the fringe absorbs the pixel rounding, so the drawn bars can
-    // each round independently and equal minutes can stay equal on screen.
-    segs.push(`<span class="fb-b fringe has-tip" data-tip="${t}" data-slack="1"`
-      + ` data-share="${pctOfTime(foldedMs).toFixed(4)}"></span>`);
-  }
-
-  // The rule sits on the boundary between the last ≥15m block and the first
-  // below it — an INDEX, not a percentage, so that after the pixel snapping it
-  // still lands exactly on an edge rather than a pixel or two off one.
-  let deepIdx = 0;
-  for (const ms of drawn) if (ms >= FREE_BLOCK_DEEP_MS) deepIdx++;
-  const deepRule = deepIdx > 0 && deepIdx < segs.length
-    ? `<span class="fb-rule" data-after="${deepIdx}"></span>`
-      + `<span class="fb-rule-k" data-after="${deepIdx}">≥${deepStr}</span>`
-    : "";
-
-  // The bracket spans the fringe segment, so it is anchored by index too.
-  const bracket = foldedCount <= 0 ? "" :
-    `<span class="fb-bracket" data-after="${segs.length - 1}">`
-    + `<span class="fb-bracket-rule"></span>`
-    + `<span class="fb-bracket-k">${foldedCount} under ${foldStr} · ${humanDurationCoarseMs(foldedMs)}`
-    + `${foldedIsFringe ? " · not really free" : ""}</span>`
-    + `</span>`;
-  const bars = segs.join("");
-
-  // the deep-work share is the figure that survives being quoted on its own, so
-  // it carries the color: the same 66/33 ramp the delegation headline uses.
   const deepPct = s.deepFrac == null ? null : Math.round(s.deepFrac * 100);
   const deepColor = deepPct == null ? "var(--fg-muted)"
     : deepPct >= 66 ? "var(--c-working)" : deepPct >= 33 ? "var(--c-idle)" : "var(--c-permission)";
 
-  const fig = (value, key, tipObj, color) =>
-    `<div class="fs-fig has-tip" data-tip="${tip(tipObj)}">`
-    + `<span class="fs-v"${color ? ` style="color:${color}"` : ""}>${value}</span>`
-    + `<span class="fs-k">${key}</span></div>`;
-
-  const figs =
-      fig(humanDurationCoarseMs(s.longestMs), "longest block", {
-        title: "longest block",
-        formula: "max uninterrupted free stretch",
-        result: humanDurationMs(s.longestMs),
-        why: "The best single run of hands-off time the day gave you.",
+  const foot = (label, valHTML, tipObj) =>
+    `<span class="fs-foot-i has-tip" data-tip="${tip(tipObj)}">${valHTML}`
+    + `<span class="fs-foot-k">${label}</span></span>`;
+  const footer =
+      foot("usable", `<b style="color:${deepColor}">${deepPct == null ? "—" : deepPct + "%"}</b>`, {
+        title: `usable time back · blocks ≥ ${deepStr}`,
+        formula: `Σ blocks ≥ ${deepStr} ÷ total time back`,
+        substitution: `${humanDurationCoarseMs(s.deepMs)} ÷ ${humanDurationCoarseMs(s.totalMs)}`,
+        result: (deepPct == null ? "—" : deepPct + "%")
+          + ` · ${s.deepCount} block${s.deepCount === 1 ? "" : "s"}`,
+        why: `The top two buckets added up: the share that arrived in stretches long enough to start something in. This is the figure a bare total hides — the same ${humanDurationCoarseMs(s.totalMs)} can be 90% usable or 9%.`,
+        color: deepColor,
       })
-    + fig(humanDurationCoarseMs(s.medianMs), "median block", {
+    + foot("longest", `<b>${humanDurationCoarseMs(s.longestMs)}</b>`, {
+        title: "longest block",
+        formula: "max uninterrupted stretch",
+        result: humanDurationMs(s.longestMs),
+        why: "The best single run the day gave you.",
+      })
+    + foot("median", `<b>${humanDurationCoarseMs(s.medianMs)}</b>`, {
         title: "median block",
         formula: "middle block by length",
         substitution: `${s.count} blocks · mean ${humanDurationCoarseMs(s.meanMs)}`,
         result: humanDurationMs(s.medianMs),
         why: "The typical block. Median, not mean — one three-hour stretch would otherwise speak for a day of one-minute gaps.",
-      })
-    + fig(deepPct == null ? "—" : deepPct + "%", `free time in ≥${deepStr} blocks`, {
-        title: "usable free time",
-        formula: `Σ blocks ≥ ${deepStr} ÷ total free time`,
-        substitution: `${humanDurationCoarseMs(s.deepMs)} ÷ ${humanDurationCoarseMs(s.totalMs)}`,
-        result: (deepPct == null ? "—" : deepPct + "%")
-          + ` · ${s.deepCount} block${s.deepCount === 1 ? "" : "s"}`,
-        why: `Share of your free time that arrived in stretches long enough to start something in. This is the figure the free-time total hides: the same ${humanDurationCoarseMs(s.totalMs)} can be 90% usable or 9%.`,
-        color: deepColor,
-      }, deepColor);
+      });
 
-  // plot left, figures right: the plot is a wide, short thing and the figures
-  // are a narrow column, so they interlock rather than stack.
-  const aria = `${s.count} free blocks ranked longest to shortest, `
-    + `${deepPct == null ? "unknown" : deepPct + "%"} of the time in blocks of ${deepStr} or more`;
+  const aria = `time back by block length: `
+    + buckets.map((b) => `${b.label} ${b.count ? pctOf(b.frac) + "%" : "none"}`).join(", ");
   return `<div class="freeshape">`
     + head(`${s.count} block${s.count === 1 ? "" : "s"} · ${humanDurationCoarseMs(s.totalMs)}`)
-    + `<div class="fs-body">`
-    + `<div class="fs-plot">`
     + `<div class="fb" role="img" aria-label="${escapeHTML(aria)}">`
-    + `<div class="fb-bars">${bars}${deepRule}</div>`
-    + `<div class="fb-rail">${bracket}</div>`
+    + `<div class="fb-bars">${segs.join("")}</div>`
     + `</div>`
-    + `</div>`
-    + `<div class="fs-figs">${figs}</div>`
-    + `</div></div>`;
+    + `<div class="fb-key">${key}</div>`
+    + `<div class="fs-foot">${footer}</div>`
+    + `</div>`;
+}
+
+// bucketTip: the descriptor behind both a bucket's legend cell and its combed
+// segment — one definition, so the two can never say different things.
+function bucketTip(b, s) {
+  const pct = b.frac == null ? null : Math.round(b.frac * 100);
+  const range = b.maxMs === Infinity ? `≥ ${humanDurationCoarseMs(b.minMs)}`
+    : b.minMs === 0 ? `< ${humanDurationCoarseMs(b.maxMs)}`
+    : `${humanDurationCoarseMs(b.minMs)} – ${humanDurationCoarseMs(b.maxMs)}`;
+  return {
+    title: `${b.label} blocks · ${b.gloss}`,
+    formula: `Σ blocks ${range} ÷ total time back`,
+    substitution: b.count
+      ? `${humanDurationCoarseMs(b.ms)} ÷ ${humanDurationCoarseMs(s.totalMs)}`
+      : null,
+    result: b.count
+      ? `${pct}% · ${b.count} block${b.count === 1 ? "" : "s"} · ${humanDurationCoarseMs(b.ms)}`
+      : "none",
+    why: b.key === "gap"
+      ? "Counted as time back by every total on this page, and spendable as none of it: the gaps between interruptions, long enough to notice and too short to start anything in."
+      : `Time the agents handed back in ${b.label} stretches: ${b.note}.`,
+    color: `var(--fb-${b.key})`,
+  };
 }
 
 // layoutFreeBlocks assigns the free-block segments their WHOLE-PIXEL widths.
@@ -3998,15 +3999,15 @@ function layoutFreeBlocks(root) {
   let used = px.reduce((a, b) => a + b, 0);
 
   // Independent rounding does not sum to the track, so the difference goes to
-  // ONE designated slack segment — the fringe, which is a batch of many blocks
-  // and the one place a pixel means least. A gap at the right edge or an
+  // ONE designated slack segment — a combed bucket, which is a batch of many
+  // blocks and the one place a pixel means least. A gap at the right edge or an
   // overflow would both read as a bug rather than as rounding.
   const slack = segs.findIndex((el) => el.dataset.slack === "1");
   if (slack >= 0 && px[slack] + (total - used) >= MIN_PX) {
     px[slack] += total - used;
     used = total;
   }
-  // No fringe (or it would go under MIN_PX): fall back to shaving the widest,
+  // No comb (or it would go under MIN_PX): fall back to shaving the widest,
   // which are the bars least changed by a pixel.
   const byWidth = px.map((v, i) => i).sort((a, b) => px[b] - px[a]);
   for (let k = 0; used !== total && k < byWidth.length * 64; k++) {
@@ -4015,20 +4016,7 @@ function layoutFreeBlocks(root) {
     else if (used < total) { px[i]++; used++; }
   }
 
-  const edges = [0];
-  segs.forEach((el, i) => { el.style.width = px[i] + "px"; edges.push(edges[i] + px[i]); });
-
-  // The rule and the bracket are anchored to an INDEX, not a percentage, so they
-  // land on a real segment boundary rather than a pixel or two off one.
-  bars.parentElement.querySelectorAll("[data-after]").forEach((el) => {
-    const i = Math.min(edges.length - 1, Math.max(0, parseInt(el.dataset.after, 10) || 0));
-    if (el.classList.contains("fb-bracket")) {
-      el.style.left = edges[i] + "px";
-      el.style.width = (total - edges[i]) + "px";
-    } else {
-      el.style.left = edges[i] + "px";
-    }
-  });
+  segs.forEach((el, i) => { el.style.width = px[i] + "px"; });
 }
 
 // suspectNoteHTML footnotes the figures above with what the producer refused to
