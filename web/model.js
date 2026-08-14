@@ -1418,18 +1418,23 @@
   }
 
   // monthGrid lays out the month containing `iso` the way a calendar draws it:
-  // 42 cells, Monday-first — the page speaks ISO dates everywhere, so it keeps
-  // ISO weeks too. Always six rows, even when five would hold the month, so the
+  // 42 cells, SUNDAY-first — the page speaks ISO dates everywhere, but the week
+  // it draws is the one the reader keeps, and this reader's week starts on
+  // Sunday. Always six rows, even when five would hold the month, so the
   // popover never changes height (and never moves the day under the cursor)
   // as the user pages through months. Returns null for a non-date.
+  //
+  // Keep the .cal-dow header row in index.html in step with this: the grid says
+  // which weekday each column IS, and that row is the only thing that says so
+  // on screen.
   function monthGrid(iso) {
     const t = parseISODate(iso);
     if (!Number.isFinite(t)) return null;
     const anchor = new Date(t);
     const year = anchor.getUTCFullYear(), month = anchor.getUTCMonth();
     const first = Date.UTC(year, month, 1);
-    // getUTCDay is Sunday-based (0=Sun); Monday-first puts Sunday last.
-    const lead = (new Date(first).getUTCDay() + 6) % 7;
+    // getUTCDay is already Sunday-based (0=Sun), so the lead is the day itself.
+    const lead = new Date(first).getUTCDay();
     const cells = [];
     for (let i = 0; i < 42; i++) {
       const d = new Date(first - lead * DAY_MS + i * DAY_MS);

@@ -1206,8 +1206,10 @@ body.view-projects .boxes { grid-template-columns: minmax(0, 2.15fr) minmax(0, 0
   color: var(--fg-muted); text-align: center;
   border-bottom: 1px solid var(--border-soft); padding-bottom: 5px;
 }
-/* the weekend reads one step back — the workweek is what this dashboard is about */
-.cal-dow span:nth-child(n + 6) { color: var(--fg-dim); }
+/* the weekend reads one step back — the workweek is what this dashboard is
+   about. Sunday-first, so the weekend is the two OUTER columns. */
+.cal-dow span:first-child,
+.cal-dow span:last-child { color: var(--fg-dim); }
 
 .cal-day {
   position: relative;

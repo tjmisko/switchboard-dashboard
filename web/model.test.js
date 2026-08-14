@@ -1615,15 +1615,15 @@ test("stepISOMonth should clamp to the last day when the target month is shorter
   assert.equal(stepISOMonth("2026-05-31", +1), "2026-06-30");
 });
 
-test("monthGrid should return six Monday-first weeks covering the month", () => {
+test("monthGrid should return six Sunday-first weeks covering the month", () => {
   const g = monthGrid("2026-08-05");
   assert.equal(g.year, 2026);
   assert.equal(g.month, 7); // 0-based: August
   assert.equal(g.cells.length, 42);
-  // August 2026 starts on a Saturday, so the grid opens on Mon 27 Jul
-  assert.equal(g.cells[0].iso, "2026-07-27");
+  // August 2026 starts on a Saturday, so the grid opens on Sun 26 Jul
+  assert.equal(g.cells[0].iso, "2026-07-26");
   assert.equal(g.cells[0].inMonth, false);
-  assert.equal(g.cells[41].iso, "2026-09-06");
+  assert.equal(g.cells[41].iso, "2026-09-05");
   // consecutive days throughout, no gaps or repeats
   for (let i = 1; i < g.cells.length; i++) {
     assert.equal(g.cells[i].iso, stepISODate(g.cells[i - 1].iso, 1), `cell ${i}`);
@@ -1639,25 +1639,26 @@ test("monthGrid should mark exactly the days belonging to the month on display",
   assert.equal(g.cells.find((c) => c.iso === "2026-08-05").day, 5);
 });
 
-test("monthGrid should open on Monday for every month of a year", () => {
+test("monthGrid should open on Sunday for every month of a year", () => {
   // Six rows always, whatever the month's shape — the popover must not change
-  // height (or move the day under the cursor) as the user pages through.
+  // height (or move the day under the cursor) as the user pages through. The
+  // weekday of cell 0 is also what the .cal-dow header row claims it is.
   for (let m = 1; m <= 12; m++) {
     const iso = `2026-${String(m).padStart(2, "0")}-15`;
     const g = monthGrid(iso);
     assert.equal(g.cells.length, 42, iso);
-    assert.equal(new Date(g.cells[0].iso + "T00:00:00Z").getUTCDay(), 1, `${iso} opens Monday`);
+    assert.equal(new Date(g.cells[0].iso + "T00:00:00Z").getUTCDay(), 0, `${iso} opens Sunday`);
     assert.ok(g.cells.some((c) => c.iso === iso && c.inMonth), `${iso} is in its own grid`);
   }
 });
 
-test("monthGrid should include a whole month that begins on a Monday", () => {
-  // The tight case: a 31-day month starting Monday fills 31 of 42 cells with
-  // no lead, and must still not clip the tail.
-  const g = monthGrid("2026-06-15"); // June 2026 starts Monday
-  assert.equal(g.cells[0].iso, "2026-06-01");
-  assert.equal(g.cells.filter((c) => c.inMonth).length, 30);
-  assert.equal(g.cells[41].iso, "2026-07-12");
+test("monthGrid should include a whole month that begins on a Sunday", () => {
+  // The tight case: a month starting Sunday has no lead at all, and must still
+  // not clip its tail.
+  const g = monthGrid("2026-02-15"); // February 2026 starts Sunday
+  assert.equal(g.cells[0].iso, "2026-02-01");
+  assert.equal(g.cells.filter((c) => c.inMonth).length, 28);
+  assert.equal(g.cells[41].iso, "2026-03-14");
 });
 
 test("monthGrid should return null for a non-date", () => {
