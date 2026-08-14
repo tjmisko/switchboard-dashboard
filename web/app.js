@@ -1225,6 +1225,7 @@ function toggleControl(input, owningView) {
 //   3                 toggle the 30-minute average (aloft chart)
 //   Shift+C           toggle context switches (swimlanes)
 //   Shift+F           toggle the focus overlay (swimlanes)
+//   + / -             step the horizontal scale (the views with a time axis)
 //
 // Tab's focus walk is overridden because the three views ARE this page's
 // windows. Alt and Meta chords are left alone wholesale — those are the window
@@ -1266,7 +1267,24 @@ function handleShortcutKey(ev) {
     return;
   }
   if (key === "f" && ev.shiftKey) { ev.preventDefault(); toggleControl(el.optFocus, "sessions"); return; }
-  if (key === "3") { ev.preventDefault(); toggleControl(el.optSmooth, "line"); }
+  if (key === "3") { ev.preventDefault(); toggleControl(el.optSmooth, "line"); return; }
+
+  // + / − step the horizontal scale exactly like the footer buttons ("=" is the
+  // unshifted + on most layouts). Only the charts that HAVE that option: the
+  // projects ranking is time-less and hides the scale pill, so the keys stay
+  // inert there rather than silently changing a number nothing is drawn at.
+  // The canZoom gates mirror the buttons' disabled state, so a key never does
+  // less than the click it stands for appears to.
+  if (key === "+" || key === "=" || key === "-") {
+    if (currentView === "projects") return;
+    ev.preventDefault();
+    const geo = scaleNow();
+    if (key === "-") {
+      if (geo.canZoomOut) setZoom(geo.effective / ZOOM_FACTOR);
+    } else if (geo.canZoomIn) {
+      setZoom(geo.effective * ZOOM_FACTOR);
+    }
+  }
 }
 
 // renderTopline: three dominant figures framing AI's payoff, gross → net → rate.
@@ -1540,7 +1558,7 @@ function updateZoomReadout() {
     el.zoomOut.disabled = !geo.canZoomOut;
     el.zoomOut.title = geo.atFit && !geo.canZoomOut
       ? "already fits the width — nothing left to compress"
-      : "zoom out — compress time";
+      : "zoom out — compress time (-)";
   }
 }
 
