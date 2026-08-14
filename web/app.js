@@ -1227,6 +1227,7 @@ function toggleControl(input, owningView) {
 //   Shift+F           toggle the focus overlay (swimlanes)
 //   + / -             step the horizontal scale (the views with a time axis)
 //   ← / →             pan the time window when the plot scrolls horizontally
+//   Shift+T           jump the window back to today
 //
 // Tab's focus walk is overridden because the three views ARE this page's
 // windows. Alt and Meta chords are left alone wholesale — those are the window
@@ -1268,6 +1269,11 @@ function handleShortcutKey(ev) {
     return;
   }
   if (key === "f" && ev.shiftKey) { ev.preventDefault(); toggleControl(el.optFocus, "sessions"); return; }
+  // Shift+T jumps the window back to today — the live view an operator bails
+  // back to after wandering the archive. commitWindow already no-ops when the
+  // picker is on today, so the key is idempotent. (Bare t belongs to the
+  // calendar popover's own keymap, where it moves the cursor to today.)
+  if (key === "t" && ev.shiftKey) { ev.preventDefault(); commitWindow(todayLocal()); return; }
   if (key === "3") { ev.preventDefault(); toggleControl(el.optSmooth, "line"); return; }
 
   // + / − step the horizontal scale exactly like the footer buttons ("=" is the
