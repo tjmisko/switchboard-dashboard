@@ -12,6 +12,7 @@ const {
   presenceSplitMs, awayIdleMs, packLanes,
   aloftSpans, workIntervalsMs, concurrencyProfile, alignLiveTail,
   projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs,
+  freeBlockStats, FREE_BLOCK_DEEP_MS,
   suspectTailMs, normalizeView, VIEW_ORDER, stepView, scaleGeometry,
   parseISODate, stepISODate, stepISOMonth, clampISODate, monthGrid,
   localDayBoundsMs, dayWindowMs,
@@ -747,6 +748,93 @@ test("projectHoursMs parts carry the bare session id for joining to summaries", 
     { project: "sb", start: at(20), session_id: "plain-id", intervals: [interval("working", ms(20), ms(30))] },
   ];
   assert.deepEqual(projectHoursMs(lanes)[0].parts.map((p) => p.sessionId), ["abc", "plain-id"]);
+});
+
+// ---------------------------------------------------------------------------
+// freeBlockStats — the SHAPE of the operator's free time
+// ---------------------------------------------------------------------------
+
+// block(minutes) → one free interval of that length, laid end to end from BASE
+// with a 1ms nudge so successive blocks never share a boundary.
+let blockCursor = 0;
+function block(minutes) {
+  const s = baseMs + blockCursor;
+  blockCursor += minutes * MIN + 1;
+  return [s, s + minutes * MIN];
+}
+
+test("freeBlockStats should return an empty distribution when there are no blocks", () => {
+  const s = freeBlockStats([]);
+  assert.equal(s.count, 0);
+  assert.equal(s.totalMs, 0);
+  assert.equal(s.medianMs, null);
+  assert.equal(s.longestMs, null);
+  assert.equal(s.deepFrac, null);
+  assert.equal(s.maxBinCount, 0);
+  assert.deepEqual(s.bins.map((b) => b.count), [0, 0, 0, 0, 0, 0], "the bins still exist, so a plot can draw an empty axis");
+  assert.deepEqual(freeBlockStats(null).bins.length, 6);
+});
+
+test("freeBlockStats should tell identical free-time totals apart by their shape", () => {
+  // the whole point: 60 minutes as one block vs. as 60 one-minute slivers.
+  blockCursor = 0;
+  const whole = freeBlockStats([block(60)]);
+  blockCursor = 0;
+  const shredded = freeBlockStats(Array.from({ length: 60 }, () => block(1)));
+  assert.equal(whole.totalMs, shredded.totalMs, "same hour of free time");
+  assert.equal(whole.deepFrac, 1);
+  assert.equal(shredded.deepFrac, 0, "a minute at a time is an hour you could start nothing in");
+  assert.equal(whole.count, 1);
+  assert.equal(shredded.count, 60);
+});
+
+test("freeBlockStats should bucket each block by duration", () => {
+  blockCursor = 0;
+  const s = freeBlockStats([block(0.5), block(3), block(10), block(20), block(45), block(90)]);
+  assert.deepEqual(s.bins.map((b) => b.count), [1, 1, 1, 1, 1, 1]);
+  assert.deepEqual(s.bins.map((b) => b.label), ["<1m", "1–5m", "5–15m", "15–30m", "30–60m", "1h+"]);
+  assert.equal(s.maxBinCount, 1);
+});
+
+test("freeBlockStats should place a block exactly on a bucket floor in the higher bucket", () => {
+  blockCursor = 0;
+  const s = freeBlockStats([block(1), block(5), block(15), block(30), block(60)]);
+  assert.deepEqual(s.bins.map((b) => b.count), [0, 1, 1, 1, 1, 1], "each edge belongs to the bucket it opens");
+});
+
+test("freeBlockStats should report the median rather than let one long block speak for the day", () => {
+  blockCursor = 0;
+  const s = freeBlockStats([block(1), block(1), block(1), block(1), block(180)]);
+  assert.equal(s.medianMs, 1 * MIN, "the typical block is a minute");
+  assert.equal(s.longestMs, 180 * MIN);
+  assert.ok(s.meanMs > 30 * MIN, "the mean is the figure that would have lied");
+});
+
+test("freeBlockStats should average the two middle blocks for an even count", () => {
+  blockCursor = 0;
+  const s = freeBlockStats([block(2), block(4), block(10), block(20)]);
+  assert.equal(s.medianMs, 7 * MIN);
+});
+
+test("freeBlockStats should credit deep work only to blocks at or over the threshold", () => {
+  blockCursor = 0;
+  const s = freeBlockStats([block(14), block(15), block(60)]);
+  assert.equal(FREE_BLOCK_DEEP_MS, 15 * MIN);
+  assert.equal(s.deepCount, 2);
+  assert.equal(s.deepMs, 75 * MIN);
+  assert.equal(s.deepFrac, (75 * MIN) / (89 * MIN));
+});
+
+test("freeBlockStats should drop malformed and non-positive intervals", () => {
+  const s = freeBlockStats([
+    [baseMs, baseMs],                       // zero length
+    [baseMs + 1000, baseMs],                // inverted
+    [NaN, baseMs + 1000],                   // unparseable
+    [baseMs, baseMs + 10 * MIN],            // the only real block
+    null,
+  ]);
+  assert.equal(s.count, 1);
+  assert.equal(s.totalMs, 10 * MIN);
 });
 
 // ---------------------------------------------------------------------------

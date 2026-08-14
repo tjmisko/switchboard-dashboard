@@ -555,6 +555,86 @@
   }
 
   // -------------------------------------------------------------------------
+  // free-time SHAPE (the histogram behind "what did the AI cost you
+  // attentionally")
+  //
+  // A day's free-time total answers "how much", and answers it misleadingly: an
+  // hour handed back as sixty one-minute gaps between interruptions is not the
+  // hour that arrives as four fifteen-minute blocks. Only one of them is time
+  // you could have STARTED something in. So the total gets a companion — the
+  // distribution of the operator's UNINTERRUPTED free blocks (app.js's op.free:
+  // stretches where agents were running and you were neither attending a window
+  // nor recovering from a switch).
+  // -------------------------------------------------------------------------
+
+  // Bucket floors, in ms. Log-ish rather than linear because the interesting
+  // spread is at the short end — the difference between a 30-second gap and a
+  // 10-minute one is the whole question, while 70 vs 80 minutes is not.
+  const FREE_BLOCK_EDGES = [0, 60e3, 5 * 60e3, 15 * 60e3, 30 * 60e3, 60 * 60e3, Infinity];
+  const FREE_BLOCK_LABELS = ["<1m", "1–5m", "5–15m", "15–30m", "30–60m", "1h+"];
+
+  // The floor for a block long enough to actually start something in. Fifteen
+  // minutes is the conventional floor for a unit of focused work, and it is the
+  // boundary this dashboard already draws elsewhere between a look-in and a
+  // stretch of work.
+  const FREE_BLOCK_DEEP_MS = 15 * 60e3;
+
+  // freeBlockStats folds [startMs, endMs] free intervals into the distribution
+  // and the figures that summarize it:
+  //
+  //   count/totalMs        how many blocks, and how much time in them
+  //   medianMs/meanMs      the typical block (median leads: one 3-hour block
+  //                        drags the mean past every block actually lived)
+  //   longestMs            the best single run the day gave you
+  //   deepCount/deepMs     blocks ≥ FREE_BLOCK_DEEP_MS and the time they carry
+  //   deepFrac             deepMs ÷ totalMs — the share of free time that
+  //                        arrived usable. THE headline: 90% and 9% can sit
+  //                        under identical free-time totals.
+  //   bins                 [{label, fromMs, toMs, count, ms}] for the plot
+  //   maxBinCount          the tallest bin, so a renderer can scale without
+  //                        walking the bins again
+  //
+  // Pure and DOM-free. Malformed or non-positive pairs are dropped rather than
+  // counted as zero-length blocks, which would pile up a phantom "<1m" spike.
+  function freeBlockStats(pairs) {
+    const blocks = [];
+    for (const p of pairs || []) {
+      if (!p) continue;
+      const s = p[0], e = p[1];
+      if (!Number.isFinite(s) || !Number.isFinite(e) || !(e > s)) continue;
+      blocks.push(e - s);
+    }
+    const bins = FREE_BLOCK_LABELS.map((label, i) => ({
+      label, fromMs: FREE_BLOCK_EDGES[i], toMs: FREE_BLOCK_EDGES[i + 1], count: 0, ms: 0,
+    }));
+    if (!blocks.length) {
+      return {
+        count: 0, totalMs: 0, medianMs: null, meanMs: null, longestMs: null,
+        deepCount: 0, deepMs: 0, deepFrac: null, bins, maxBinCount: 0,
+      };
+    }
+    blocks.sort((a, b) => a - b);
+    let totalMs = 0, deepMs = 0, deepCount = 0, maxBinCount = 0;
+    for (const ms of blocks) {
+      totalMs += ms;
+      if (ms >= FREE_BLOCK_DEEP_MS) { deepMs += ms; deepCount++; }
+      // the last bin's ceiling is Infinity, so every block lands somewhere
+      for (let i = 0; i < bins.length; i++) {
+        if (ms >= bins[i].fromMs && ms < bins[i].toMs) { bins[i].count++; bins[i].ms += ms; break; }
+      }
+    }
+    for (const b of bins) if (b.count > maxBinCount) maxBinCount = b.count;
+    const mid = blocks.length >> 1;
+    const medianMs = blocks.length % 2 ? blocks[mid] : (blocks[mid - 1] + blocks[mid]) / 2;
+    return {
+      count: blocks.length, totalMs, medianMs, meanMs: totalMs / blocks.length,
+      longestMs: blocks[blocks.length - 1],
+      deepCount, deepMs, deepFrac: totalMs > 0 ? deepMs / totalMs : null,
+      bins, maxBinCount,
+    };
+  }
+
+  // -------------------------------------------------------------------------
   // memory (/api/memory — its own surface, deliberately NOT the timeline
   // envelope; see README "Memory"). Shape:
   //
@@ -1265,6 +1345,7 @@
     packLanes, aloftSpans, workIntervalsMs, concurrencyProfile,
     alignLiveTail,
     projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs, suspectTailMs,
+    freeBlockStats, FREE_BLOCK_DEEP_MS,
     fmtBytes, spawnedBytes, laneMemory, memoryWindow, pressureWindow,
     summaryTasks, summaryBodyHTML, summaryHintText, normalizeView,
     fmtTokens, shortModel, tokenBilled, tokenTotals, tokenRowsHTML,

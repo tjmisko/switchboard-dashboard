@@ -13,6 +13,18 @@
 
   --mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+
+  /* fragmentation ramp (free-block histogram): shredded → whole. Anchored at
+     both ends on hues this page already uses for exactly these meanings —
+     --c-permission red at the interrupted end, --c-working green at the
+     uninterrupted one — with the walk between them passing through the amber
+     that means "idle, but not lost". Theme-independent, like the status hues. */
+  --frag-1: #f85149;
+  --frag-2: #ec7a3c;
+  --frag-3: #d29922;
+  --frag-4: #a8b13a;
+  --frag-5: #6fb050;
+  --frag-6: #3fb950;
 }
 
 /* ---------- theme palettes ----------
@@ -601,8 +613,10 @@ main { padding: 16px 18px 36px; }
 .boxes {
   display: grid;
   /* legend column is sized to the narrow legend (≤300px); the two data cards
-     share the remaining width equally so they expand instead of leaving a gap. */
-  grid-template-columns: minmax(240px, 300px) minmax(0, 1fr) minmax(0, 1fr);
+     split the rest UNEVENLY. The attention card now carries a plot as well as
+     its figures and wants the room; the cost card is a stack of short mono
+     rows that reads better narrow than stretched. */
+  grid-template-columns: minmax(230px, 285px) minmax(0, 1.45fr) minmax(0, 1fr);
   gap: 12px;
   align-items: start;
 }
@@ -661,6 +675,80 @@ main { padding: 16px 18px 36px; }
 .dim { color: var(--fg-dim); }
 .stale { color: var(--c-idle); }
 .v .dim { font-family: var(--mono); }
+
+/* ---------- attention card: the free-block histogram ----------
+   Column chart over a proportion strip, sharing one color ramp. The columns
+   count blocks (how often you were taken back); the strip weighs them (how much
+   of the day that actually cost). Sized to sit inside the card without a
+   scrollbar at any of the card's widths: the columns share the row equally and
+   the tick labels are the smallest type on the page, because they are a scale,
+   not a reading. */
+.freeshape { margin-top: 15px; }
+.fs-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.fs-head-r { font-family: var(--mono); font-size: 10.5px; color: var(--fg-dim); letter-spacing: 0; text-transform: none; }
+
+/* plot left, figures right. A six-column histogram given the card's full width
+   reads as six slabs, not a distribution; holding the plot to ~60% keeps the
+   bars narrower than they are tall, which is what makes a shape legible. */
+.fs-body { display: flex; align-items: flex-end; gap: 20px; margin-top: 9px; }
+.fs-plot { flex: 1 1 auto; min-width: 0; }
+
+.fs-bars {
+  display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px;
+  align-items: end; margin-bottom: 7px;
+}
+.fs-col { display: flex; flex-direction: column; align-items: center; gap: 4px; cursor: help; }
+.fs-count {
+  font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--fg);
+  line-height: 1; font-variant-numeric: tabular-nums;
+}
+.fs-count.zero { color: var(--fg-dim); font-weight: 400; }
+/* the track is the constant: every bar is a share of the same 64px, so the
+   columns are comparable to each other and stable across a live refresh */
+.fs-track { width: 100%; height: 64px; display: flex; align-items: flex-end; }
+.fs-bar {
+  width: 100%; min-height: 2px; border-radius: 3px 3px 1px 1px;
+  transition: height 0.35s cubic-bezier(0.25, 1, 0.35, 1);
+}
+/* an empty bucket keeps its slot as a hairline: a gap in the distribution is a
+   fact about the day, and a collapsed column would hide it. NOT named .empty —
+   that is the page's "no activity" panel, and its 56px of padding would inflate
+   a 2px bar to 112. */
+.fs-bar.zero { opacity: 0.22; height: 2px; }
+.fs-col:hover .fs-bar { filter: brightness(1.18); }
+.fs-tick {
+  font-family: var(--mono); font-size: 9.5px; color: var(--fg-dim);
+  line-height: 1; letter-spacing: -0.2px; white-space: nowrap;
+}
+
+/* the time-weighted strip, reusing the engagement split's pill */
+.fs-share { margin: 0; height: 7px; cursor: help; }
+/* what the axis MEANS, at each end — the ramp is only self-explanatory once you
+   know which way it runs */
+.fs-axis {
+  display: flex; justify-content: space-between; gap: 10px; margin-top: 5px;
+  font-size: 9px; color: var(--fg-dim); letter-spacing: 0.2px;
+}
+
+/* three figures beside the plot: value over key, the topline's voice at card
+   scale. Stacked, because the third (the usable share) is the one that gets
+   quoted and a column puts it last rather than lost in a row. */
+.fs-figs { flex: 0 0 auto; display: flex; flex-direction: column; gap: 9px; }
+.fs-fig { display: flex; flex-direction: column; gap: 3px; cursor: help; }
+.fs-v { font-family: var(--mono); font-size: 15px; font-weight: 700; color: var(--fg); line-height: 1; }
+.fs-k { font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--fg-dim); line-height: 1; }
+
+/* stacked cards (or a narrow one): the figures go under the plot rather than
+   squeezing it to a smear */
+@media (max-width: 1100px) {
+  .fs-body { flex-wrap: wrap; }
+  .fs-plot { flex-basis: 100%; }
+  .fs-figs { flex-direction: row; gap: 18px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fs-bar { transition: none; }
+}
 
 /* ---------- attention card: operator-overhead block ----------
    Own visual weight: a subtly accent-tinted box with a left accent rule, so the

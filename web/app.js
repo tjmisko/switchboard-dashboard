@@ -3466,6 +3466,8 @@ function renderAttentionCard(summary, op) {
   const union = summary.attention_union, perSession = summary.attention_per_session;
   const parallel = union && perSession && union > 0 ? perSession / union : null;
 
+  const shapeBlock = freeShapeHTML(op);
+
   // operator-overhead callout — the cost of context switching. Prioritized near the
   // top and styled dark red (this is waste, not leverage).
   const opBox = `
@@ -3518,6 +3520,8 @@ function renderAttentionCard(summary, op) {
       </div>
     ` : `<div class="kv muted-note">delegation metrics not recorded for this window</div>`}
 
+    ${shapeBlock}
+
     <div class="kv-sep"></div>
     <div class="kv-list">
       ${row("active · ≥1 agent running", humanDuration(union), {
@@ -3537,6 +3541,146 @@ function renderAttentionCard(summary, op) {
     ${suspectNoteHTML(summary)}`;
 
   attachFormulaTips(el.cardAttention);
+}
+
+// ---------------------------------------------------------------------------
+// free-time SHAPE: the histogram of uninterrupted operator blocks
+//
+// The card above says how MUCH free time the agents handed back. This says what
+// it was worth. Sixty one-minute gaps and four fifteen-minute blocks are the
+// same hour on every total in this dashboard, and they are not the same hour:
+// only one of them is time you could have started something in.
+//
+// Two encodings of one distribution, stacked, because they disagree in the most
+// informative way:
+//   the columns  — how many BLOCKS landed in each length bucket. This is the
+//                  interruption story: a red-heavy left side means the day kept
+//                  taking you back.
+//   the strip    — how much of the free TIME each bucket carried. Short blocks
+//                  are numerous and weigh nothing, so a shredded-looking
+//                  histogram over a green strip says the interruptions were
+//                  real but the bulk of the day still came back whole.
+// Same six colors in both, so the eye carries a bucket from one to the other.
+// ---------------------------------------------------------------------------
+
+// FRAG_COLORS: the fragmentation ramp, shredded → whole. Runs red through amber
+// to the identity green, so it lands on the same meanings the status colors
+// already carry everywhere else on the page (red = you are being interrupted,
+// green = work is happening). Fixed across themes, like the status hues.
+const FRAG_COLORS = [
+  "var(--frag-1)", "var(--frag-2)", "var(--frag-3)",
+  "var(--frag-4)", "var(--frag-5)", "var(--frag-6)",
+];
+
+function freeShapeHTML(op) {
+  const head = (right) =>
+    `<div class="kv-head fs-head"><span>free time · uninterrupted blocks</span>`
+    + `<span class="fs-head-r">${right}</span></div>`;
+
+  // No focus stream ⇒ "occupied" is 0 for lack of evidence, so every running
+  // stretch would read as one long uninterrupted block. That is a fabrication
+  // with a flattering shape, so it is refused rather than drawn.
+  if (!op || !op.hasAttention) {
+    return `<div class="freeshape">${head("")}`
+      + `<div class="kv muted-note">no focus stream for this window — free time can't be shaped</div></div>`;
+  }
+  const s = freeBlockStats(op.free);
+  if (!s.count) {
+    return `<div class="freeshape">${head("")}`
+      + `<div class="kv muted-note">no free blocks — you were with the agents the whole time they ran</div></div>`;
+  }
+
+  const tip = (obj) => escapeHTML(formulaTipHTML(obj));
+  const pctOfTime = (ms) => (s.totalMs > 0 ? (ms / s.totalMs) * 100 : 0);
+
+  // columns: height is the bin's share of the TALLEST bin, so the shape is
+  // readable whether the day had 6 blocks or 60. An empty bucket keeps its slot
+  // on the axis as a hairline — the gap between "5–15m" and "1h+" is a fact.
+  const cols = s.bins.map((b, i) => {
+    const h = s.maxBinCount > 0 ? (b.count / s.maxBinCount) * 100 : 0;
+    const share = pctOfTime(b.ms);
+    const t = tip({
+      title: `blocks of ${b.label}`,
+      formula: "count · time carried",
+      substitution: b.count ? `${b.count} × ~${humanDurationCoarseMs(b.count ? b.ms / b.count : 0)}` : null,
+      result: b.count ? `${b.count} block${b.count === 1 ? "" : "s"} · ${humanDurationCoarseMs(b.ms)}` : "none",
+      why: b.count
+        ? `${share.toFixed(share < 10 ? 1 : 0)}% of your free time arrived in blocks this long.`
+        : "Nothing in this window came back in blocks this long.",
+      color: FRAG_COLORS[i],
+    });
+    // NB: the zero-bar modifier is ".zero", never ".empty" — .empty is a
+    // page-level class (the "no activity" panel) carrying 56px of padding,
+    // which a bar quietly inherits as 112px of height.
+    return `<div class="fs-col has-tip" data-tip="${t}">`
+      + `<span class="fs-count${b.count ? "" : " zero"}">${b.count || "·"}</span>`
+      + `<span class="fs-track"><span class="fs-bar${b.count ? "" : " zero"}"`
+      + ` style="height:${h.toFixed(1)}%;background:${FRAG_COLORS[i]}"></span></span>`
+      + `<span class="fs-tick">${escapeHTML(b.label)}</span>`
+      + `</div>`;
+  }).join("");
+
+  // the strip: the same buckets weighted by time instead of by count
+  const strip = s.bins.map((b, i) => {
+    const w = pctOfTime(b.ms);
+    return w > 0 ? `<span class="sb-seg" style="width:${w.toFixed(3)}%;background:${FRAG_COLORS[i]}"></span>` : "";
+  }).join("");
+  const stripTip = tip({
+    title: "where your free time sat",
+    formula: "Σ block length per bucket ÷ total free time",
+    result: `${humanDurationCoarseMs(s.totalMs)} across ${s.count} block${s.count === 1 ? "" : "s"}`,
+    why: "The bars count interruptions; this weighs them. A green strip under a red-heavy histogram means the short gaps were many but cost little.",
+  });
+
+  // the deep-work share is the figure that survives being quoted on its own, so
+  // it carries the color: the same 66/33 ramp the delegation headline uses.
+  const deepPct = s.deepFrac == null ? null : Math.round(s.deepFrac * 100);
+  const deepColor = deepPct == null ? "var(--fg-muted)"
+    : deepPct >= 66 ? "var(--c-working)" : deepPct >= 33 ? "var(--c-idle)" : "var(--c-permission)";
+  const deepStr = humanDurationCoarseMs(FREE_BLOCK_DEEP_MS);
+
+  const fig = (value, key, tipObj, color) =>
+    `<div class="fs-fig has-tip" data-tip="${tip(tipObj)}">`
+    + `<span class="fs-v"${color ? ` style="color:${color}"` : ""}>${value}</span>`
+    + `<span class="fs-k">${key}</span></div>`;
+
+  const figs =
+      fig(humanDurationCoarseMs(s.longestMs), "longest block", {
+        title: "longest block",
+        formula: "max uninterrupted free stretch",
+        result: humanDurationMs(s.longestMs),
+        why: "The best single run of hands-off time the day gave you.",
+      })
+    + fig(humanDurationCoarseMs(s.medianMs), "median block", {
+        title: "median block",
+        formula: "middle block by length",
+        substitution: `${s.count} blocks · mean ${humanDurationCoarseMs(s.meanMs)}`,
+        result: humanDurationMs(s.medianMs),
+        why: "The typical block. Median, not mean — one three-hour stretch would otherwise speak for a day of one-minute gaps.",
+      })
+    + fig(deepPct == null ? "—" : deepPct + "%", `free time in ≥${deepStr} blocks`, {
+        title: "usable free time",
+        formula: `Σ blocks ≥ ${deepStr} ÷ total free time`,
+        substitution: `${humanDurationCoarseMs(s.deepMs)} ÷ ${humanDurationCoarseMs(s.totalMs)}`,
+        result: (deepPct == null ? "—" : deepPct + "%")
+          + ` · ${s.deepCount} block${s.deepCount === 1 ? "" : "s"}`,
+        why: `Share of your free time that arrived in stretches long enough to start something in. This is the figure the free-time total hides: the same ${humanDurationCoarseMs(s.totalMs)} can be 90% usable or 9%.`,
+        color: deepColor,
+      }, deepColor);
+
+  // plot left, figures right: the card is wide enough that a full-bleed
+  // six-column histogram reads as six slabs rather than a distribution, and the
+  // figures have to sit somewhere anyway.
+  return `<div class="freeshape">`
+    + head(`${s.count} block${s.count === 1 ? "" : "s"} · ${humanDurationCoarseMs(s.totalMs)}`)
+    + `<div class="fs-body">`
+    + `<div class="fs-plot">`
+    + `<div class="fs-bars" role="img" aria-label="distribution of uninterrupted free-time block lengths">${cols}</div>`
+    + `<div class="split-bar fs-share has-tip" data-tip="${stripTip}" role="img" aria-label="share of free time by block length">${strip}</div>`
+    + `<div class="fs-axis"><span>shorter blocks · more interrupted</span><span>longer · uninterrupted</span></div>`
+    + `</div>`
+    + `<div class="fs-figs">${figs}</div>`
+    + `</div></div>`;
 }
 
 // suspectNoteHTML footnotes the figures above with what the producer refused to
