@@ -83,7 +83,16 @@ const STATUS_MEANING = {
   delegating: "Legacy: parent delegating to a subagent.",
 };
 
-function statusLabel(s) { return s === "" ? "unknown" : s; }
+// displayName renders a wire identifier (a status, a provider) as the dashboard's
+// own label. The contract's vocabulary is lowercase and the field guide teaches
+// it that way; a legend beside "Working" and "Idle" is the dashboard speaking,
+// not the wire, so it gets a capital. Formula strings still quote the raw value.
+function displayName(s) {
+  return String(s).charAt(0).toUpperCase() + String(s).slice(1);
+}
+function statusLabel(s) {
+  return displayName(s === "" ? "unknown" : s);
+}
 function statusColor(s) {
   return STATUS_COLORS[s] !== undefined ? STATUS_COLORS[s] : "#8957e5";
 }
@@ -190,14 +199,14 @@ function agoString(ms) {
   return h + "h ago";
 }
 
-// resetCountdown renders "resets in 2h 14m" from an RFC3339 instant.
+// resetCountdown renders "Resets in 2h 14m" from an RFC3339 instant.
 function resetCountdown(iso) {
   if (!iso) return "";
   const t = Date.parse(iso);
   if (!isFinite(t)) return "";
   const ms = t - Date.now();
-  if (ms <= 0) return "resetting…";
-  return "resets in " + humanDurationMs(ms);
+  if (ms <= 0) return "Resetting…";
+  return "Resets in " + humanDurationMs(ms);
 }
 
 function escapeHTML(s) {
@@ -993,7 +1002,7 @@ function tickLive() {
     el.updated.textContent = "Live";
     setDot("live");
   } else {
-    el.updated.textContent = "last " + agoString(lastUpdatedAt);
+    el.updated.textContent = "Last " + agoString(lastUpdatedAt);
     setDot(ageMs != null && ageMs < 60000 ? "warn" : "err");
   }
 }
@@ -1573,7 +1582,7 @@ function renderTopline(summary, op) {
   const dayStr = humanDurationCoarse(DAY + extra);
   const multStr = mult == null ? "—" : mult.toFixed(1) + "×";
   const hoursTip = formulaTipHTML({
-    title: "agent hours worked",
+    title: "Agent hours worked",
     formula: "Σ session active time + Σ subagent spans",
     substitution: `${humanDurationCoarse(perSession)} + ${humanDurationCoarse(subagents)}`,
     result: fanoutStr,
@@ -1581,7 +1590,7 @@ function renderTopline(summary, op) {
     color: "var(--c-working)",
   });
   const gainedTip = formulaTipHTML({
-    title: "net agent hours",
+    title: "Net agent hours",
     formula: yoursIsMeasured ? "agent hours − your own time" : "agent hours − active wall-clock",
     // two lines: the netting itself, then the extended-day framing the key line
     // promises. .t-formula is pre-wrap, so the newline survives.
@@ -1593,7 +1602,7 @@ function renderTopline(summary, op) {
     color: "var(--c-working)",
   });
   const multTip = formulaTipHTML({
-    title: "force multiplier",
+    title: "Force multiplier",
     formula: "agent hours ÷ active wall-clock",
     substitution: `${fanoutStr} ÷ ${unionStr}`,
     result: multStr,
@@ -1649,7 +1658,7 @@ function renderStatusKey(summary, awayIdleNs) {
       title: statusLabel(k),
       formula: splitIdle
         ? `Σ time in 'idle' across all sessions − idle while you were away`
-        : `Σ time in '${statusLabel(k)}' across all sessions`,
+        : `Σ time in '${k || "unknown"}' across all sessions`,
       substitution: splitIdle
         ? `${humanDuration(byStatus[k] || 0)} − ${humanDuration(away)}`
         : undefined,
@@ -1666,7 +1675,7 @@ function renderStatusKey(summary, awayIdleNs) {
       </span>`;
     if (!splitIdle) return row;
     const awayTip = formulaTipHTML({
-      title: "idle (away)",
+      title: "Idle (away)",
       formula: "Σ idle time while you were inferred away",
       result: humanDuration(away),
       why: "Sessions parked while you were away from the machine (overnight, typically). Drawn darkened on the timeline and excluded from the idle clock above — nothing was waiting on anyone.",
@@ -1675,7 +1684,7 @@ function renderStatusKey(summary, awayIdleNs) {
     return row + `<span class="sk sk-away has-tip" data-tip="${escapeHTML(awayTip)}">
         <span class="sk-left">
           <span class="swatch" style="background:${statusColor("idle")};opacity:${IDLE_AWAY_OPACITY}"></span>
-          <span class="sk-name">idle (away)</span>
+          <span class="sk-name">Idle (away)</span>
         </span>
         <span class="sk-val">${humanDuration(away)}</span>
       </span>`;
@@ -1704,7 +1713,7 @@ function renderProviderKey(lanes) {
   el.providerKey.innerHTML = names.map((p) =>
     `<span class="pk">
         <span class="pk-dot" style="background:${provColor(p)}"></span>
-        <span class="pk-name">${escapeHTML(p)}</span>
+        <span class="pk-name">${escapeHTML(displayName(p))}</span>
         <span class="pk-count">${counts.get(p)}</span>
       </span>`).join("");
 }
@@ -1921,8 +1930,8 @@ function updateZoomReadout() {
   if (el.zoomOut) {
     el.zoomOut.disabled = !geo.canZoomOut;
     el.zoomOut.title = geo.atFit && !geo.canZoomOut
-      ? "already fits the width — nothing left to compress"
-      : "zoom out — compress time (-)";
+      ? "Already fits the width — nothing left to compress"
+      : "Zoom out — compress time (-)";
   }
 }
 
@@ -2302,7 +2311,7 @@ function drawGroupHeader(g, W) {
   // gutter-wide transparent hit target → click folds the group
   const hit = svgEl("rect", { class: "group-hit", x: 0, y: g.headY, width: GEO.GUTTER, height: GEO.GROUP_HEAD_H });
   attachTip(hit, () => `<div class="t-status">${escapeHTML(g.projectFull || g.project)}</div>`
-    + `<div class="t-hint">click to collapse</div>`);
+    + `<div class="t-hint">Click to collapse</div>`);
   hit.addEventListener("click", () => toggleGroupCollapse(g.project, false));
   addGutter(hit);
 }
@@ -2369,10 +2378,10 @@ function drawOperatorLane(op, rowTop, x, W) {
   // gutter identity + headline free figure
   const gutter = svgEl("g", { class: "lane-gutter" });
   const main = svgEl("text", { class: "lane-label", x: 10, y: rowTop + 19 });
-  main.textContent = "operator";
+  main.textContent = "Operator";
   const pct = op.freeFrac == null ? "" : ` · ${Math.round(op.freeFrac * 100)}% of run`;
   const sub = svgEl("text", { class: "lane-sub", x: 10, y: rowTop + 35 });
-  sub.textContent = `free ${humanDurationMs(op.freeMs)}${pct}`;
+  sub.textContent = `Free ${humanDurationMs(op.freeMs)}${pct}`;
   gutter.appendChild(main); gutter.appendChild(sub);
   attachTip(gutter, () => operatorTipHTML(op));
   addGutter(gutter);
@@ -2523,7 +2532,7 @@ function drawSession(lane, rowTop, x, haveActivity, activeGlobal, presentGlobal)
       class: "provider-spine", x: spineX, y: nameY, width: 3,
       height: barY + GEO.BAR_H - nameY, rx: 1, fill: provColor(lane.provider),
     });
-    attachTip(spine, () => `<div class="t-status" style="color:${provColor(lane.provider)}">${escapeHTML(lane.provider)}</div><div class="t-hint">data provider</div>`);
+    attachTip(spine, () => `<div class="t-status" style="color:${provColor(lane.provider)}">${escapeHTML(lane.provider)}</div><div class="t-hint">Data provider</div>`);
     el.svg.appendChild(spine);
   }
 
@@ -2944,7 +2953,7 @@ function renderConcurrencyChart(data) {
       ctx.beginPath(); ctx.moveTo(CGEO.LEFT, yy); ctx.lineTo(CGEO.LEFT + plotW, yy); ctx.stroke();
       ctx.fillStyle = C.avg; ctx.font = "11px " + MONO;
       ctx.textAlign = "left"; ctx.textBaseline = "bottom";
-      ctx.fillText("avg " + prof.avgActive.toFixed(1) + "×", CGEO.LEFT + 6, yy - 3);
+      ctx.fillText("Avg " + prof.avgActive.toFixed(1) + "×", CGEO.LEFT + 6, yy - 3);
       ctx.restore();
     }
 
@@ -3009,7 +3018,7 @@ function renderConcurrencyChart(data) {
       if (prof.avgActive != null) {
         const yy = Math.round(Y(prof.avgActive)) + 0.5;
         ctx.fillStyle = C.avg; ctx.textAlign = "left"; ctx.textBaseline = "bottom";
-        ctx.fillText("avg " + prof.avgActive.toFixed(1) + "×", axisX + 6, yy - 3);
+        ctx.fillText("Avg " + prof.avgActive.toFixed(1) + "×", axisX + 6, yy - 3);
       }
       ctx.restore();
     }
@@ -3291,10 +3300,10 @@ function formulaTipHTML({ title, formula, substitution, result, why, color } = {
 // then a formula box explaining how "free" is derived, then a why-it-matters line.
 function operatorTipHTML(op) {
   const pct = op.freeFrac == null ? "—" : Math.round(op.freeFrac * 100) + "%";
-  return `<div class="t-status" style="color:${OP_FREE_COLOR}">operator free time</div>`
-    + `<div class="t-row">free <b>${humanDurationMs(op.freeMs)}</b> · ${pct} of run</div>`
-    + `<div class="t-row">occupied ${humanDurationMs(op.occupiedMs)}</div>`
-    + `<div class="t-row">agents running ${humanDurationMs(op.runningMs)}</div>`
+  return `<div class="t-status" style="color:${OP_FREE_COLOR}">Operator free time</div>`
+    + `<div class="t-row">Free <b>${humanDurationMs(op.freeMs)}</b> · ${pct} of run</div>`
+    + `<div class="t-row">Occupied ${humanDurationMs(op.occupiedMs)}</div>`
+    + `<div class="t-row">Agents running ${humanDurationMs(op.runningMs)}</div>`
     + `<div class="t-row">${op.switches} context switch${op.switches === 1 ? "" : "es"}</div>`
     + `<div class="t-formula">free = running − (attending ∪ recovery)`
     + `<span class="t-subst">${humanDurationMs(op.runningMs)} − ${humanDurationMs(op.occupiedMs)}</span></div>`
@@ -3329,7 +3338,7 @@ function intervalTaskHTML(lane, startMs, endMs) {
 
 function opSegTipHTML(kind, s, e) {
   const free = kind === "free";
-  return tipHead(free ? "free" : "occupied", free ? OP_FREE_COLOR : "#e5534b",
+  return tipHead(free ? "Free" : "Occupied", free ? OP_FREE_COLOR : "#e5534b",
       `${fmtClock(new Date(s).toISOString())} – ${fmtClock(new Date(e).toISOString())}`, e - s)
     + `<div class="t-why">${free
         ? "Agents were running but you weren't attending one or recovering from a switch."
@@ -3346,11 +3355,11 @@ function memoryRowsHTML(mem) {
   if (!mem) return "";
   const tree = mem.peakTreeBytes != null ? mem.peakTreeBytes : mem.peakAgentBytes;
   if (tree == null) return "";
-  let html = `<div class="t-row">memory <b>${fmtBytes(tree)}</b> peak`
+  let html = `<div class="t-row">Memory <b>${fmtBytes(tree)}</b> peak`
     + (mem.avgTreeBytes != null ? ` <span class="dim">${fmtBytes(mem.avgTreeBytes)} avg</span>` : "")
     + `</div>`;
   if (mem.peakSpawnedBytes != null && mem.peakAgentBytes != null) {
-    html += `<div class="t-row"><span class="dim">agent</span> ${fmtBytes(mem.peakAgentBytes)}`
+    html += `<div class="t-row"><span class="dim">Agent</span> ${fmtBytes(mem.peakAgentBytes)}`
       + ` · <span class="dim">spawned</span> ${fmtBytes(mem.peakSpawnedBytes)}</div>`;
   }
   return html;
@@ -3370,7 +3379,7 @@ function pressureRowHTML(p) {
     ? ` <span class="dim">${(Math.min(1, p.stallFraction) * 100).toFixed(1)}% of the interval</span>`
     : "";
   const head = p.minAvailBytes != null ? ` <span class="dim">· ${fmtBytes(p.minAvailBytes)} free at worst</span>` : "";
-  return `<div class="t-row">machine stalled <b>${humanDurationMs(p.totalStallUs / 1000)}</b>${pct}${head}</div>`;
+  return `<div class="t-row">Machine stalled <b>${humanDurationMs(p.totalStallUs / 1000)}</b>${pct}${head}</div>`;
 }
 
 // intervalTipHTML describes one status interval. `piece` (optional) narrows it
@@ -3383,14 +3392,14 @@ function intervalTipHTML(lane, iv, piece) {
   const durMs = endMs - startMs;
   const sub = iv.subagents || 0;
   const away = !!(piece && piece.away);
-  const note = iv.status === "delegating" ? " (delegating — faded)"
+  const note = iv.status === "delegating" ? " (drawn faded)"
     : iv.status === "dormant" ? " (waiting on subagent)"
     : away ? " (you were away)" : "";
   return tipHead(`${statusLabel(iv.status)}${note}`, statusColor(iv.status),
       `${fmtClock(new Date(startMs).toISOString())} – ${fmtClock(new Date(endMs).toISOString())}`, durMs,
       intervalTaskHTML(lane, startMs, endMs))
     + (sub > 0 ? `<div class="t-sub">${sub} subagent${sub === 1 ? "" : "s"} at start</div>` : "")
-    + (away ? `<div class="t-hint">parked while you were away — not counted as idle clock time</div>` : "")
+    + (away ? `<div class="t-hint">Parked while you were away — not counted as idle clock time</div>` : "")
     + memoryRowsHTML(memoryWindow(lane, lastMemory, startMs, endMs))
     + pressureRowHTML(pressureWindow(lastMemory, startMs, endMs));
 }
@@ -3400,8 +3409,8 @@ function subagentTipHTML(sa) {
   return `<div class="t-status" style="color:${SUBAGENT_COLOR}">${escapeHTML(sa.agent_type || "subagent")}</div>`
     + (sa.description ? `<div class="t-desc">${escapeHTML(sa.description)}</div>` : "")
     + `<div class="t-row">${fmtClock(sa.start)} – ${fmtClock(sa.end)} · ${humanDurationMs(durMs)}</div>`
-    + (sa.suspect ? `<div class="t-suspect">phantom span — not counted as work<div class="t-suspect-why">${escapeHTML(sa.suspect_reason || "")}</div></div>` : "")
-    + `<div class="t-hint">click to pin</div>`;
+    + (sa.suspect ? `<div class="t-suspect">Phantom span — not counted as work<div class="t-suspect-why">${escapeHTML(sa.suspect_reason || "")}</div></div>` : "")
+    + `<div class="t-hint">Click to pin</div>`;
 }
 
 // suspectTipHTML explains the hatched tail. The producer's reason string is
@@ -3411,18 +3420,18 @@ function subagentTipHTML(sa) {
 function suspectTipHTML(lane) {
   const tail = suspectTailMs(lane);
   const durMs = tail ? tail[1] - tail[0] : 0;
-  return `<div class="t-head"><span class="t-status t-status-suspect">unverified stretch</span>`
+  return `<div class="t-head"><span class="t-status t-status-suspect">Unverified stretch</span>`
     + `<span class="t-dur">${humanDurationMs(durMs)}</span></div>`
-    + `<div class="t-suspect-why">${escapeHTML(lane.suspect_reason || "no session end was ever observed")}</div>`
-    + `<div class="t-row">last evidence ${fmtClock(lane.suspect_since)}</div>`
-    + `<div class="t-hint">drawn, but excluded from every total</div>`;
+    + `<div class="t-suspect-why">${escapeHTML(lane.suspect_reason || "No session end was ever observed")}</div>`
+    + `<div class="t-row">Last evidence ${fmtClock(lane.suspect_since)}</div>`
+    + `<div class="t-hint">Drawn, but excluded from every total</div>`;
 }
 
 function subagentPopoutHTML(sa) {
   const durMs = sa.e - sa.s;
   return `<div class="po-head" style="color:${SUBAGENT_COLOR}">${escapeHTML(sa.agent_type || "subagent")}</div>`
     + (sa.description ? `<div class="po-desc">${escapeHTML(sa.description)}</div>` : "")
-    + `<div class="po-row">duration <b>${humanDurationMs(durMs)}</b></div>`
+    + `<div class="po-row">Duration <b>${humanDurationMs(durMs)}</b></div>`
     + `<div class="po-row">${fmtClock(sa.start)} – ${fmtClock(sa.end)}</div>`
     + (sa.tool_use_id ? `<div class="po-id">${escapeHTML(sa.tool_use_id)}</div>` : "");
 }
@@ -3434,7 +3443,7 @@ function subagentClusterTipHTML(cell) {
   for (const m of cell.members) total += m.e - m.s;
   return `<div class="t-status" style="color:${SUBAGENT_COLOR}">${n} subagents</div>`
     + `<div class="t-row">${fmtClock(cell.s)} – ${fmtClock(cell.e)} · ${humanDurationMs(total)} total</div>`
-    + `<div class="t-hint">too thin to separate — click to list</div>`;
+    + `<div class="t-hint">Too thin to separate — click to list</div>`;
 }
 
 function subagentClusterPopoutHTML(cell) {
@@ -3444,7 +3453,7 @@ function subagentClusterPopoutHTML(cell) {
   ).join("");
   const more = n > cap ? `<div class="po-row dim">+${n - cap} more</div>` : "";
   return `<div class="po-head" style="color:${SUBAGENT_COLOR}">${n} subagents</div>`
-    + `<div class="po-desc">merged — each too thin to draw separately at this scale</div>`
+    + `<div class="po-desc">Merged — each too thin to draw separately at this scale</div>`
     + rows + more;
 }
 
@@ -3489,7 +3498,7 @@ function nameSegTipHTML(lane, seg) {
     // gated on itself rather than on the record existing
     + (sum && sum.description ? `<div class="t-desc">${escapeHTML(sum.description)}</div>` : "")
     + railHTML(cells)
-    + (lane.suspect ? `<div class="t-suspect">unverified stretch — excluded from every total</div>` : "")
+    + (lane.suspect ? `<div class="t-suspect">Unverified stretch — excluded from every total</div>` : "")
     + `<div class="t-more">${escapeHTML(summaryHintText(sum))}</div>`;
 }
 
@@ -3573,8 +3582,8 @@ function sessionPopoutHTML(lane) {
     + `<span class="po-span">${fmtClock(lane.start)} → ${fmtClock(lane.end)}</span></div>`
     + (sum && sum.description ? `<div class="po-desc">${escapeHTML(sum.description)}</div>` : "")
     + (lane.suspect
-        ? `<div class="po-suspect">unverified stretch to ${fmtClock(lane.end)} — drawn, but excluded from every total`
-          + `<div class="po-suspect-why">${escapeHTML(lane.suspect_reason || "no session end was ever observed")}</div></div>`
+        ? `<div class="po-suspect">Unverified stretch to ${fmtClock(lane.end)} — drawn, but excluded from every total`
+          + `<div class="po-suspect-why">${escapeHTML(lane.suspect_reason || "No session end was ever observed")}</div></div>`
         : "")
     + (body ? poSection(summaryTasks(sum).length ? "what it did" : "narrative") + body : "")
     + (figs.length ? poSection("figures") + figGridHTML(figs) : "")
@@ -3602,7 +3611,7 @@ function gutterTipHTML(lane, name) {
     + (sum && sum.description ? `<div class="t-desc">${escapeHTML(sum.description)}</div>` : "")
     + railHTML(cells);
   if (lane.suspect) {
-    html += `<div class="t-suspect">unverified stretch to ${fmtClock(lane.end)}`
+    html += `<div class="t-suspect">Unverified stretch to ${fmtClock(lane.end)}`
       + `<div class="t-suspect-why">${escapeHTML(lane.suspect_reason || "")}</div></div>`;
   }
   // name-span history (one row per stretch, incl. the pre-/name lead).
@@ -3655,7 +3664,7 @@ function renderAttentionCard(summary, op) {
     color: effColor,
   });
   const ctxTip = tip({
-    title: "context switches",
+    title: "Context switches",
     formula: "focus arrivals − 1",
     substitution: op ? `${op.switches + 1} − 1` : null,
     result: op ? String(op.switches) : "—",
@@ -3664,7 +3673,7 @@ function renderAttentionCard(summary, op) {
   });
   const recovStr = humanDurationMs(OP.switchRecoveryMs);
   const lostTip = tip({
-    title: "operator time lost to AI",
+    title: "Operator time lost to AI",
     formula: `⋃ ${recovStr} recovery per switch, merged, ∩ running`,
     // recovery × switches is the naive charge; the union and the ∩ are what cut
     // it down. Both numbers are shown because the gap between them IS the point
@@ -3692,11 +3701,11 @@ function renderAttentionCard(summary, op) {
       <div class="sc-head">switching cost</div>
       <div class="sc-row has-tip" data-tip="${ctxTip}">
         <span class="sc-v">${op ? op.switches : "—"}</span>
-        <span class="sc-k">context switches</span>
+        <span class="sc-k">Context switches</span>
       </div>
       <div class="sc-row has-tip" data-tip="${lostTip}">
         <span class="sc-v">${op ? humanDurationCoarseMs(op.lostMs) : "—"}</span>
-        <span class="sc-k">lost re-focusing</span>
+        <span class="sc-k">Lost re-focusing</span>
       </div>
     </div>`;
 
@@ -3705,8 +3714,8 @@ function renderAttentionCard(summary, op) {
     <div class="attn-top">
       <div class="headline has-tip" data-tip="${effTip}">
         <div class="hv" style="color:${effColor}">${haveDeleg && effPct != null ? effPct + "%" : "—"}</div>
-        <div class="hk">delegation effectiveness</div>
-        <div class="hsub">share of agent-hours that ran without you</div>
+        <div class="hk">Delegation effectiveness</div>
+        <div class="hsub">Share of agent-hours that ran without you</div>
       </div>
       ${opBox}
     </div>
@@ -3755,7 +3764,7 @@ function wallSplitHTML(op) {
   // bar would report a day spent entirely in work blocks. Refused, not drawn.
   if (!op || !op.hasAttention || !(op.runningMs > 0)) {
     return `<div class="wall">${head("")}`
-      + `<div class="kv muted-note">no focus stream for this window — your wall clock can't be split</div></div>`;
+      + `<div class="kv muted-note">No focus stream for this window — your wall clock can't be split</div></div>`;
   }
 
   const tip = (obj) => escapeHTML(formulaTipHTML(obj));
@@ -3765,25 +3774,25 @@ function wallSplitHTML(op) {
   // and the descriptor says why.
   const split = op.hasActivity
     ? [
-        { k: "prompting", g: "you typing", ms: op.promptMs, c: "var(--accent)",
+        { k: "Prompting", g: "you typing", ms: op.promptMs, c: "var(--accent)",
           f: "at an agent window ∩ keyboard/mouse activity",
           w: "Hands-on time: you were at the window and typing." },
-        { k: "supervising", g: "watching a window", ms: op.superviseMs, c: "var(--c-idle)",
+        { k: "Supervising", g: "watching a window", ms: op.superviseMs, c: "var(--c-idle)",
           f: "at an agent window, minus typing",
           w: "You were at an agent window with your hands off the keys — reading a diff, watching it work. Useful, but it is not leverage." },
       ]
     : [
-        { k: "at a window", g: "supervising or prompting", ms: op.promptMs + op.superviseMs, c: "var(--c-idle)",
+        { k: "At a window", g: "supervising or prompting", ms: op.promptMs + op.superviseMs, c: "var(--c-idle)",
           f: "focused on an agent window while present",
           w: "No activity stream for this window, so watching and typing can't be told apart — they are reported together." },
       ];
   const atWindow = Math.max(0, op.lostMs - op.refocusMs); // recovery spent at a window
   const parts = [
-    { k: "work blocks", g: "you elsewhere", ms: op.freeMs, c: "var(--c-working)",
+    { k: "Work blocks", g: "you elsewhere", ms: op.freeMs, c: "var(--c-working)",
       f: "running − attending − re-focusing",
       w: "Agents running and nobody waiting on you: the hours you could spend on your own work. The plot below is this slice, chopped into the sizes it actually arrived in." },
     ...split,
-    { k: "re-focusing", g: "away from a window", ms: op.refocusMs, c: "var(--c-refocus)",
+    { k: "Re-focusing", g: "away from a window", ms: op.refocusMs, c: "var(--c-refocus)",
       f: `⋃ ${humanDurationMs(OP.switchRecoveryMs)} recovery per switch, merged, ∩ running − attending`,
       w: `Still paying for a context switch, and not at an agent window while paying. The switching-cost box counts the whole recovery window (${humanDurationMs(op.lostMs)}); the other ${humanDurationMs(atWindow)} of it you spent at a window, and it is counted there rather than twice.` },
   ];
@@ -3877,12 +3886,12 @@ function freeShapeHTML(op) {
   // with a flattering shape, so it is refused rather than drawn.
   if (!op || !op.hasAttention) {
     return `<div class="freeshape">${head("")}`
-      + `<div class="kv muted-note">no focus stream for this window — the blocks can't be sized</div></div>`;
+      + `<div class="kv muted-note">No focus stream for this window — the blocks can't be sized</div></div>`;
   }
   const s = freeBlockStats(op.free);
   if (!s.count) {
     return `<div class="freeshape">${head("")}`
-      + `<div class="kv muted-note">no work blocks — you were with the agents the whole time they ran</div></div>`;
+      + `<div class="kv muted-note">No work blocks — you were with the agents the whole time they ran</div></div>`;
   }
 
   const tip = (obj) => escapeHTML(formulaTipHTML(obj));
@@ -3927,7 +3936,7 @@ function freeShapeHTML(op) {
     b.blocksMs.forEach((ms, i) => {
       const t = tip({
         title: `${humanDurationMs(ms)} · ${b.label}`,
-        formula: "one uninterrupted stretch with no agent waiting on you",
+        formula: "One uninterrupted stretch with no agent waiting on you",
         substitution: `block ${i + 1} of ${b.count} in this bucket · ${s.count} in the day`,
         result: humanDurationMs(ms),
         why: b.gloss.charAt(0).toUpperCase() + b.gloss.slice(1) + " — " + b.note + ".",
@@ -3976,7 +3985,7 @@ function freeShapeHTML(op) {
     + `<span class="fs-foot-k">${label}</span></span>`;
   const footer =
       foot("usable", `<b style="color:${deepColor}">${deepPct == null ? "—" : deepPct + "%"}</b>`, {
-        title: `usable · blocks ≥ ${deepStr}`,
+        title: `Usable · blocks ≥ ${deepStr}`,
         formula: `Σ blocks ≥ ${deepStr} ÷ all block time`,
         substitution: `${humanDurationCoarseMs(s.deepMs)} ÷ ${humanDurationCoarseMs(s.totalMs)}`,
         result: (deepPct == null ? "—" : deepPct + "%")
@@ -3985,13 +3994,13 @@ function freeShapeHTML(op) {
         color: deepColor,
       })
     + foot("longest", `<b>${humanDurationCoarseMs(s.longestMs)}</b>`, {
-        title: "longest block",
+        title: "Longest block",
         formula: "max uninterrupted stretch",
         result: humanDurationMs(s.longestMs),
         why: "The best single run the day gave you.",
       })
     + foot("median", `<b>${humanDurationCoarseMs(s.medianMs)}</b>`, {
-        title: "median block",
+        title: "Median block",
         formula: "middle block by length",
         substitution: `${s.count} blocks · mean ${humanDurationCoarseMs(s.meanMs)}`,
         result: humanDurationMs(s.medianMs),
@@ -4197,8 +4206,8 @@ function renderCostCard(data, plan) {
   const wkPct = wk && wk.utilization != null ? wk.utilization : null;
   const stale = plan && plan.available && plan.stale;
   const freshness = !plan || !plan.available
-    ? `<span class="dim">official % unavailable</span>`
-    : `<span class="${stale ? "stale" : "dim"}">official % · updated ${agoString(Date.parse(plan.mtime))}${stale ? " (stale)" : ""}</span>`;
+    ? `<span class="dim">Official % unavailable</span>`
+    : `<span class="${stale ? "stale" : "dim"}">Official % · updated ${agoString(Date.parse(plan.mtime))}${stale ? " (stale)" : ""}</span>`;
 
   const windowDollars = pw && pw.cost_usd != null ? pw.cost_usd : null;
 
@@ -4206,13 +4215,13 @@ function renderCostCard(data, plan) {
     <div class="card-label">cost</div>
     <div class="headline-row">
       <div class="headline has-tip" data-tip="${tip({
-        title: "window total",
+        title: "Window total",
         formula: "Σ tokens × model price (recomputed)",
         result: fmtUSD(totals.cost_usd),
         why: "Total spend for this window, recomputed from token counts and current model prices.",
       })}">
         <div class="hv">${fmtUSD(totals.cost_usd)}</div>
-        <div class="hk">window total · recomputed</div>
+        <div class="hk">Window total · recomputed</div>
       </div>
     </div>
 
@@ -4241,9 +4250,9 @@ function renderCostCard(data, plan) {
       </div>
       ${wkPct != null ? `
         <div class="gauge-head week">
-          <span>weekly</span>
+          <span>Weekly</span>
           <span class="gauge-figs"><b class="has-tip" style="color:${pctColor(wkPct)}" data-tip="${tip({
-            title: "weekly plan usage",
+            title: "Weekly plan usage",
             formula: "7-day plan utilization",
             result: fmtPct(wkPct),
             why: "Utilization of your 7-day (weekly) plan allowance.",
@@ -4430,7 +4439,7 @@ function hideTip() { el.tooltip.hidden = true; }
 
 function pinPopout(html, ev) {
   hideTip();
-  el.popout.innerHTML = `<button class="po-close" title="close">✕</button>` + html;
+  el.popout.innerHTML = `<button class="po-close" title="Close">✕</button>` + html;
   el.popout.hidden = false;
   el.popout.querySelector(".po-close").addEventListener("click", hidePopout);
   const pad = 14, r = el.popout.getBoundingClientRect();
@@ -4705,8 +4714,8 @@ function applyTheme() {
   setDarkReaderLock(theme === "dark");
   if (el.themeToggle) {
     const next = theme === "dark" ? "light" : "dark";
-    el.themeToggle.title = "switch to " + next + " theme";
-    el.themeToggle.setAttribute("aria-label", "switch to " + next + " theme");
+    el.themeToggle.title = "Switch to " + next + " theme";
+    el.themeToggle.setAttribute("aria-label", "Switch to " + next + " theme");
   }
   // The SVG restyles itself via CSS vars; the canvas bakes colors in at draw
   // time, so it must be repainted to pick up the new theme — including when

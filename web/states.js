@@ -504,7 +504,7 @@ function buildSandbox() {
         ).join("");
         const drop = k === ""
           ? "<span></span>"
-          : `<button type="button" class="sb-drop" data-drop="${k}" title="remove this writer" aria-label="remove ${k}">×</button>`;
+          : `<button type="button" class="sb-drop" data-drop="${k}" title="Remove this writer" aria-label="Remove ${k}">×</button>`;
         return `<div class="sb-w"><span class="sb-wk">${label}</span><div class="sb-seg">${btns}</div>${drop}</div>`;
       })
       .join("") +

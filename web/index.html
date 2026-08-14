@@ -35,34 +35,34 @@
       <h1>Switchboard</h1>
     </div>
 
-    <div class="live-pill" id="live-pill" title="data is live — polled automatically">
+    <div class="live-pill" id="live-pill" title="Data is live — polled automatically">
       <span id="updated">—</span>
     </div>
 
     <div class="nav">
-      <button id="prev-day" class="icon" title="previous day (Ctrl+←)">‹</button>
+      <button id="prev-day" class="icon" title="Previous day (Ctrl+←)">‹</button>
       <!-- The day is held in a hidden input (every reader still asks for
            el.day.value) and opened with our own calendar popover rather than
            the native picker, which cannot be themed and swallows the keyboard
            whole while it is up. -->
       <button class="date-field" id="date-field" type="button" aria-haspopup="dialog" aria-expanded="false"
-              aria-label="choose a date" title="choose a date (c)">
+              aria-label="Choose a date" title="Choose a date (c)">
         <span class="date-text" id="day-display">—</span>
         <svg class="date-ico" viewBox="0 0 16 16" width="13" height="13" fill="currentColor" aria-hidden="true"><path d="M3.5 0a.5.5 0 0 1 .5.5V1h8V.5a.5.5 0 0 1 1 0V1h1a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V3a2 2 0 0 1 2-2h1V.5a.5.5 0 0 1 .5-.5M1 4v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V4z"/></svg>
       </button>
       <input type="hidden" id="day" />
-      <button id="next-day" class="icon" title="next day (Ctrl+→)">›</button>
+      <button id="next-day" class="icon" title="Next day (Ctrl+→)">›</button>
     </div>
 
     <!-- the field guide: what the chip colors mean and how a session earns one.
          A separate page rather than a panel here — it is a ramp you read once,
          not a control you reach for while watching the day. -->
-    <a class="guidelink" href="states.html" title="what the status colors mean, and how a session gets one">
+    <a class="guidelink" href="states.html" title="What the status colors mean, and how a session gets one">
       <svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor" aria-hidden="true"><path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14m0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16"/><path d="M5.255 5.786a.237.237 0 0 0 .241.247h.825c.138 0 .248-.113.266-.25.09-.656.54-1.134 1.342-1.134.686 0 1.314.343 1.314 1.168 0 .635-.374.927-.965 1.371-.673.489-1.206 1.06-1.168 1.987l.003.217a.25.25 0 0 0 .25.246h.811a.25.25 0 0 0 .25-.25v-.105c0-.718.273-.927 1.01-1.486.609-.463 1.244-.977 1.244-2.056 0-1.511-1.276-2.241-2.673-2.241-1.267 0-2.655.59-2.75 2.286m1.557 5.763c0 .533.425.927 1.01.927.609 0 1.028-.394 1.028-.927 0-.552-.42-.94-1.029-.94-.584 0-1.009.388-1.009.94"/></svg>
-      field guide
+      Field guide
     </a>
 
-    <button id="theme-toggle" class="icon theme-toggle" title="toggle theme" aria-label="toggle color theme">
+    <button id="theme-toggle" class="icon theme-toggle" title="Toggle theme" aria-label="Toggle color theme">
       <svg class="ico-sun" viewBox="0 0 16 16" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="M8 11a3 3 0 1 1 0-6 3 3 0 0 1 0 6m0 1a4 4 0 1 0 0-8 4 4 0 0 0 0 8M8 0a.5.5 0 0 1 .5.5v2a.5.5 0 0 1-1 0v-2A.5.5 0 0 1 8 0m0 13a.5.5 0 0 1 .5.5v2a.5.5 0 0 1-1 0v-2A.5.5 0 0 1 8 13m8-5a.5.5 0 0 1-.5.5h-2a.5.5 0 0 1 0-1h2a.5.5 0 0 1 .5.5M3 8a.5.5 0 0 1-.5.5h-2a.5.5 0 0 1 0-1h2A.5.5 0 0 1 3 8m10.657-5.657a.5.5 0 0 1 0 .707l-1.414 1.415a.5.5 0 1 1-.707-.708l1.414-1.414a.5.5 0 0 1 .707 0m-9.193 9.193a.5.5 0 0 1 0 .707L3.05 13.657a.5.5 0 0 1-.707-.707l1.414-1.414a.5.5 0 0 1 .707 0m9.193 2.121a.5.5 0 0 1-.707 0l-1.414-1.414a.5.5 0 0 1 .707-.707l1.414 1.414a.5.5 0 0 1 0 .707M4.464 4.465a.5.5 0 0 1-.707 0L2.343 3.05a.5.5 0 1 1 .707-.708l1.414 1.415a.5.5 0 0 1 0 .707"/></svg>
       <svg class="ico-moon" viewBox="0 0 16 16" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="M6 .278a.77.77 0 0 1 .08.858 7.2 7.2 0 0 0-.878 3.46c0 4.021 3.278 7.277 7.318 7.277q.792-.001 1.533-.16a.79.79 0 0 1 .81.316.73.73 0 0 1-.031.893A8.35 8.35 0 0 1 8.344 16C3.734 16 0 12.286 0 7.71 0 4.266 2.114 1.312 5.124.06A.75.75 0 0 1 6 .278"/></svg>
     </button>
@@ -92,7 +92,7 @@
              its absolutely positioned svg lands on the plot's own origin — put
              it after the plot and it starts one plot-height too low. -->
         <div class="gutter-stick">
-          <svg id="timeline-gutter" role="img" aria-label="project and session labels">
+          <svg id="timeline-gutter" role="img" aria-label="Project and session labels">
             <defs>
               <!-- cast off the right edge of the gutter, so the column reads as
                    floating over the bars passing behind it. Only painted once
@@ -104,7 +104,7 @@
             </defs>
           </svg>
         </div>
-        <svg id="timeline" role="img" aria-label="session swimlanes">
+        <svg id="timeline" role="img" aria-label="Session swimlanes">
           <defs>
             <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
               <rect width="6" height="6" fill="none"></rect>
@@ -118,44 +118,44 @@
             </pattern>
           </defs>
         </svg>
-        <canvas id="concurrency" role="img" aria-label="number of agents working over time"></canvas>
-        <div id="projects" class="projects" aria-label="hours of work per project"></div>
+        <canvas id="concurrency" role="img" aria-label="Number of agents working over time"></canvas>
+        <div id="projects" class="projects" aria-label="Hours of work per project"></div>
         <div id="empty" class="empty" hidden>No activity for this window.</div>
       </div>
       <!-- line-view caption: legend + peak/avg readout, sitting under the plot
            it describes (hidden in the sessions and projects views). -->
       <div class="chart-caption" id="chart-caption">
         <div class="chart-legend">
-          <span class="cl-item"><span class="cl-swatch inst"></span>instantaneous</span>
+          <span class="cl-item"><span class="cl-swatch inst"></span>Instantaneous</span>
           <span class="cl-item cl-smooth"><span class="cl-swatch smooth"></span>30-min average</span>
-          <span class="cl-item"><span class="cl-swatch avgline"></span>day average</span>
+          <span class="cl-item"><span class="cl-swatch avgline"></span>Day average</span>
         </div>
         <div class="chart-stats" id="chart-stats"></div>
       </div>
       <div class="chart-footer">
-        <div class="viewseg" id="viewseg" role="group" aria-label="chart view — Tab and Shift+Tab cycle the views" title="Tab / Shift+Tab to cycle views">
+        <div class="viewseg" id="viewseg" role="group" aria-label="Chart view — Tab and Shift+Tab cycle the views" title="Tab / Shift+Tab to cycle views">
           <span class="viewseg-glider" id="viewseg-glider" aria-hidden="true"></span>
-          <button id="view-sessions" class="viewseg-btn" type="button" aria-pressed="true" title="session swimlanes">sessions</button>
-          <button id="view-line" class="viewseg-btn" type="button" aria-pressed="false" title="agents working over time">agents aloft</button>
-          <button id="view-projects" class="viewseg-btn" type="button" aria-pressed="false" title="hours of work per project">projects</button>
+          <button id="view-sessions" class="viewseg-btn" type="button" aria-pressed="true" title="Session swimlanes">sessions</button>
+          <button id="view-line" class="viewseg-btn" type="button" aria-pressed="false" title="Agents working over time">agents aloft</button>
+          <button id="view-projects" class="viewseg-btn" type="button" aria-pressed="false" title="Hours of work per project">projects</button>
         </div>
-        <div class="zoom" role="group" aria-label="horizontal time scale">
+        <div class="zoom" role="group" aria-label="Horizontal time scale">
           <span class="zoom-cap">scale</span>
-          <button id="zoom-out" class="zoom-btn" type="button" title="zoom out — compress time (-)" aria-label="zoom out">−</button>
-          <button id="zoom-reset" class="zoom-read" type="button" title="reset to default scale"><span id="zoom-val">240</span> px/h</button>
-          <button id="zoom-in" class="zoom-btn" type="button" title="zoom in — stretch time (+)" aria-label="zoom in">+</button>
+          <button id="zoom-out" class="zoom-btn" type="button" title="Zoom out — compress time (-)" aria-label="Zoom out">−</button>
+          <button id="zoom-reset" class="zoom-read" type="button" title="Reset to default scale"><span id="zoom-val">240</span> px/h</button>
+          <button id="zoom-in" class="zoom-btn" type="button" title="Zoom in — stretch time (+)" aria-label="Zoom in">+</button>
         </div>
-        <label class="toggle sessions-only" for="opt-focus" title="toggle with Shift+F">
+        <label class="toggle sessions-only" for="opt-focus" title="Toggle with Shift+F">
           <input type="checkbox" id="opt-focus" class="toggle-input" />
           <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
-          <span class="toggle-label">show focus</span>
+          <span class="toggle-label">Show focus</span>
         </label>
-        <label class="toggle sessions-only" for="opt-ctx-switches" title="toggle with Shift+C">
+        <label class="toggle sessions-only" for="opt-ctx-switches" title="Toggle with Shift+C">
           <input type="checkbox" id="opt-ctx-switches" class="toggle-input" />
           <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
-          <span class="toggle-label">show context switches</span>
+          <span class="toggle-label">Show context switches</span>
         </label>
-        <label class="toggle line-only" for="opt-smooth" title="toggle with 3">
+        <label class="toggle line-only" for="opt-smooth" title="Toggle with 3">
           <input type="checkbox" id="opt-smooth" class="toggle-input" checked />
           <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
           <span class="toggle-label">30-min average</span>
@@ -168,11 +168,11 @@
          rule through it: the dollars are DERIVED from the tokens, and stacking
          them as peers reads as two facts where a single card read as one long
          one. -->
-    <section class="boxes" id="boxes" aria-label="summary">
+    <section class="boxes" id="boxes" aria-label="Summary">
       <div class="box legend-box">
         <div class="box-label">cumulative time</div>
-        <div class="status-key" id="status-key" aria-label="time by status (key)"></div>
-        <div class="provider-key" id="provider-key" aria-label="providers (key)" hidden></div>
+        <div class="status-key" id="status-key" aria-label="Time by status (key)"></div>
+        <div class="provider-key" id="provider-key" aria-label="Providers (key)" hidden></div>
       </div>
       <div class="card attention" id="card-attention"></div>
       <div class="card-stack">
@@ -188,14 +188,14 @@
   <!-- date popover: our own calendar, in the page's own idiom. Six fixed weeks
        so paging months never resizes it; the grid itself is stamped by app.js
        from model.js's monthGrid. -->
-  <div id="calendar" class="cal" role="dialog" aria-modal="true" aria-label="choose a date" hidden>
+  <div id="calendar" class="cal" role="dialog" aria-modal="true" aria-label="Choose a date" hidden>
     <div class="cal-head">
-      <button class="cal-page" id="cal-prev" type="button" aria-label="previous month">‹</button>
+      <button class="cal-page" id="cal-prev" type="button" aria-label="Previous month">‹</button>
       <div class="cal-title"><span id="cal-ym">—</span><span class="cal-monthname" id="cal-monthname"></span></div>
-      <button class="cal-page" id="cal-next" type="button" aria-label="next month">›</button>
+      <button class="cal-page" id="cal-next" type="button" aria-label="Next month">›</button>
     </div>
     <div class="cal-dow" aria-hidden="true"><span>su</span><span>mo</span><span>tu</span><span>we</span><span>th</span><span>fr</span><span>sa</span></div>
-    <div class="cal-grid" id="cal-grid" role="grid" aria-label="days"></div>
+    <div class="cal-grid" id="cal-grid" role="grid" aria-label="Days"></div>
     <div class="cal-foot">
       <button class="cal-today" id="cal-today" type="button">today</button>
       <span class="cal-keys" aria-hidden="true"><kbd>←↑↓→</kbd><kbd>⏎</kbd><kbd>esc</kbd></span>
@@ -203,10 +203,10 @@
   </div>
 
   <footer class="footer">
-    <div class="footer-item"><span class="fk">durations</span><span class="fv">nanoseconds (÷1e9)</span></div>
-    <div class="footer-item"><span class="fk">tokens</span><span class="fv">raw counts</span></div>
-    <div class="footer-item"><span class="fk">cost</span><span class="fv">recomputed from tokens × model price</span></div>
-    <div class="footer-item"><span class="fk">plan %</span><span class="fv">read-only from <code>/tmp/claude-plan-usage.json</code></span></div>
+    <div class="footer-item"><span class="fk">durations</span><span class="fv">Nanoseconds (÷1e9)</span></div>
+    <div class="footer-item"><span class="fk">tokens</span><span class="fv">Raw counts</span></div>
+    <div class="footer-item"><span class="fk">cost</span><span class="fv">Recomputed from tokens × model price</span></div>
+    <div class="footer-item"><span class="fk">plan %</span><span class="fv">Read-only from <code>/tmp/claude-plan-usage.json</code></span></div>
     <div class="footer-item"><span class="fk">contract</span><span class="fv">Switchboard <code>docs/history-schema.md</code></span></div>
   </footer>
 
