@@ -371,6 +371,29 @@ are correspondingly missing. Both are repaired in place by
 `switchboard/scripts/repair-launch-ack-spans`; the producer fix is in
 `switchboard/docs/async-agent-launch-ack.md`.
 
+### 5.2 Known limitation: a span is in-flight time, not work time
+
+A subagent span runs spawn-to-finish, and an agent parked on a permission
+prompt is still in flight. So a span can include time the agent did nothing but
+wait for a human, and every consumer of these spans — the fanout figure, the
+agents-aloft chart, the force-multiplier headline — currently credits that wait
+as delegated work.
+
+Measured across every subagent transcript on the development machine
+(2026-08-14): **17.6 h of 127.5 h of total span time (13.8%) was spent parked on
+an unanswered `tool_use`.** Normally the distortion is small, but it is
+unbounded and concentrates badly — a single overnight wait produced two spans
+that were 92% and 97% dead time, and those two alone are 15.4 h of that 17.6 h.
+
+This is not repaired, and deliberately not papered over with a heuristic. The
+information needed is per-span blocked intervals, which no producer currently
+emits: the history log records a permission `transition` at session level, not
+per delegated writer, so the overlap cannot be reconstructed after the fact for
+a session with more than one agent. Closing it properly means a producer-side
+field (blocked intervals on the subagent span) rather than a consumer-side
+guess, and until then the honest reading of the fanout figure is "agent time in
+flight", not "agent time working".
+
 ## 6. What the merge does to your envelope
 
 In multi-provider mode the dashboard parses every envelope and merges them.
