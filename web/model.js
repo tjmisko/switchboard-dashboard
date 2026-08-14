@@ -579,6 +579,12 @@
   // stretch of work.
   const FREE_BLOCK_DEEP_MS = 15 * 60e3;
 
+  // The ceiling on a block that was never really free. Five minutes is not
+  // enough to start anything in; it is the length of an interruption you were
+  // handed back from, and counting it as free time is what lets a shredded day
+  // report the same free-time total as a whole one.
+  const FREE_BLOCK_FRAG_MS = 5 * 60e3;
+
   // freeBlockStats folds [startMs, endMs] free intervals into the distribution
   // and the figures that summarize it:
   //
@@ -610,14 +616,16 @@
     if (!blocks.length) {
       return {
         count: 0, totalMs: 0, medianMs: null, meanMs: null, longestMs: null,
-        deepCount: 0, deepMs: 0, deepFrac: null, bins, maxBinCount: 0,
+        deepCount: 0, deepMs: 0, deepFrac: null, fragCount: 0, fragMs: 0,
+        blocksMs: [], bins, maxBinCount: 0,
       };
     }
     blocks.sort((a, b) => a - b);
-    let totalMs = 0, deepMs = 0, deepCount = 0, maxBinCount = 0;
+    let totalMs = 0, deepMs = 0, deepCount = 0, fragMs = 0, fragCount = 0, maxBinCount = 0;
     for (const ms of blocks) {
       totalMs += ms;
       if (ms >= FREE_BLOCK_DEEP_MS) { deepMs += ms; deepCount++; }
+      if (ms < FREE_BLOCK_FRAG_MS) { fragMs += ms; fragCount++; }
       // the last bin's ceiling is Infinity, so every block lands somewhere
       for (let i = 0; i < bins.length; i++) {
         if (ms >= bins[i].fromMs && ms < bins[i].toMs) { bins[i].count++; bins[i].ms += ms; break; }
@@ -630,6 +638,12 @@
       count: blocks.length, totalMs, medianMs, meanMs: totalMs / blocks.length,
       longestMs: blocks[blocks.length - 1],
       deepCount, deepMs, deepFrac: totalMs > 0 ? deepMs / totalMs : null,
+      fragCount, fragMs,
+      // DESCENDING, because every consumer ranks them longest-first: the shape
+      // of a day is a few whole blocks and then a fringe, and that reads left to
+      // right. The ascending copy above is an implementation detail of the
+      // median, not something to hand out.
+      blocksMs: blocks.slice().reverse(),
       bins, maxBinCount,
     };
   }
@@ -1345,7 +1359,7 @@
     packLanes, aloftSpans, workIntervalsMs, concurrencyProfile,
     alignLiveTail,
     projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs, suspectTailMs,
-    freeBlockStats, FREE_BLOCK_DEEP_MS,
+    freeBlockStats, FREE_BLOCK_DEEP_MS, FREE_BLOCK_FRAG_MS,
     fmtBytes, spawnedBytes, laneMemory, memoryWindow, pressureWindow,
     summaryTasks, summaryBodyHTML, summaryHintText, normalizeView,
     fmtTokens, shortModel, tokenBilled, tokenTotals, tokenRowsHTML,

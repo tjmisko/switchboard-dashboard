@@ -110,6 +110,16 @@ function provColor(p) {
 // formatters
 // ---------------------------------------------------------------------------
 
+// Every unit but the LEADING one is zero-padded to two digits, so a column of
+// these lines up: "1h 03m 09s" sits under "23h 04m 31s" with the h, m and s
+// columns in register, where "1h 3m 9s" under "23h 4m 31s" did not. The leading
+// unit is never padded — "03m 31s" would assert an hours column that is not
+// there, and reads as a number someone forgot to finish.
+//
+// A zero MIDDLE unit is printed rather than skipped (1h 00m 05s, not 1h 05s):
+// dropping it punches a hole straight through the alignment this exists for.
+// Trailing zeros are still dropped, so a round duration stays "2h", not
+// "2h 00m 00s" — there is no column below it to keep register with.
 function humanDuration(ns) {
   if (ns == null) return "—";
   if (ns <= 0) return "0s";
@@ -119,9 +129,10 @@ function humanDuration(ns) {
   const h = Math.floor(s / 3600); s -= h * 3600;
   const m = Math.floor(s / 60); s -= m * 60;
   const parts = [];
-  if (h) parts.push(h + "h");
-  if (m) parts.push(m + "m");
-  if (s || parts.length === 0) parts.push(s + "s");
+  const unit = (v, suffix) => (parts.length ? String(v).padStart(2, "0") : String(v)) + suffix;
+  if (h) parts.push(unit(h, "h"));
+  if (m || (h && s)) parts.push(unit(m, "m"));
+  if (s || parts.length === 0) parts.push(unit(s, "s"));
   return parts.join(" ");
 }
 function humanDurationMs(ms) { return humanDuration(ms * 1e6); }
@@ -1296,8 +1307,7 @@ function setView(view) {
   const entering = view !== currentView;
   currentView = view;
   try { localStorage.setItem(VIEW_KEY, view); } catch (e) {}
-  el.section.classList.toggle("view-line", view === "line");
-  el.section.classList.toggle("view-projects", view === "projects");
+  applyViewClasses(view);
   el.viewSessions.setAttribute("aria-pressed", String(view === "sessions"));
   el.viewLine.setAttribute("aria-pressed", String(view === "line"));
   el.viewProjects.setAttribute("aria-pressed", String(view === "projects"));
@@ -1317,6 +1327,21 @@ function setView(view) {
   // rows that just landed. Its animation starts when .enter is applied, so
   // stamping it once the rows exist is what makes them all run together.
   if (entering && view === "projects") startProjectsEnter();
+}
+
+// applyViewClasses stamps the view on the section AND on the body.
+//
+// The section class drives everything inside the plot. The body class exists
+// because the summary strip is a SIBLING of the plot section rather than a child
+// of it, and one thing down there is view-dependent: the cumulative-time box is
+// the swimlane KEY — its swatches are the bar colours — so it belongs to the
+// sessions view alone. The line chart and the project ranking carry their own
+// legends and would otherwise sit beside a key to marks they do not draw.
+function applyViewClasses(view) {
+  el.section.classList.toggle("view-line", view === "line");
+  el.section.classList.toggle("view-projects", view === "projects");
+  document.body.classList.toggle("view-line", view === "line");
+  document.body.classList.toggle("view-projects", view === "projects");
 }
 
 // activeViewButton is the segment standing for the view on screen — the glider's
@@ -3707,33 +3732,36 @@ function renderAttentionCard(summary, op) {
 }
 
 // ---------------------------------------------------------------------------
-// free-time SHAPE: the histogram of uninterrupted operator blocks
+// free-time SHAPE: every uninterrupted block, ranked longest to shortest
 //
 // The card above says how MUCH free time the agents handed back. This says what
 // it was worth. Sixty one-minute gaps and four fifteen-minute blocks are the
 // same hour on every total in this dashboard, and they are not the same hour:
 // only one of them is time you could have started something in.
 //
-// Two encodings of one distribution, stacked, because they disagree in the most
-// informative way:
-//   the columns  — how many BLOCKS landed in each length bucket. This is the
-//                  interruption story: a red-heavy left side means the day kept
-//                  taking you back.
-//   the strip    — how much of the free TIME each bucket carried. Short blocks
-//                  are numerous and weigh nothing, so a shredded-looking
-//                  histogram over a green strip says the interruptions were
-//                  real but the bulk of the day still came back whole.
-// Same six colors in both, so the eye carries a bucket from one to the other.
+// This was a six-bucket histogram on a red→green ramp, and the ramp was the
+// problem. Red, amber and green are SPOKEN FOR on this page — they are the
+// status colours, and they mean permission-blocked, idle and working everywhere
+// else you look. A histogram borrowing them said "your short blocks are
+// permission-blocked", which is not a thing. Every block is free time; free time
+// is green; that is the whole colour vocabulary this plot needs.
+//
+// So: one bar per block, ranked longest first. The x-axis is CUMULATIVE FREE
+// TIME rather than an index, which is what makes the reading direct — the
+// horizontal reach of the blocks left of the ≥15m rule *is* the deep-work share,
+// so the figure beside the plot and the shape of the plot are the same fact told
+// twice. Heights fall with length, so the day's decay is its silhouette: a few
+// tall slabs, then a fringe.
+//
+// The fringe gets a bracket rather than a colour. Blocks under 5m are not free
+// time you could spend, they are the gaps between interruptions, and the bracket
+// says so in words instead of borrowing a hue that means something else.
 // ---------------------------------------------------------------------------
 
-// FRAG_COLORS: the fragmentation ramp, shredded → whole. Runs red through amber
-// to the identity green, so it lands on the same meanings the status colors
-// already carry everywhere else on the page (red = you are being interrupted,
-// green = work is happening). Fixed across themes, like the status hues.
-const FRAG_COLORS = [
-  "var(--frag-1)", "var(--frag-2)", "var(--frag-3)",
-  "var(--frag-4)", "var(--frag-5)", "var(--frag-6)",
-];
+// Below this share of the total, a block is too thin to draw honestly. It still
+// occupies its slot — a fringe that vanished would make a shredded day look
+// whole — but it stops shrinking, and the tail reads as the hairline comb it is.
+const FREE_BLOCK_MIN_W = 0.22; // %
 
 function freeShapeHTML(op) {
   const head = (right) =>
@@ -3756,51 +3784,90 @@ function freeShapeHTML(op) {
   const tip = (obj) => escapeHTML(formulaTipHTML(obj));
   const pctOfTime = (ms) => (s.totalMs > 0 ? (ms / s.totalMs) * 100 : 0);
 
-  // columns: height is the bin's share of the TALLEST bin, so the shape is
-  // readable whether the day had 6 blocks or 60. An empty bucket keeps its slot
-  // on the axis as a hairline — the gap between "5–15m" and "1h+" is a fact.
-  const cols = s.bins.map((b, i) => {
-    const h = s.maxBinCount > 0 ? (b.count / s.maxBinCount) * 100 : 0;
-    const share = pctOfTime(b.ms);
+  // Widths carry TIME, so the bars laid end to end are the whole free-time
+  // total and any run of them is its share of it. Slivers are floored — a
+  // 40-second block is 0.02% of a six-hour day and would not survive rounding —
+  // and the whole row is then rescaled so it still adds to exactly 100%.
+  // Without that renormalisation a shredded day's floors would sum past the
+  // track and quietly push the tail off the end of the plot.
+  const blocks = s.blocksMs;
+  const rawW = blocks.map((ms) => Math.max(FREE_BLOCK_MIN_W, pctOfTime(ms)));
+  const norm = 100 / rawW.reduce((a, b) => a + b, 0);
+  const widths = rawW.map((w) => w * norm);
+  const lefts = [];
+  let acc = 0;
+  for (const w of widths) { lefts.push(acc); acc += w; }
+
+  // Heights carry length against the day's best block, so the silhouette is the
+  // decay. Floored too, for the same reason and to keep the fringe a comb rather
+  // than a smear.
+  const heights = blocks.map((ms) => Math.max(7, (ms / s.longestMs) * 100));
+
+  // Where the usable time stops. Because the blocks are ranked, every block ≥15m
+  // precedes every block below it, so this boundary is a single edge and the
+  // ground it covers IS deepFrac — the figure to the right of the plot is the
+  // same fact as the width of the plot's left end.
+  let deepEnd = 0;
+  for (let i = 0; i < blocks.length; i++) {
+    if (blocks[i] >= FREE_BLOCK_DEEP_MS) deepEnd = lefts[i] + widths[i];
+  }
+  // ...and where the fragments start, by the same ranking argument.
+  let fragStart = null;
+  for (let i = 0; i < blocks.length; i++) {
+    if (blocks[i] < FREE_BLOCK_FRAG_MS) { fragStart = lefts[i]; break; }
+  }
+
+  // A bar narrower than this cannot be hovered, so it is not given a tip it
+  // would only fail to show. The fringe is covered by the bracket's tip instead.
+  const TIPPABLE_W = 1.1;
+  const bars = blocks.map((ms, i) => {
+    const frag = ms < FREE_BLOCK_FRAG_MS;
+    const deep = ms >= FREE_BLOCK_DEEP_MS;
+    const cls = "fb-b" + (frag ? " frag" : deep ? " deep" : "");
+    const style = `width:${widths[i].toFixed(3)}%;height:${heights[i].toFixed(1)}%`;
+    if (widths[i] < TIPPABLE_W) return `<span class="${cls}" style="${style}"></span>`;
     const t = tip({
-      title: `blocks of ${b.label}`,
-      formula: "count · time carried",
-      substitution: b.count ? `${b.count} × ~${humanDurationCoarseMs(b.count ? b.ms / b.count : 0)}` : null,
-      result: b.count ? `${b.count} block${b.count === 1 ? "" : "s"} · ${humanDurationCoarseMs(b.ms)}` : "none",
-      why: b.count
-        ? `${share.toFixed(share < 10 ? 1 : 0)}% of your free time arrived in blocks this long.`
-        : "Nothing in this window came back in blocks this long.",
-      color: FRAG_COLORS[i],
+      title: `block ${i + 1} of ${s.count}`,
+      formula: "one uninterrupted stretch with no agent waiting on you",
+      result: humanDurationMs(ms),
+      why: deep
+        ? "Long enough to start something in — this is the free time that counts."
+        : "Free, but under the 15m floor for starting something: a look-away, not a stretch of work.",
+      color: "var(--c-working)",
     });
-    // NB: the zero-bar modifier is ".zero", never ".empty" — .empty is a
-    // page-level class (the "no activity" panel) carrying 56px of padding,
-    // which a bar quietly inherits as 112px of height.
-    return `<div class="fs-col has-tip" data-tip="${t}">`
-      + `<span class="fs-count${b.count ? "" : " zero"}">${b.count || "·"}</span>`
-      + `<span class="fs-track"><span class="fs-bar${b.count ? "" : " zero"}"`
-      + ` style="height:${h.toFixed(1)}%;background:${FRAG_COLORS[i]}"></span></span>`
-      + `<span class="fs-tick">${escapeHTML(b.label)}</span>`
-      + `</div>`;
+    return `<span class="${cls} has-tip" data-tip="${t}" style="${style}"></span>`;
   }).join("");
 
-  // the strip: the same buckets weighted by time instead of by count
-  const strip = s.bins.map((b, i) => {
-    const w = pctOfTime(b.ms);
-    return w > 0 ? `<span class="sb-seg" style="width:${w.toFixed(3)}%;background:${FRAG_COLORS[i]}"></span>` : "";
-  }).join("");
-  const stripTip = tip({
-    title: "where your free time sat",
-    formula: "Σ block length per bucket ÷ total free time",
-    result: `${humanDurationCoarseMs(s.totalMs)} across ${s.count} block${s.count === 1 ? "" : "s"}`,
-    why: "The bars count interruptions; this weighs them. A green strip under a red-heavy histogram means the short gaps were many but cost little.",
-  });
+  // The rule, the bracket and their labels. The rule is suppressed at the
+  // extremes: at 0% and 100% it is the plot's own edge, and an axis line drawn
+  // on top of a border reads as a rendering fault rather than a threshold.
+  const deepStr = humanDurationCoarseMs(FREE_BLOCK_DEEP_MS);
+  const deepRule = deepEnd > 0.5 && deepEnd < 99.5
+    ? `<span class="fb-rule" style="left:${deepEnd.toFixed(3)}%"></span>`
+      + `<span class="fb-rule-k" style="left:${deepEnd.toFixed(3)}%">≥${deepStr}</span>`
+    : "";
+
+  const fragStr = humanDurationCoarseMs(FREE_BLOCK_FRAG_MS);
+  const bracket = fragStart == null ? "" : (() => {
+    const t = tip({
+      title: `the fringe · under ${fragStr}`,
+      formula: `Σ blocks < ${fragStr} ÷ total free time`,
+      substitution: `${humanDurationCoarseMs(s.fragMs)} ÷ ${humanDurationCoarseMs(s.totalMs)}`,
+      result: `${s.fragCount} block${s.fragCount === 1 ? "" : "s"} · ${humanDurationCoarseMs(s.fragMs)}`,
+      why: `Counted as free time by every total on this page, and spendable as none of it. These are the gaps between interruptions — long enough to notice, too short to start anything in.`,
+      color: "var(--fg-dim)",
+    });
+    return `<span class="fb-bracket has-tip" data-tip="${t}" style="left:${fragStart.toFixed(3)}%">`
+      + `<span class="fb-bracket-rule"></span>`
+      + `<span class="fb-bracket-k">${s.fragCount} under ${fragStr} · ${humanDurationCoarseMs(s.fragMs)} · not really free</span>`
+      + `</span>`;
+  })();
 
   // the deep-work share is the figure that survives being quoted on its own, so
   // it carries the color: the same 66/33 ramp the delegation headline uses.
   const deepPct = s.deepFrac == null ? null : Math.round(s.deepFrac * 100);
   const deepColor = deepPct == null ? "var(--fg-muted)"
     : deepPct >= 66 ? "var(--c-working)" : deepPct >= 33 ? "var(--c-idle)" : "var(--c-permission)";
-  const deepStr = humanDurationCoarseMs(FREE_BLOCK_DEEP_MS);
 
   const fig = (value, key, tipObj, color) =>
     `<div class="fs-fig has-tip" data-tip="${tip(tipObj)}">`
@@ -3831,16 +3898,18 @@ function freeShapeHTML(op) {
         color: deepColor,
       }, deepColor);
 
-  // plot left, figures right: the card is wide enough that a full-bleed
-  // six-column histogram reads as six slabs rather than a distribution, and the
-  // figures have to sit somewhere anyway.
+  // plot left, figures right: the plot is a wide, short thing and the figures
+  // are a narrow column, so they interlock rather than stack.
+  const aria = `${s.count} free blocks ranked longest to shortest, `
+    + `${deepPct == null ? "unknown" : deepPct + "%"} of the time in blocks of ${deepStr} or more`;
   return `<div class="freeshape">`
     + head(`${s.count} block${s.count === 1 ? "" : "s"} · ${humanDurationCoarseMs(s.totalMs)}`)
     + `<div class="fs-body">`
     + `<div class="fs-plot">`
-    + `<div class="fs-bars" role="img" aria-label="distribution of uninterrupted free-time block lengths">${cols}</div>`
-    + `<div class="split-bar fs-share has-tip" data-tip="${stripTip}" role="img" aria-label="share of free time by block length">${strip}</div>`
-    + `<div class="fs-axis"><span>shorter blocks · more interrupted</span><span>longer · uninterrupted</span></div>`
+    + `<div class="fb" role="img" aria-label="${escapeHTML(aria)}">`
+    + `<div class="fb-bars">${bars}${deepRule}</div>`
+    + `<div class="fb-rail">${bracket}</div>`
+    + `</div>`
     + `</div>`
     + `<div class="fs-figs">${figs}</div>`
     + `</div></div>`;
@@ -3991,22 +4060,34 @@ function tokensBlockHTML(totals) {
       + `</div>`
     : "";
 
+  // The two headline figures sit SIDE BY SIDE rather than stacked: they are the
+  // two halves of one comparison — what the agents wrote against what they had
+  // to be told to write it — and the whole point is the three-orders-of-magnitude
+  // gap between them, which a pair of rows makes you read twice to find. Value
+  // over key, the topline's voice at card scale.
+  const bigFig = (value, key, tipObj, color) =>
+    `<div class="tk-fig has-tip" data-tip="${tip(tipObj)}">`
+    + `<span class="tk-v"${color ? ` style="color:${color}"` : ""}>${value}</span>`
+    + `<span class="tk-k">${key}</span></div>`;
+
   return `<div class="card-label">tokens</div>
-    <div class="kv-list">
-      ${row("output · generated", `<b>${fmtTokens(out)}</b>`, {
+    <div class="tk-figs">
+      ${bigFig(fmtTokens(out), "output · generated", {
         title: "output tokens",
         formula: "Σ output over every session in the window",
         result: fmtTokens(out) + ` (${out.toLocaleString()})`,
         why: "Everything the agents actually wrote this window — the expensive half of the bill, per token.",
         color: "var(--c-working)",
-      })}
-      ${row("input · billed", `<b>${fmtTokens(billedIn)}</b>`, {
+      }, "var(--c-working)")}
+      ${bigFig(fmtTokens(billedIn), "input · billed", {
         title: "billed input tokens",
         formula: "fresh + cache written + cache read",
         substitution: `${fmtTokens(fresh)} + ${fmtTokens(written)} + ${fmtTokens(read)}`,
         result: fmtTokens(billedIn) + ` (${billedIn.toLocaleString()})`,
         why: "Every turn resends the whole conversation, so billed input counts the cache reads too. The uncached remainder alone would understate it by orders of magnitude.",
       })}
+    </div>
+    <div class="kv-list">
       ${cacheBar}
       ${row(`<span class="dot-k" style="background:var(--c-working)"></span>cache read`,
         `${fmtTokens(read)}${cachedPct != null ? ` <span class="dim">${cachedPct}%</span>` : ""}`, {
@@ -4053,13 +4134,37 @@ function attachFormulaTips(container) {
   });
 }
 
+// rootZoom is the page's global scale — style.css sets `:root { zoom }` so the
+// whole design rescales from one declaration.
+//
+// It has to be read back here because the two halves of placing an overlay live
+// in DIFFERENT coordinate spaces. Everything you MEASURE with — clientX,
+// getBoundingClientRect, innerWidth — is in visual pixels, already scaled. What
+// you ASSIGN — style.left, style.top — resolves in the zoomed layout space, so a
+// value computed from a measurement lands 1/zoom too far out. Left uncorrected,
+// every overlay believes it is about to overflow the right edge while a fifth of
+// the screen is still empty, and flips to the wrong side of the cursor there.
+//
+// Cached lazily: it is a constant of the stylesheet, but reading it before the
+// CSS has applied would cache a 1.
+let rootZoomCache = null;
+function rootZoom() {
+  if (rootZoomCache != null) return rootZoomCache;
+  const z = parseFloat(getComputedStyle(document.documentElement).zoom);
+  if (!Number.isFinite(z) || z <= 0) return 1; // not cached: no styles yet, ask again
+  rootZoomCache = z;
+  return z;
+}
+// toLayout converts a visual-space coordinate into the space style.left expects.
+function toLayout(px) { return px / rootZoom(); }
+
 function showTip(html, ev) { el.tooltip.innerHTML = html; el.tooltip.hidden = false; moveTip(ev); }
 function moveTip(ev) {
   const pad = 14, r = el.tooltip.getBoundingClientRect();
   let x = ev.clientX + pad, y = ev.clientY + pad;
   if (x + r.width > window.innerWidth) x = ev.clientX - r.width - pad;
   if (y + r.height > window.innerHeight) y = ev.clientY - r.height - pad;
-  el.tooltip.style.left = x + "px"; el.tooltip.style.top = y + "px";
+  el.tooltip.style.left = toLayout(x) + "px"; el.tooltip.style.top = toLayout(y) + "px";
 }
 function hideTip() { el.tooltip.hidden = true; }
 
@@ -4072,8 +4177,8 @@ function pinPopout(html, ev) {
   let x = ev.clientX + pad, y = ev.clientY + pad;
   if (x + r.width > window.innerWidth) x = window.innerWidth - r.width - pad;
   if (y + r.height > window.innerHeight) y = ev.clientY - r.height - pad;
-  el.popout.style.left = Math.max(8, x) + "px";
-  el.popout.style.top = Math.max(8, y) + "px";
+  el.popout.style.left = toLayout(Math.max(8, x)) + "px";
+  el.popout.style.top = toLayout(Math.max(8, y)) + "px";
 }
 function hidePopout() { el.popout.hidden = true; }
 
@@ -4183,9 +4288,11 @@ function placeCalendar() {
   let top = anchor.bottom + 6;
   if (top + r.height > window.innerHeight - pad) top = anchor.top - r.height - 6;
   const clamp = (v, max) => Math.max(pad, Math.min(v, Math.max(pad, max)));
-  el.calendar.style.left = clamp(anchor.left + anchor.width / 2 - r.width / 2,
-    window.innerWidth - r.width - pad) + "px";
-  el.calendar.style.top = clamp(top, window.innerHeight - r.height - pad) + "px";
+  // clamped in visual space (that is what anchor/r/innerWidth are), then handed
+  // over in layout space — see rootZoom.
+  el.calendar.style.left = toLayout(clamp(anchor.left + anchor.width / 2 - r.width / 2,
+    window.innerWidth - r.width - pad)) + "px";
+  el.calendar.style.top = toLayout(clamp(top, window.innerHeight - r.height - pad)) + "px";
 }
 
 // renderCalendar stamps the month the cursor is in. Every arrow press re-stamps
@@ -4389,8 +4496,7 @@ function init() {
   el.viewProjects.addEventListener("click", () => setView("projects"));
   // …and the same walk from the keyboard, alongside the day and calendar keys.
   document.addEventListener("keydown", handleShortcutKey);
-  el.section.classList.toggle("view-line", currentView === "line");
-  el.section.classList.toggle("view-projects", currentView === "projects");
+  applyViewClasses(currentView);
   el.viewSessions.setAttribute("aria-pressed", String(currentView === "sessions"));
   el.viewLine.setAttribute("aria-pressed", String(currentView === "line"));
   el.viewProjects.setAttribute("aria-pressed", String(currentView === "projects"));

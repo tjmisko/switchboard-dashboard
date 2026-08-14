@@ -12,7 +12,7 @@ const {
   presenceSplitMs, awayIdleMs, packLanes,
   aloftSpans, workIntervalsMs, concurrencyProfile, alignLiveTail,
   projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs,
-  freeBlockStats, FREE_BLOCK_DEEP_MS,
+  freeBlockStats, FREE_BLOCK_DEEP_MS, FREE_BLOCK_FRAG_MS,
   suspectTailMs, normalizeView, VIEW_ORDER, stepView, scaleGeometry,
   parseISODate, stepISODate, stepISOMonth, clampISODate, monthGrid,
   localDayBoundsMs, dayWindowMs,
@@ -800,6 +800,38 @@ test("freeBlockStats should place a block exactly on a bucket floor in the highe
   blockCursor = 0;
   const s = freeBlockStats([block(1), block(5), block(15), block(30), block(60)]);
   assert.deepEqual(s.bins.map((b) => b.count), [0, 1, 1, 1, 1, 1], "each edge belongs to the bucket it opens");
+});
+
+test("freeBlockStats should return blocks longest-first, whatever order they arrived in", () => {
+  blockCursor = 0;
+  const s = freeBlockStats([block(3), block(45), block(0.5), block(20)]);
+  assert.deepEqual(s.blocksMs.map((ms) => ms / MIN), [45, 20, 3, 0.5],
+    "the rank plot draws left to right, so the model hands them over already ranked");
+  assert.equal(s.blocksMs.length, s.count);
+  assert.equal(s.blocksMs.reduce((a, b) => a + b, 0), s.totalMs, "the ranked list is the whole distribution, not a sample");
+});
+
+test("freeBlockStats should count blocks under 5m as fragments", () => {
+  blockCursor = 0;
+  const s = freeBlockStats([block(0.5), block(2), block(10), block(60)]);
+  assert.equal(s.fragCount, 2, "the half-minute and the two-minute gaps");
+  assert.equal(s.fragMs, 2.5 * MIN);
+  assert.equal(FREE_BLOCK_FRAG_MS, 5 * MIN);
+});
+
+test("freeBlockStats should treat a block exactly on the 5m fragment ceiling as real free time", () => {
+  blockCursor = 0;
+  const s = freeBlockStats([block(5)]);
+  assert.equal(s.fragCount, 0, "5m is the ceiling the fragments sit BELOW, matching the bucket edges");
+  assert.equal(s.fragMs, 0);
+});
+
+test("freeBlockStats should report no fragments for a day that came back whole", () => {
+  blockCursor = 0;
+  const s = freeBlockStats([block(45), block(30)]);
+  assert.equal(s.fragCount, 0);
+  assert.equal(s.fragMs, 0);
+  assert.equal(s.deepFrac, 1);
 });
 
 test("freeBlockStats should report the median rather than let one long block speak for the day", () => {
