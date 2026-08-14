@@ -698,6 +698,7 @@ function renderProjectsSkeleton() {
       + `<span class="proj-name ghost-text"></span>`
       + `<span class="proj-track"><span class="ghost-fill" style="width:${(GHOST_WIDTHS[i] * 100).toFixed(0)}%"></span></span>`
       + `<span class="proj-hours ghost-text"></span>`
+      + `<span class="proj-cost ghost-text"></span>`
       + `</div>`;
   }
   el.projects.innerHTML = html;
@@ -2902,6 +2903,7 @@ function renderProjectsChart(data) {
         segs[j].style.width = widthPct(part.ms);
       });
       row.querySelector(".proj-hours").textContent = humanDurationCoarseMs(entry.ms);
+      row.querySelector(".proj-cost").textContent = entry.costUsd == null ? "—" : fmtUSD(entry.costUsd);
     });
     return;
   }
@@ -2911,10 +2913,15 @@ function renderProjectsChart(data) {
     const row = document.createElement("div");
     row.className = "proj-row";
     row.style.setProperty("--row-i", String(i)); // stagger key for the grow-in
+    // two figures close the row: what it took (time) and what it cost (dollars),
+    // in their own columns so each reads down the list as a column of like
+    // things. A project whose provider reports no cost holds the column with a
+    // dash rather than collapsing it — the ranking must stay a grid.
     row.innerHTML =
         `<span class="proj-name">${escapeHTML(entry.project)}</span>`
       + `<span class="proj-track"></span>`
-      + `<span class="proj-hours">${escapeHTML(humanDurationCoarseMs(entry.ms))}</span>`;
+      + `<span class="proj-hours">${escapeHTML(humanDurationCoarseMs(entry.ms))}</span>`
+      + `<span class="proj-cost">${entry.costUsd == null ? "—" : escapeHTML(fmtUSD(entry.costUsd))}</span>`;
     // one segment per session, in the model's lane-start (temporal) order; the
     // hover readouts read seg._part / row._entry (not closed-over values) so an
     // in-place update shows refreshed figures without re-wiring listeners.
@@ -2930,6 +2937,16 @@ function renderProjectsChart(data) {
         showTip(projectSegTipHTML(row._entry, seg._part), ev);
       });
       seg.addEventListener("mouseleave", hideTip);
+      // a segment IS a session, so it pins the same card its bar does in the
+      // sessions view — the ranking is a way into the day's work, not a dead
+      // end you have to go back and find the session for. Built at click time
+      // so a summary that lands later needs no repaint.
+      seg.addEventListener("click", (ev) => {
+        const lane = laneBySessionId(seg._part && seg._part.sessionId);
+        if (!lane) return;
+        ev.stopPropagation();
+        pinPopout(sessionPopoutHTML(lane), ev);
+      });
       track.appendChild(seg);
     });
     row._entry = entry;
@@ -2940,21 +2957,75 @@ function renderProjectsChart(data) {
   lastProjectKeys = keys;
 }
 
-// projectTipHTML: hover readout for one project row — the exact (to-the-second)
-// duration the coarse row label rounds away, plus the session count behind it.
-function projectTipHTML(entry) {
-  const n = entry.sessions || 0;
-  return `<div class="t-status" style="color:var(--c-working)">${escapeHTML(entry.project)}</div>`
-    + `<div class="t-row">${humanDurationMs(entry.ms)} of agent time</div>`
-    + `<div class="t-row">${n} session${n === 1 ? "" : "s"}</div>`;
+// laneBySessionId finds the lane behind a project segment. The ranking carries
+// only the bare session id (model.js keeps lane objects out of it), and the
+// popout wants the whole lane, so the lookup happens here against the data the
+// view was drawn from. Null when the lane is gone — a click on a stale segment
+// does nothing rather than pinning an empty card.
+function laneBySessionId(id) {
+  if (!id || !lastData) return null;
+  return (lastData.lanes || []).find((lane) => rawSessionId(lane) === id) || null;
 }
 
-// projectSegTipHTML: hover readout for one session's segment of the stack —
-// the session's name and share, framed against its project's total.
+// projectTipHTML: hover readout for one project row — the exact (to-the-second)
+// duration the coarse row label rounds away, the spend, and then WHAT THE DAY
+// ACTUALLY WAS: each contributing session named, with the digest's one-line
+// description of what it did. A ranking that can only say "sspi: 2h 24m" makes
+// you go and look the day up somewhere else; this row already knows.
+const PROJECT_TIP_SESSIONS = 4; // beyond this the hover is a table, not a glance
+
+function projectTipHTML(entry) {
+  const n = entry.sessions || 0;
+  const cells = [["agent time", humanDurationCoarseMs(entry.ms)], ["sessions", String(n)]];
+  if (entry.costUsd != null) cells.push(["cost", fmtUSD(entry.costUsd)]);
+
+  // longest first: on a hover you want the sessions that made the bar, and the
+  // parts are stored in temporal order for the STACK, not for reading.
+  const byLength = entry.parts.slice().sort((a, b) => b.ms - a.ms);
+  const shown = byLength.slice(0, PROJECT_TIP_SESSIONS);
+  const rest = byLength.slice(PROJECT_TIP_SESSIONS);
+  let list = "";
+  for (const part of shown) {
+    const sum = part.sessionId ? lastSummaries[part.sessionId] : null;
+    list += `<div class="t-histrow"><span>${escapeHTML(humanDurationCoarseMs(part.ms))}</span> `
+      + `${escapeHTML(part.label)}</div>`;
+    if (sum && sum.description) {
+      list += `<div class="t-subdesc">${escapeHTML(sum.description)}</div>`;
+    }
+  }
+  if (rest.length) {
+    const restMs = rest.reduce((a, p) => a + p.ms, 0);
+    list += `<div class="t-histrow dim"><span>${escapeHTML(humanDurationCoarseMs(restMs))}</span> `
+      + `+${rest.length} more session${rest.length === 1 ? "" : "s"}</div>`;
+  }
+
+  return `<div class="t-status" style="color:var(--c-working)">${escapeHTML(entry.project)}</div>`
+    + `<div class="t-row">${humanDurationMs(entry.ms)} of agent time</div>`
+    + railHTML(cells)
+    + (list ? `<div class="t-hist">sessions</div>` + list : "");
+}
+
+// projectSegTipHTML: hover readout for one session's segment of the stack. Same
+// four blocks as the sessions view's glance — name, span, what it did, figures
+// — because a segment IS a session, and the two surfaces answering the same
+// question differently is how a dashboard stops being trusted. The click
+// affordance is honest: pinning needs the lane, which is only there while the
+// window that drew the segment is still loaded.
 function projectSegTipHTML(entry, part) {
-  return `<div class="t-status" style="color:var(--c-working)">${escapeHTML(part.label)}</div>`
-    + `<div class="t-row">${humanDurationMs(part.ms)} of agent time</div>`
-    + `<div class="t-row">${escapeHTML(entry.project)} · ${humanDurationCoarseMs(entry.ms)} total</div>`;
+  const sum = part.sessionId ? lastSummaries[part.sessionId] : null;
+  const tokens = tokenTotals(sum && sum.tokens);
+
+  const cells = [["agent time", humanDurationCoarseMs(part.ms)]];
+  if (part.costUsd != null) cells.push(["cost", fmtUSD(part.costUsd)]);
+  if (tokens) cells.push(["tokens out", fmtTokens(tokens.output)]);
+
+  return `<div class="t-name">${escapeHTML((sum && sum.name) || part.label)}</div>`
+    + `<div class="t-headline"><span class="t-dur">${humanDurationMs(part.ms)}</span>`
+    + `<span class="t-span">${escapeHTML(entry.project)} · ${humanDurationCoarseMs(entry.ms)} total</span></div>`
+    + (sum && sum.description ? `<div class="t-desc">${escapeHTML(sum.description)}</div>` : "")
+    + railHTML(cells)
+    + (laneBySessionId(part.sessionId)
+        ? `<div class="t-more">${escapeHTML(summaryHintText(sum))}</div>` : "");
 }
 
 // ---------------------------------------------------------------------------

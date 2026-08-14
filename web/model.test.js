@@ -659,10 +659,10 @@ test("projectHoursMs parts break the total down per session in lane-start order"
     { project: "sb", start: at(0), names: [span("alpha", 0, 10)], intervals: [interval("working", ms(0), ms(10)), interval("working", ms(5), ms(10))] },
   ];
   assert.deepEqual(projectHoursMs(lanes), [{
-    project: "sb", ms: 25 * MIN, sessions: 2,
+    project: "sb", ms: 25 * MIN, sessions: 2, costUsd: null,
     parts: [
-      { label: "alpha", ms: 15 * MIN, startMs: ms(0) },
-      { label: "beta", ms: 10 * MIN, startMs: ms(20) },
+      { label: "alpha", ms: 15 * MIN, startMs: ms(0), costUsd: null, sessionId: null },
+      { label: "beta", ms: 10 * MIN, startMs: ms(20), costUsd: null, sessionId: null },
     ],
   }]);
 });
@@ -693,9 +693,60 @@ test("projectHoursMs parts with unparseable lane starts sort last with null star
     { project: "sb", start: at(30), names: [span("dated", 30, 40)], intervals: [interval("working", ms(30), ms(40))] },
   ];
   assert.deepEqual(projectHoursMs(lanes)[0].parts, [
-    { label: "dated", ms: 10 * MIN, startMs: ms(30) },
-    { label: "undated", ms: 10 * MIN, startMs: null },
+    { label: "dated", ms: 10 * MIN, startMs: ms(30), costUsd: null, sessionId: null },
+    { label: "undated", ms: 10 * MIN, startMs: null, costUsd: null, sessionId: null },
   ]);
+});
+
+test("projectHoursMs sums cost over the lanes that contributed the time", () => {
+  const lanes = [
+    { project: "sb", start: at(0), cost_usd: 4.5, intervals: [interval("working", ms(0), ms(10))] },
+    { project: "sb", start: at(20), cost_usd: 1.25, intervals: [interval("working", ms(20), ms(30))] },
+  ];
+  const row = projectHoursMs(lanes)[0];
+  assert.equal(row.costUsd, 5.75);
+  assert.deepEqual(row.parts.map((p) => p.costUsd), [4.5, 1.25]);
+});
+
+test("projectHoursMs reports costUsd null when no contributing lane recorded a cost", () => {
+  // "not recorded" must not render as "$0.00 spent" — a provider that omits
+  // cost is silent, not free.
+  const lanes = [{ project: "sb", start: at(0), intervals: [interval("working", ms(0), ms(10))] }];
+  assert.equal(projectHoursMs(lanes)[0].costUsd, null);
+});
+
+test("projectHoursMs cost counts only lanes that contributed work", () => {
+  // the row exists because of the working lane; a lane that did nothing is not
+  // a part of the stack, so its spend is not in the row's total either — the
+  // total always equals the sum of the parts drawn under it.
+  const lanes = [
+    { project: "sb", start: at(0), cost_usd: 2, intervals: [interval("working", ms(0), ms(10))] },
+    { project: "sb", start: at(20), cost_usd: 99, intervals: [interval("idle", ms(20), ms(30))] },
+  ];
+  const row = projectHoursMs(lanes)[0];
+  assert.equal(row.costUsd, 2);
+  assert.equal(row.parts.length, 1);
+});
+
+test("projectHoursMs keeps a suspect lane's full cost while clipping its time", () => {
+  // the evidence bound is a claim about observed TIME; the tokens were bought
+  // either way, so the dollars are not clipped with the tail.
+  const lanes = [{
+    project: "sb", start: at(0), cost_usd: 3,
+    suspect: true, suspect_since: at(10),
+    intervals: [interval("working", ms(0), ms(60))],
+  }];
+  const row = projectHoursMs(lanes)[0];
+  assert.equal(row.ms, 10 * MIN, "time stops at the evidence bound");
+  assert.equal(row.costUsd, 3, "spend does not");
+});
+
+test("projectHoursMs parts carry the bare session id for joining to summaries", () => {
+  const lanes = [
+    { project: "sb", start: at(0), provider: "claude", session_id: "claude:abc", intervals: [interval("working", ms(0), ms(10))] },
+    { project: "sb", start: at(20), session_id: "plain-id", intervals: [interval("working", ms(20), ms(30))] },
+  ];
+  assert.deepEqual(projectHoursMs(lanes)[0].parts.map((p) => p.sessionId), ["abc", "plain-id"]);
 });
 
 // ---------------------------------------------------------------------------

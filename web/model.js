@@ -417,8 +417,8 @@
   }
 
   // projectHoursMs totals AGENT-TIME per project:
-  //   [{project, ms, sessions, parts}] sorted by ms descending, ties broken by
-  //   project name ascending.
+  //   [{project, ms, sessions, costUsd, parts}] sorted by ms descending, ties
+  //   broken by project name ascending.
   //
   // A lane's contribution is the sum of its 'working' interval durations plus the
   // sum of its subagent span durations — the same aloft spans workIntervalsMs
@@ -430,9 +430,21 @@
   // this chart is meant to show.
   //
   // parts breaks the total down per contributing SESSION for stacked rendering:
-  // [{label, ms, startMs}] ordered by lane start (roughly temporal; unparseable
-  // starts carry startMs null and sort last, ties by label). label comes from
-  // sessionPartLabel above; sessions === parts.length.
+  // [{label, ms, startMs, costUsd, sessionId}] ordered by lane start (roughly
+  // temporal; unparseable starts carry startMs null and sort last, ties by
+  // label). label comes from sessionPartLabel above; sessions === parts.length.
+  // sessionId is rawSessionId — the join key for /api/summaries, so a renderer
+  // can hang "what this session actually did" off a bar segment without being
+  // handed the lane.
+  //
+  // costUsd is the project's dollar spend: Σ lane.cost_usd over the SAME lanes
+  // that contributed the time, so the row's total always equals the sum of its
+  // parts. Null (not 0) when no contributing lane reported a cost at all —
+  // "not recorded" and "free" are different claims, and a provider that omits
+  // cost must not be shown spending nothing. Unlike the time it sits next to,
+  // cost is NOT clipped at a suspect lane's evidence bound: the tokens were
+  // really bought whether or not the tail that spent them was ever observed
+  // closing.
   //
   // Grouping is by project_full (the pretty name) else project else "(no
   // project)" — deliberately NOT leadLabel, whose labels[] fallback would leak
@@ -457,14 +469,21 @@
       if (laneMs <= 0) continue;
       const project = lane.project_full || lane.project || "(no project)";
       const start = Date.parse(lane.start);
-      const acc = totals.get(project) || { ms: 0, parts: [] };
+      const cost = Number.isFinite(lane.cost_usd) ? lane.cost_usd : null;
+      const acc = totals.get(project) || { ms: 0, cost: 0, hasCost: false, parts: [] };
       acc.ms += laneMs;
-      acc.parts.push({ label: sessionPartLabel(lane), ms: laneMs, startMs: isFinite(start) ? start : null });
+      if (cost != null) { acc.cost += cost; acc.hasCost = true; }
+      acc.parts.push({
+        label: sessionPartLabel(lane), ms: laneMs,
+        startMs: isFinite(start) ? start : null,
+        costUsd: cost, sessionId: rawSessionId(lane),
+      });
       totals.set(project, acc);
     }
     return [...totals]
       .map(([project, acc]) => ({
         project, ms: acc.ms, sessions: acc.parts.length,
+        costUsd: acc.hasCost ? acc.cost : null,
         parts: acc.parts.sort((a, b) => {
           const as = a.startMs == null ? Infinity : a.startMs;
           const bs = b.startMs == null ? Infinity : b.startMs;

@@ -437,7 +437,11 @@ main { padding: 16px 18px 36px; }
 .projects { flex-direction: column; gap: 6px; padding: 12px 16px; width: 100%; }
 .proj-row {
   display: grid;
-  grid-template-columns: minmax(120px, 220px) 1fr max-content;
+  /* name · bar · duration · cost. The two figures are separate tracks so each
+     reads DOWN the list as a column of like things; the duration column is
+     given a floor so the cost column lands on one edge whether a project ran
+     for 31m or 7h 25m. */
+  grid-template-columns: minmax(120px, 220px) 1fr minmax(58px, max-content) minmax(66px, max-content);
   align-items: center; gap: 12px;
   padding: 3px 6px; border-radius: 6px;
 }
@@ -455,10 +459,20 @@ main { padding: 16px 18px 36px; }
   flex: none; display: block; height: 100%; border-radius: 1px; min-width: 2px;
   background: var(--c-working); opacity: 0.85;
   transition: width 0.35s cubic-bezier(0.25, 1, 0.35, 1);
+  cursor: pointer; /* a segment is a session: click pins its card */
 }
 /* alternate depth so same-hue neighbors stay distinguishable past the 2px gap */
 .proj-seg:nth-child(even) { opacity: 0.55; }
-.proj-hours { font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--fg); }
+.proj-hours { font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--fg); text-align: right; }
+/* cost sits apart from the duration — a wide gutter and a dimmer weight, so the
+   pair reads as "how long, and separately, how much" rather than as one run-on
+   figure. Tabular figures keep the decimal points in a line. */
+.proj-cost {
+  font-family: var(--mono); font-size: 12px; font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-muted); text-align: right; padding-left: 18px;
+}
+.proj-row:hover .proj-cost { color: var(--fg); }
 
 /* entry animation: app.js stamps .enter on the container when the view is
    opened and strips it once the run finishes, so bars grow in on arrival while
@@ -737,8 +751,15 @@ main { padding: 16px 18px 36px; }
 .tooltip .t-headline .t-dur {
   font-family: var(--mono); font-size: 16px; font-weight: 700; color: var(--fg);
   letter-spacing: -0.4px; line-height: 1;
+  /* the headline figure never breaks: a long right-hand span (the project
+     context on a project segment) must squeeze itself, not split "13m 3s" */
+  white-space: nowrap;
 }
-.tooltip .t-span { font-family: var(--mono); font-size: 11px; color: var(--fg-dim); white-space: nowrap; }
+.tooltip .t-span {
+  font-family: var(--mono); font-size: 11px; color: var(--fg-dim); white-space: nowrap;
+  /* it yields to the duration when the two cannot both fit */
+  min-width: 0; overflow: hidden; text-overflow: ellipsis;
+}
 /* the digest one-liner: body copy, clamped — a hover is not where you read four
    sentences, and an unclamped description used to set the tooltip's whole height */
 .tooltip .t-desc {
@@ -793,6 +814,15 @@ main { padding: 16px 18px 36px; }
 .tooltip .t-histrow { color: var(--fg-muted); font-family: var(--mono); font-size: 11px; margin-top: 2px; }
 .tooltip .t-histrow > span { color: var(--fg-dim); margin-right: 6px; }
 .tooltip .t-histrow .lead { color: var(--fg-dim); font-style: italic; }
+.tooltip .t-histrow.dim { color: var(--fg-dim); }
+/* the digest one-liner under a session row in a LIST of sessions (the project
+   hover): indented to the row it belongs to, clamped to one line so four
+   sessions stay a glance. Prose, not mono — it is a sentence, not a figure. */
+.tooltip .t-subdesc {
+  color: var(--fg-muted); font-size: 11px; line-height: 1.4;
+  margin: 1px 0 5px 12px;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+}
 
 /* ---------- popout (pinned subagent) ---------- */
 /* a six-bullet session card can outgrow the viewport, so the card caps its
