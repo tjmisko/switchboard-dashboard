@@ -3644,12 +3644,9 @@ function renderAttentionCard(summary, op) {
 
   // tip() → escaped formula-descriptor HTML for a data-tip attribute.
   const tip = (obj) => escapeHTML(formulaTipHTML(obj));
-  // row() builds a .kv with a hover descriptor on the whole row (larger hit target).
-  const row = (label, valHTML, tipObj, cls = "") =>
-    `<div class="kv ${cls} has-tip" data-tip="${tip(tipObj)}"><span class="k">${label}</span><span class="v">${valHTML}</span></div>`;
 
   const effTip = tip({
-    title: "delegation effectiveness",
+    title: "Delegation effectiveness",
     formula: "delegated ÷ (delegated + attended + prompt)",
     substitution: da == null && aa == null && pa == null ? null
       : `${humanDuration(da || 0)} ÷ (${humanDuration(da || 0)} + ${humanDuration(aa || 0)} + ${humanDuration(pa || 0)})`,
@@ -3681,10 +3678,6 @@ function renderAttentionCard(summary, op) {
     why: `Time absorbed re-acquiring context after switches while agents ran. Switch bursts merge into one recovery window rather than costing ${recovStr} apiece.`,
     color: "var(--c-permission)",
   });
-
-  // parallelism factor: agent-hours ÷ wall-clock-active ≈ average simultaneous agents
-  const union = summary.attention_union, perSession = summary.attention_per_session;
-  const parallel = union && perSession && union > 0 ? perSession / union : null;
 
   const wallBlock = wallSplitHTML(op);
   const shapeBlock = freeShapeHTML(op);
@@ -3721,17 +3714,6 @@ function renderAttentionCard(summary, op) {
     ${wallBlock}
 
     ${shapeBlock}
-
-    <div class="kv-sep"></div>
-    <div class="kv-list">
-      ${row(`agent-hours <span class="dim">· parallel work</span>`, `${humanDuration(perSession)}${parallel ? ` <span class="dim">${parallel.toFixed(1)}×</span>` : ""}`, {
-        title: "agent-hours",
-        formula: "Σ per-session active time · ×N = agent-hours ÷ active",
-        substitution: parallel ? `${humanDuration(perSession)} ÷ ${humanDuration(union)} = ${parallel.toFixed(1)}×` : null,
-        result: humanDuration(perSession),
-        why: "Total active agent-time counting parallel sessions separately; ×N is average parallelism (agent-hours ÷ active).",
-      }, "deemph")}
-    </div>
     ${suspectNoteHTML(summary)}`;
 
   attachFormulaTips(el.cardAttention);
