@@ -1226,6 +1226,7 @@ function toggleControl(input, owningView) {
 //   Shift+C           toggle context switches (swimlanes)
 //   Shift+F           toggle the focus overlay (swimlanes)
 //   + / -             step the horizontal scale (the views with a time axis)
+//   ← / →             pan the time window when the plot scrolls horizontally
 //
 // Tab's focus walk is overridden because the three views ARE this page's
 // windows. Alt and Meta chords are left alone wholesale — those are the window
@@ -1284,6 +1285,22 @@ function handleShortcutKey(ev) {
     } else if (geo.canZoomIn) {
       setZoom(geo.effective * ZOOM_FACTOR);
     }
+    return;
+  }
+
+  // ← / → pan the time window when the plot has outgrown its viewport — the
+  // zoomed-in state of the two time views. A fifth of the visible band per
+  // press: shallow enough to stay oriented, and key repeat makes a held arrow
+  // traverse the day quickly. With nothing to scroll (the window fits, or the
+  // time-less projects ranking) the keys are left to the browser, so this
+  // never shadows a scroll the page itself could want.
+  if (key === "ArrowLeft" || key === "ArrowRight") {
+    if (currentView === "projects") return;
+    const wrap = el.wrap;
+    if (wrap.scrollWidth <= wrap.clientWidth) return;
+    ev.preventDefault();
+    const dx = Math.max(40, wrap.clientWidth * 0.2);
+    wrap.scrollLeft += key === "ArrowLeft" ? -dx : dx;
   }
 }
 
