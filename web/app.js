@@ -3750,8 +3750,13 @@ function renderAttentionCard(summary, op) {
 // TIME rather than an index, which is what makes the reading direct — the
 // horizontal reach of the blocks left of the ≥15m rule *is* the deep-work share,
 // so the figure beside the plot and the shape of the plot are the same fact told
-// twice. Heights fall with length, so the day's decay is its silhouette: a few
-// tall slabs, then a fringe.
+// twice.
+//
+// AREA IS TIME, and only width is allowed to carry it. Height is constant, which
+// looks like a missed opportunity for a decay curve and is not: scaling height by
+// length too would make every area ∝ time², drawing the longest block at forty
+// times the ink of one a sixth its length. The eye reads area whether or not you
+// meant it to, so the one quantity this plot is about gets exactly one channel.
 //
 // The fringe gets a bracket rather than a colour. Blocks under 5m are not free
 // time you could spend, they are the gaps between interruptions, and the bracket
@@ -3785,11 +3790,14 @@ function freeShapeHTML(op) {
   const pctOfTime = (ms) => (s.totalMs > 0 ? (ms / s.totalMs) * 100 : 0);
 
   // Widths carry TIME, so the bars laid end to end are the whole free-time
-  // total and any run of them is its share of it. Slivers are floored — a
-  // 40-second block is 0.02% of a six-hour day and would not survive rounding —
-  // and the whole row is then rescaled so it still adds to exactly 100%.
-  // Without that renormalisation a shredded day's floors would sum past the
-  // track and quietly push the tail off the end of the plot.
+  // total and any run of them is its share of it.
+  //
+  // Slivers are floored — a 40-second block is 0.02% of a six-hour day and would
+  // not survive rounding — and the whole row is then rescaled so it still adds to
+  // exactly 100%. Without that renormalisation a shredded day's floors would sum
+  // past the track and quietly push the tail off the end of the plot. The floor
+  // is the one place this plot is not area-true, and it errs toward showing the
+  // fringe rather than hiding it, which is the direction that does not flatter.
   const blocks = s.blocksMs;
   const rawW = blocks.map((ms) => Math.max(FREE_BLOCK_MIN_W, pctOfTime(ms)));
   const norm = 100 / rawW.reduce((a, b) => a + b, 0);
@@ -3798,10 +3806,12 @@ function freeShapeHTML(op) {
   let acc = 0;
   for (const w of widths) { lefts.push(acc); acc += w; }
 
-  // Heights carry length against the day's best block, so the silhouette is the
-  // decay. Floored too, for the same reason and to keep the fringe a comb rather
-  // than a smear.
-  const heights = blocks.map((ms) => Math.max(7, (ms / s.longestMs) * 100));
+  // Heights are CONSTANT, and that is load-bearing rather than lazy: width is
+  // already carrying time, so area = width × height ∝ time only while height is
+  // held. An earlier draft scaled height by length as well, which read nicely as
+  // a decay curve and made every area ∝ time² — the longest block drew forty
+  // times the ink of a block a sixth its length, and the plot lied in the
+  // direction that flatters the day. One encoding per quantity.
 
   // Where the usable time stops. Because the blocks are ranked, every block ≥15m
   // precedes every block below it, so this boundary is a single edge and the
@@ -3824,7 +3834,7 @@ function freeShapeHTML(op) {
     const frag = ms < FREE_BLOCK_FRAG_MS;
     const deep = ms >= FREE_BLOCK_DEEP_MS;
     const cls = "fb-b" + (frag ? " frag" : deep ? " deep" : "");
-    const style = `width:${widths[i].toFixed(3)}%;height:${heights[i].toFixed(1)}%`;
+    const style = `width:${widths[i].toFixed(3)}%`;
     if (widths[i] < TIPPABLE_W) return `<span class="${cls}" style="${style}"></span>`;
     const t = tip({
       title: `block ${i + 1} of ${s.count}`,

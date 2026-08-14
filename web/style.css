@@ -777,17 +777,17 @@ body.view-projects .boxes { grid-template-columns: minmax(0, 2.15fr) minmax(0, 0
 .fs-plot { flex: 1 1 auto; min-width: 0; }
 
 .fb { position: relative; }
-/* baseline-aligned, because the bars stand on the axis and hang their heights
-   off it; a 1px rule under the row is what makes it an axis rather than a set of
-   floating slabs. */
+/* The row is one partitioned strip, not a set of columns: every bar is full
+   height, so the ONLY thing varying is width, and width is time. The band is
+   tall enough that a hairline sliver still reads as a block. */
 .fb-bars {
   position: relative;
-  display: flex; align-items: flex-end;
-  height: 62px;
+  display: flex; align-items: stretch;
+  height: 44px;
   border-bottom: 1px solid var(--border-soft);
 }
 .fb-b {
-  flex: none; align-self: flex-end;
+  flex: none;
   min-width: 1px;
   border-radius: 2px 2px 0 0;
   background: var(--c-working);
@@ -795,7 +795,7 @@ body.view-projects .boxes { grid-template-columns: minmax(0, 2.15fr) minmax(0, 0
      into sixty blocks rather than one green wash; box-shadow rather than a gap
      or a margin so it never steals from the width, which is carrying time. */
   box-shadow: inset -1px 0 0 var(--bg-elev);
-  transition: height 0.35s cubic-bezier(0.25, 1, 0.35, 1);
+  transition: width 0.35s cubic-bezier(0.25, 1, 0.35, 1);
 }
 .fb-b.has-tip { cursor: help; }
 .fb-b:hover { filter: brightness(1.25); }
