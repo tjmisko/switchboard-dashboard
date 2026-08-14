@@ -150,6 +150,91 @@
     return waited / dur;
   }
 
+  // -------------------------------------------------------------------------
+  // deflicker
+  //
+  // A lane's status stream blips. An agent mid-run drops to `idle` for a second
+  // or two crossing a transition or handing off to a subagent, then goes
+  // straight back to running. On the swimlane that is an orange hairline through
+  // a green bar; everywhere downstream it is worse than cosmetic, because
+  // `idle` is not a RUNNING status, so a two-second blip SPLITS the running
+  // union — and free blocks are carved out of that union. One flicker turns an
+  // unbroken forty-minute stretch into two nineteen-minute ones, doubling the
+  // block count and moving time from the ≥15m column into the fringe.
+  //
+  // FLICKER_MS is the floor on a real pause. Under five seconds there is no
+  // circumstance in which the operator read the screen, decided, and reprompted;
+  // an idle that short is the state machine catching its breath, not the agent
+  // waiting on anyone. Above it we keep every idle exactly as reported, because
+  // that is a pause someone could have acted in.
+  const FLICKER_MS = 5000;
+
+  // Statuses that mean the agent is doing something. Kept here rather than
+  // imported from the renderer so this stays DOM-free and testable; it is the
+  // same set app.js gates the running union on.
+  const RUNNING_STATUSES = new Set(["working", "delegating", "dormant"]);
+
+  // deflickerIntervals absorbs sub-threshold `idle` blips that sit BETWEEN two
+  // running intervals, then merges the neighbours that are now adjacent and
+  // alike. Both conditions matter:
+  //
+  //   - only between two running intervals. A short idle at the head or tail of
+  //     a lane is not interrupting anything, and one next to a `permission` or
+  //     `suspended` stretch is part of a real stop, not a blip in a run.
+  //   - only `idle`. A one-second `permission` is a genuine event that happened
+  //     and was answered fast; erasing it would hide the thing the red is for.
+  //
+  // Returns a NEW array of {status, start, end} with RFC3339 strings, so it can
+  // stand in for lane.intervals anywhere. Unparseable intervals are passed
+  // through untouched rather than dropped — this is a smoothing pass, and it is
+  // not entitled to delete data it does not understand. Pure.
+  function deflickerIntervals(intervals, minMs) {
+    const src = intervals || [];
+    if (src.length < 3) return src.slice();
+    const floor = Number.isFinite(minMs) ? minMs : FLICKER_MS;
+
+    const ms = src.map((iv) => ({ s: Date.parse(iv.start), e: Date.parse(iv.end) }));
+    const usable = (i) => Number.isFinite(ms[i].s) && Number.isFinite(ms[i].e) && ms[i].e >= ms[i].s;
+
+    const out = [];
+    for (let i = 0; i < src.length; i++) {
+      const iv = src[i];
+      const blip = iv.status === "idle"
+        && i > 0 && i < src.length - 1
+        && usable(i) && usable(i - 1) && usable(i + 1)
+        && ms[i].e - ms[i].s < floor
+        && RUNNING_STATUSES.has(src[i - 1].status)
+        && RUNNING_STATUSES.has(src[i + 1].status);
+      if (!blip) { out.push({ status: iv.status, start: iv.start, end: iv.end }); continue; }
+      // absorbed into whatever ran before it: the agent never stopped, so the
+      // time belongs to the run it interrupted.
+      out[out.length - 1].end = iv.end;
+    }
+
+    // An absorbed blip usually leaves `working | working` back to back. Merging
+    // them is what actually restores the unbroken stretch — without this the
+    // union is repaired but the BAR is still drawn as two, and the two disagree.
+    const merged = [];
+    for (const iv of out) {
+      const prev = merged[merged.length - 1];
+      if (prev && prev.status === iv.status && prev.end === iv.start) { prev.end = iv.end; continue; }
+      merged.push(iv);
+    }
+    return merged;
+  }
+
+  // deflickerLanes maps deflickerIntervals over a lane list, leaving every other
+  // field alone. Applied once where the payload lands, so the swimlanes, the
+  // running union, the free blocks and every tooltip are all reading the same
+  // deflickered stream rather than each deciding for itself.
+  function deflickerLanes(lanes, minMs) {
+    return (lanes || []).map((lane) => {
+      if (!lane || !lane.intervals || lane.intervals.length < 3) return lane;
+      const intervals = deflickerIntervals(lane.intervals, minMs);
+      return intervals.length === lane.intervals.length ? lane : { ...lane, intervals };
+    });
+  }
+
   // presenceSplitMs tiles one [startMs, endMs] span against the operator's
   // presence: it returns ordered, contiguous pieces [{s, e, away}] covering the
   // whole span, where `away: true` marks the parts no presence interval covers.
@@ -1356,6 +1441,7 @@
     scaleGeometry,
     laneIdentity, rawSessionId, leadLabel, nameSegments, buildBar, buildBars,
     spanInefficiency, switchArrivals, presenceSplitMs, awayIdleMs,
+    deflickerIntervals, deflickerLanes, FLICKER_MS,
     packLanes, aloftSpans, workIntervalsMs, concurrencyProfile,
     alignLiveTail,
     projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs, suspectTailMs,

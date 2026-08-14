@@ -545,6 +545,18 @@ function settleTimeline(day, text, opts) {
   lastTimelineText = text;
   dataDay = day;
   lastData = JSON.parse(text);
+  // Smooth the status stream ONCE, here, before anything reads it. A sub-5s
+  // `idle` mid-run is the state machine catching its breath, not the agent
+  // waiting on anyone — but `idle` is not a running status, so left in place it
+  // splits the running union, and free blocks are carved out of that union. One
+  // blip turns an unbroken stretch into two and moves its time out of the ≥15m
+  // column into the fringe. Doing it at the payload rather than per-consumer is
+  // what keeps the bars, the union, the block count and every tooltip telling
+  // the same story. The flicker itself is a provider-side bug — switchboard#74,
+  // where half of one day's idle intervals were under 5s and carried 0.09% of
+  // its idle time — and this is the dashboard declining to repeat it. If that
+  // lands, this pass becomes a no-op rather than a disagreement.
+  if (lastData && lastData.lanes) lastData.lanes = deflickerLanes(lastData.lanes);
 
   // A window the user asked for earns the reveal. That is either because it
   // arrived after a skeleton (wasPending), or because it came straight out of

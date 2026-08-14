@@ -9,6 +9,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   laneIdentity, rawSessionId, leadLabel, nameSegments, buildBars, spanInefficiency, switchArrivals,
+  deflickerIntervals, deflickerLanes, FLICKER_MS,
   presenceSplitMs, awayIdleMs, packLanes,
   aloftSpans, workIntervalsMs, concurrencyProfile, alignLiveTail,
   projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs,
@@ -2182,4 +2183,92 @@ test("scaleGeometry should fall back to the plot width for an empty window", () 
   assert.equal(g.fit, 0);
   assert.equal(g.effective, 240, "with no window, the setting speaks for itself");
   assert.equal(g.atFit, false);
+});
+
+// ---------------------------------------------------------------------------
+// deflickerIntervals — the sub-5s orange that fragments an unbroken run
+// ---------------------------------------------------------------------------
+
+// iv(status, fromSec, toSec) → one interval, RFC3339, offset from a fixed base.
+const FLICK_BASE = Date.parse("2026-08-13T12:00:00.000Z");
+function iv(status, fromSec, toSec) {
+  return {
+    status,
+    start: new Date(FLICK_BASE + fromSec * 1000).toISOString(),
+    end: new Date(FLICK_BASE + toSec * 1000).toISOString(),
+  };
+}
+const spans = (list) => list.map((x) => [x.status, (Date.parse(x.end) - Date.parse(x.start)) / 1000]);
+
+test("deflickerIntervals should absorb a sub-5s idle between two running intervals", () => {
+  const out = deflickerIntervals([iv("working", 0, 600), iv("idle", 600, 602), iv("working", 602, 1800)]);
+  assert.deepEqual(spans(out), [["working", 1800]],
+    "a 2s blip never stopped the agent, so the run is one run");
+});
+
+test("deflickerIntervals should keep an idle at or over the 5s floor", () => {
+  const out = deflickerIntervals([iv("working", 0, 600), iv("idle", 600, 605), iv("working", 605, 1800)]);
+  assert.deepEqual(spans(out), [["working", 600], ["idle", 5], ["working", 1195]],
+    "5s is long enough to have read the screen and reprompted, so it stands");
+  assert.equal(FLICKER_MS, 5000);
+});
+
+test("deflickerIntervals should not absorb a blip that opens or closes a lane", () => {
+  const head = deflickerIntervals([iv("idle", 0, 2), iv("working", 2, 600), iv("working", 600, 900)]);
+  assert.equal(head[0].status, "idle", "nothing before it to be interrupting");
+  const tail = deflickerIntervals([iv("working", 0, 600), iv("working", 600, 900), iv("idle", 900, 902)]);
+  assert.equal(tail[tail.length - 1].status, "idle", "nor anything after it");
+});
+
+test("deflickerIntervals should leave a blip alone when a neighbour is not running", () => {
+  const out = deflickerIntervals([iv("permission", 0, 60), iv("idle", 60, 62), iv("working", 62, 600)]);
+  assert.deepEqual(spans(out), [["permission", 60], ["idle", 2], ["working", 538]],
+    "an idle beside a permission stop is part of the stop, not a blip in a run");
+});
+
+test("deflickerIntervals should not absorb a short permission, however brief", () => {
+  const out = deflickerIntervals([iv("working", 0, 600), iv("permission", 600, 601), iv("working", 601, 1200)]);
+  assert.deepEqual(spans(out), [["working", 600], ["permission", 1], ["working", 599]],
+    "a one-second permission is an event that happened and was answered fast");
+});
+
+test("deflickerIntervals should bridge a blip between two DIFFERENT running statuses", () => {
+  const out = deflickerIntervals([iv("working", 0, 600), iv("idle", 600, 601), iv("delegating", 601, 1200)]);
+  assert.deepEqual(spans(out), [["working", 601], ["delegating", 599]],
+    "the gap closes into the run that preceded it; both sides stay running");
+});
+
+test("deflickerIntervals should collapse a run broken by several blips into one", () => {
+  const out = deflickerIntervals([
+    iv("working", 0, 300), iv("idle", 300, 302), iv("working", 302, 600),
+    iv("idle", 600, 601), iv("working", 601, 1800),
+  ]);
+  assert.deepEqual(spans(out), [["working", 1800]],
+    "this is the case that was doubling the free-block count");
+});
+
+test("deflickerIntervals should pass through unparseable intervals rather than drop them", () => {
+  const junk = { status: "idle", start: "not-a-date", end: "also-not" };
+  const out = deflickerIntervals([iv("working", 0, 600), junk, iv("working", 600, 1200)]);
+  assert.equal(out.length, 3, "a smoothing pass may not delete data it cannot read");
+  assert.equal(out[1].start, "not-a-date");
+});
+
+test("deflickerIntervals should return short lists untouched", () => {
+  assert.deepEqual(deflickerIntervals([]), []);
+  assert.deepEqual(spans(deflickerIntervals([iv("idle", 0, 1), iv("working", 1, 60)])),
+    [["idle", 1], ["working", 59]], "two intervals cannot sandwich anything");
+});
+
+test("deflickerLanes should deflicker every lane and leave the rest of it alone", () => {
+  const lanes = [{
+    session_id: "s1", project: "p",
+    intervals: [iv("working", 0, 600), iv("idle", 600, 602), iv("working", 602, 1800)],
+  }];
+  const out = deflickerLanes(lanes);
+  assert.equal(out[0].session_id, "s1");
+  assert.equal(out[0].project, "p");
+  assert.deepEqual(spans(out[0].intervals), [["working", 1800]]);
+  assert.deepEqual(spans(lanes[0].intervals), [["working", 600], ["idle", 2], ["working", 1198]],
+    "the input is not mutated — the raw payload stays raw");
 });
