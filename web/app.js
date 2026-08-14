@@ -315,9 +315,9 @@ let planTimer = null;
 // ---------------------------------------------------------------------------
 // the window state machine
 //
-// The day used to live only in a hidden <input>, read by buildQuery() at fetch
-// time. That left no way to tell "the day you asked for" from "the day on
-// screen", so there was nothing to paint against while the request was out —
+// The day used to live only in a hidden <input>, read at fetch time. That left
+// no way to tell "the day you asked for" from "the day on screen", so there was
+// nothing to paint against while the request was out —
 // and a day switch showed NOTHING for the ~1.5s the provider subprocess takes
 // (measured; see docs/instant-day-switch.md — the render itself is ~22ms).
 //
@@ -335,15 +335,16 @@ let planTimer = null;
 const DAY_FETCH_DEBOUNCE_MS = 120; // held arrows coalesce to one request
 const PREFETCH_IDLE_MS = 400;      // let the settled day breathe before warming neighbors
 const DAY_CACHE_MAX = 12;          // closed-day payloads retained client-side
+const PREFETCH_DEPTH = 3;          // days warmed ahead of a scroll, in its direction
 
 const win = {
   seq: 0,          // monotonic request id; responses below this are superseded
   pending: false,  // committed to a day whose data has not arrived yet
 };
 let dataDay = null;        // the day lastData actually describes
-let inflight = null;       // AbortController for the timeline request in flight
 let dayFetchTimer = null;  // debounce handle for the committed day's fetch
 let prefetchTimer = null;
+let lastStepDir = -1;      // which way the user is walking; backward is the common case
 // Closed days are immutable enough to keep: revisiting one is then free — no
 // request at all, not merely a warm server cache. Today is never stored.
 const dayCache = new Map(); // ISO day -> raw response text (insertion-ordered LRU)
@@ -384,12 +385,6 @@ function syncSmoothLegend() {
 // data loading
 // ---------------------------------------------------------------------------
 
-function buildQuery() {
-  const params = new URLSearchParams();
-  if (el.day.value) params.set("day", el.day.value);
-  return params.toString();
-}
-
 // cacheableDay: a day that is over cannot change, so its payload is worth
 // keeping. Today is excluded — it is the live window the poll exists to watch.
 function cacheableDay(day) {
@@ -403,28 +398,98 @@ function rememberDay(day, text) {
   while (dayCache.size > DAY_CACHE_MAX) dayCache.delete(dayCache.keys().next().value);
 }
 
+// ---------------------------------------------------------------------------
+// the in-flight register
+//
+// dayCache answers "have we FINISHED fetching this day?", which is the wrong
+// question while a request is out — and it was the only question anything asked.
+// schedulePrefetch consulted it 400ms after a day settled and cheerfully
+// re-issued the very day the user's arrow key had already put in flight 280ms
+// earlier, so every cold hop through history cost TWO provider subprocesses,
+// which then competed with each other for the machine. The prefetcher built to
+// make scrolling fast was doubling the load during a scroll.
+//
+// So: one register of what is already being asked for, consulted by both paths.
+// ---------------------------------------------------------------------------
+
+const daysInFlight = new Map(); // ISO day -> { promise, ctl, speculative }
+
+// fetchDay is the ONE place a timeline request is issued, and it is deduplicated
+// by day: a day already in flight is JOINED, never asked for twice. That join is
+// what lets the user arrow onto a day the prefetcher is mid-way through and
+// ADOPT that work instead of racing it — the request does not restart, it simply
+// stops being speculative.
+function fetchDay(day, opts) {
+  const speculative = !!(opts && opts.speculative);
+  const open = daysInFlight.get(day);
+  if (open) {
+    if (!speculative) open.speculative = false; // adopted: someone is waiting now
+    return open.promise;
+  }
+  const entry = { ctl: new AbortController(), speculative, promise: null };
+  daysInFlight.set(day, entry);
+  entry.promise = fetch("/api/timeline?day=" + encodeURIComponent(day), {
+    cache: "no-store",
+    signal: entry.ctl.signal,
+  })
+    .then(async (res) => {
+      const text = await res.text();
+      // The body of a failed response carries the provider's stderr, which is
+      // the only useful thing to put in front of the user, so it rides along.
+      if (!res.ok) throw Object.assign(new Error("timeline " + res.status), { body: text });
+      return text;
+    })
+    .finally(() => { if (daysInFlight.get(day) === entry) daysInFlight.delete(day); });
+  return entry.promise;
+}
+
+// committedRequestOut reports whether anything someone is ACTUALLY WAITING ON is
+// in flight. A speculative request is not such work, so it must not hold the
+// live poll off — that is the difference the `speculative` flag exists to draw.
+function committedRequestOut() {
+  for (const entry of daysInFlight.values()) if (!entry.speculative) return true;
+  return false;
+}
+
+// abortStaleDays cancels work for every day but `keep`. A day change makes every
+// other request worthless — real or speculative — and leaving them running means
+// the subprocess the user IS waiting on competes with subprocesses nobody wants.
+// Holding the arrow key across five days used to leave an orphan prefetch for a
+// day already scrolled past running against the day actually wanted (measured:
+// a 450ms orphan alongside the 650ms request that mattered).
+//
+// `keep` is spared rather than restarted: that is the adoption case above.
+function abortStaleDays(keep) {
+  for (const [day, entry] of daysInFlight) {
+    if (day === keep) continue;
+    entry.ctl.abort();
+  }
+}
+
 // loadTimeline fetches the committed day and, if that day is still the one on
 // screen when the bytes land, settles it.
 //
 // Two guards make it safe to have several of these in flight, which a live poll
 // crossing a day switch guarantees:
-//   - a day change aborts whatever is in flight, so a superseded subprocess is
-//     not also competing for the machine;
+//   - a day change aborts every day but the one being switched to, so a
+//     superseded subprocess is not also competing for the machine — while a
+//     request already out for the incoming day is adopted rather than restarted;
 //   - the seq check drops any response that is no longer the current request,
 //     which is what stops an in-flight poll for the OLD day from repainting the
 //     chart under the NEW day's label.
 //
-// A POLL, though, must never abort anything. Aborting on every issue looks
+// A POLL, though, must never displace anything. Aborting on every issue looks
 // symmetrical and is a starvation bug: the fetch is ~1.4s against a 3s cadence
 // today, so one slow provider away, each poll would kill its predecessor at the
 // 3s mark and none would ever complete — the live view would freeze silently
-// with the dot still green. A poll that finds work in flight simply yields.
+// with the dot still green. A poll that finds committed work in flight yields.
 async function loadTimeline(opts) {
   const reason = (opts && opts.reason) || "poll";
   const day = el.day.value;
 
-  // A day we already hold settles with no network at all — this is what makes
-  // stepping back through history instant rather than merely animated.
+  // A day we already hold settles with no network at all. The keypress path
+  // checks this in commitWindow, ahead of the debounce; this is the backstop for
+  // the manual and initial paths, which do not go through a debounce at all.
   const cached = dayCache.get(day);
   if (cached !== undefined && reason !== "poll") {
     win.seq++;
@@ -432,26 +497,13 @@ async function loadTimeline(opts) {
     return;
   }
 
-  if (inflight) {
-    if (reason === "poll") return; // yield rather than displace live work
-    inflight.abort();
-  }
-  const seq = ++win.seq;
-  const ctl = new AbortController();
-  inflight = ctl;
+  if (reason === "poll" && committedRequestOut()) return; // yield to live work
+  if (reason !== "poll") abortStaleDays(day);
 
+  const seq = ++win.seq;
   try {
-    const res = await fetch("/api/timeline?" + buildQuery(), { cache: "no-store", signal: ctl.signal });
-    const text = await res.text();
+    const text = await fetchDay(day);
     if (seq !== win.seq) return; // superseded by a newer request
-    if (!res.ok) {
-      let msg = text;
-      try { const j = JSON.parse(text); msg = j.error + (j.stderr ? "\n" + j.stderr : ""); } catch (_) {}
-      showError(msg);
-      fetchOK = false;
-      failPendingWindow();
-      return;
-    }
     hideError();
     fetchOK = true;
     lastUpdatedAt = Date.now();
@@ -461,11 +513,13 @@ async function loadTimeline(opts) {
   } catch (e) {
     if (e && e.name === "AbortError") return; // a newer request owns the screen
     if (seq !== win.seq) return;
-    showError(String(e));
+    let msg = e && e.body !== undefined ? e.body : String(e);
+    if (e && e.body !== undefined) {
+      try { const j = JSON.parse(e.body); msg = j.error + (j.stderr ? "\n" + j.stderr : ""); } catch (_) {}
+    }
+    showError(msg);
     fetchOK = false;
     failPendingWindow();
-  } finally {
-    if (inflight === ctl) inflight = null;
   }
 }
 
@@ -480,12 +534,16 @@ function settleTimeline(day, text, opts) {
   dataDay = day;
   lastData = JSON.parse(text);
 
-  if (wasPending) {
-    // The window the user asked for has arrived: strike the skeleton and let
-    // the chart make its entrance. armChartEnter has to run BEFORE the render
-    // for the time views (they read the sweep's progress as they draw), and
-    // startProjectsEnter AFTER it (its CSS class needs the rows on the page) —
-    // the same order setView uses.
+  // A window the user asked for earns the reveal. That is either because it
+  // arrived after a skeleton (wasPending), or because it came straight out of
+  // the cache in the same frame as the keypress and so never needed one
+  // (opts.entering) — a day switch is a content change either way, and the
+  // sweep is bound to content identity, not to having waited.
+  if (wasPending || (opts && opts.entering)) {
+    // Strike the skeleton and let the chart make its entrance. armChartEnter has
+    // to run BEFORE the render for the time views (they read the sweep's
+    // progress as they draw), and startProjectsEnter AFTER it (its CSS class
+    // needs the rows on the page) — the same order setView uses.
     exitPendingWindow();
     armChartEnter(currentView);
     render(lastData);
@@ -514,9 +572,31 @@ function commitWindow(iso) {
   syncDayDisplay();
   hidePopout();
   hideTip();
+
+  // Everything the old day had queued is worthless now: its debounced fetch, the
+  // speculative walk out from it, and every request in flight EXCEPT one for the
+  // day we are moving to — that one is adopted, not restarted.
+  if (dayFetchTimer) { clearTimeout(dayFetchTimer); dayFetchTimer = null; }
+  if (prefetchTimer) { clearTimeout(prefetchTimer); prefetchTimer = null; }
+  abortStaleDays(iso);
+
+  // A day we already hold needs no request, so it must not wait behind the
+  // debounce — whose entire job is to coalesce requests it is not going to make.
+  // The cache read used to sit INSIDE the debounced callback, which meant every
+  // hop through already-loaded history paid 120ms to discover it had nothing to
+  // fetch: ~150-190ms per hop against a paint that costs 7-13ms. Here it lands
+  // in the same frame as the keypress, and the skeleton is skipped entirely —
+  // there is nothing to be pending about.
+  const held = dayCache.get(iso);
+  if (held !== undefined) {
+    win.seq++; // no request will answer for this day; supersede anything that would
+    schedulePoll();
+    settleTimeline(iso, held, { fromCache: true, entering: true });
+    return;
+  }
+
   enterPendingWindow();
   schedulePoll(); // the poll only exists for the live window; a past day is closed
-  if (dayFetchTimer) clearTimeout(dayFetchTimer);
   dayFetchTimer = setTimeout(() => {
     dayFetchTimer = null;
     loadTimeline({ reason: "day" });
@@ -737,23 +817,58 @@ async function pollTick() {
 // once the current day has settled and gone quiet, because a prefetch costs the
 // server the same ~1.5s subprocess as a real request — issued eagerly it would
 // slow down the switch it is supposed to accelerate.
-//
-// Only CLOSED neighbors are warmed: today is never cached at either end, so
-// prefetching it would burn a spawn for nothing.
 function schedulePrefetch(day) {
   if (prefetchTimer) clearTimeout(prefetchTimer);
   prefetchTimer = setTimeout(() => {
     prefetchTimer = null;
-    const neighbors = [shiftDay(day, -1), shiftDay(day, +1)];
-    for (const d of neighbors) {
-      if (d === day || !cacheableDay(d) || dayCache.has(d)) continue;
-      fetch("/api/timeline?day=" + encodeURIComponent(d), { cache: "no-store" })
-        .then((res) => (res.ok ? res.text() : null))
-        .then((text) => { if (text) rememberDay(d, text); })
-        .catch(() => { /* best-effort: a cold neighbor just costs the usual wait */ });
-      break; // one at a time — a prefetch must never queue behind another
-    }
+    prefetchFrom(day);
   }, PREFETCH_IDLE_MS);
+}
+
+// prefetchFrom warms ONE day, then chains to the next as soon as that one lands.
+//
+// Depth is what makes a scroll survive past its first hop. Warming a single
+// neighbour put the free cadence at PREFETCH_IDLE_MS + one subprocess — call it
+// 1.5-2s per day — against a keyboard repeat of ~30ms, so the first press was
+// instant and every press after it was cold. Walking ahead means the same total
+// work happens off the critical path, while the user is reading the day they
+// just landed on.
+//
+// The chain stays deliberately SERIAL. The point is to start earlier, not to fan
+// out: three speculative subprocesses running at once would be three things
+// fighting the one request the user is actually waiting on, which is the failure
+// this whole file is organised against.
+function prefetchFrom(origin) {
+  const day = nextPrefetchDay(origin);
+  if (!day) return;
+  fetchDay(day, { speculative: true })
+    .then((text) => { rememberDay(day, text); })
+    .catch(() => { /* best-effort: a cold day just costs the usual wait */ })
+    .then(() => {
+      // Keep walking only while the user is still parked where we set out from.
+      // If they have moved, commitWindow has already aborted this walk and
+      // scheduled the one that belongs to the new day.
+      if (el.day.value === origin) prefetchFrom(origin);
+    });
+}
+
+// nextPrefetchDay picks the nearest day we do not already hold, looking in the
+// direction the user is walking and then one day back the way they came — the
+// hop they are most likely to want after a wrong turn.
+//
+// Only CLOSED days are warmed: today is never cached, so prefetching it would
+// burn a spawn for nothing. Days already in flight are skipped, which is what
+// stops this from re-issuing the request the user's own keypress just made.
+function nextPrefetchDay(origin) {
+  const dir = lastStepDir < 0 ? -1 : 1;
+  const candidates = [];
+  for (let i = 1; i <= PREFETCH_DEPTH; i++) candidates.push(shiftDay(origin, i * dir));
+  candidates.push(shiftDay(origin, -dir));
+  for (const d of candidates) {
+    if (d === origin || !cacheableDay(d) || dayCache.has(d) || daysInFlight.has(d)) continue;
+    return d;
+  }
+  return null;
 }
 
 // loadSettings pulls the operator-model tunables over OP's fallbacks. Fetched
@@ -3988,6 +4103,9 @@ function reloadNow() { hidePopout(); loadTimeline({ reason: "manual" }); }
 function stepDay(delta) {
   const next = shiftDay(el.day.value, delta);
   if (next === el.day.value) return;
+  // A scroll has a direction, and it is knowable here — this is the only place
+  // it is expressed. The prefetcher walks the way the user is already walking.
+  lastStepDir = delta < 0 ? -1 : 1;
   commitWindow(next);
   if (calendarOpen()) { calCursor = el.day.value; renderCalendar(); focusCursorCell(); }
 }
