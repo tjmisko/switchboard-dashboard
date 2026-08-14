@@ -587,6 +587,7 @@ function renderSkeleton() {
 
 function renderSessionsSkeleton() {
   while (el.svg.childNodes.length > 1) el.svg.removeChild(el.svg.lastChild);
+  gutterLayer = null; // the frozen column went with them
   const n = ghostRowCount();
   const rowH = GEO.PAD_TOP + GEO.NAME_H + GEO.BAR_H + GEO.PAD_BOTTOM + GEO.GAP;
 
@@ -1029,15 +1030,28 @@ function render(data) {
 // view is time-less (a ranking, not a timeline). Called from render() and from
 // every repaint trigger (zoom, resize, theme, view/toggle change).
 //
-// The scroll position is deliberately left alone. Zoomed in far enough that the
-// plot outgrows its wrap, the trailing edge — and with it the live-tail readout
-// — sits off-screen until you scroll to it, exactly like the newest bars in the
-// sessions view. Parking the scroll at "now" instead would take the y-axis and
-// the lane labels off the other side, which is a worse trade.
+// The scroll position used to be left alone on the argument that parking at
+// "now" would take the y-axis and the lane labels off the other side. Both are
+// frozen columns now, so that trade is gone: a window newly framed anchors
+// itself (anchorWindowScroll), and a viewport already parked on the live edge
+// STAYS there as the day grows under it — measured here, before the repaint
+// widens the plot, because afterwards there is no way to tell "was following"
+// from "happens to be near the end".
+const LIVE_FOLLOW_SLOP_PX = 4;
 function renderChartArea(data) {
+  const wrap = el.wrap;
+  const wasFollowingLive = isLiveWindow()
+    && wrap.scrollWidth - wrap.clientWidth > 0
+    && wrap.scrollLeft >= wrap.scrollWidth - wrap.clientWidth - LIVE_FOLLOW_SLOP_PX;
+
   if (currentView === "line") renderConcurrencyChart(data);
   else if (currentView === "projects") renderProjectsChart(data);
   else renderTimeline(data);
+
+  if (wasFollowingLive) {
+    wrap.scrollLeft = Math.max(0, wrap.scrollWidth - wrap.clientWidth);
+    syncGutterFreeze();
+  }
   // the fit floor moves with the window, the view and the container, so the
   // scale readout is only true once the render that measured it has run.
   updateZoomReadout();
@@ -1515,6 +1529,80 @@ function svgEl(name, attrs) {
   return e;
 }
 
+// ---- measured text -------------------------------------------------------
+// The gutter is a fixed 232px shared by a label on the left and a figure on the
+// right, so "how wide is this string" is a layout question, not a guess: a
+// per-character estimate that runs one character long puts a project name
+// through its own duration. getComputedTextLength is exact but only answers for
+// an element already in the document, and these strings are re-measured on
+// every ~3s repaint — so measure against an offscreen 2D context using the same
+// font stack instead, and memoize. Canvas has no letter-spacing, so the styles
+// that set one add it back per character.
+const textMeasureCtx = document.createElement("canvas").getContext("2d");
+const textWidthCache = new Map();
+function textWidth(str, style) {
+  if (!str) return 0;
+  const { size = 12, weight = 400, spacing = 0 } = style || {};
+  const key = size + "/" + weight + "/" + spacing + "/" + str;
+  let w = textWidthCache.get(key);
+  if (w === undefined) {
+    textMeasureCtx.font = `${weight} ${size}px ${MONO}`;
+    w = textMeasureCtx.measureText(str).width + spacing * str.length;
+    if (textWidthCache.size > 4000) textWidthCache.clear(); // a day's worth of labels, then start over
+    textWidthCache.set(key, w);
+  }
+  return w;
+}
+
+// fitText ellipsizes to a PIXEL budget (binary search over the measured width).
+// Returns "" when not even one character plus the ellipsis fits, which callers
+// read as "there is no room for this at all".
+function fitText(str, maxPx, style) {
+  if (!str || maxPx <= 0) return "";
+  if (textWidth(str, style) <= maxPx) return str;
+  let lo = 0, hi = str.length;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (textWidth(str.slice(0, mid) + "…", style) <= maxPx) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo > 0 ? str.slice(0, lo) + "…" : "";
+}
+
+// the SVG type styles these two are asked about, kept next to the CSS rules
+// they mirror (.group-label, .name-seg-label).
+const GROUP_LABEL_STYLE = { size: 12, weight: 700, spacing: 0.6 };
+const NAME_LABEL_STYLE = { size: 12.5, weight: 600, spacing: 0 };
+
+// ---- the frozen gutter ---------------------------------------------------
+// The plot scrolls horizontally, and the identity of every row lives in the
+// gutter — so scrolling to the afternoon used to take the answer to "which
+// project is this?" off the left edge with it. The gutter is now a LAYER: every
+// element left of GEO.GUTTER is collected here instead of going straight onto
+// the SVG, the layer is appended last (so it paints over bars sliding under it),
+// and a scroll translates it by exactly the distance the page moved — which
+// leaves it parked against the viewport's left edge, a sticky column in a
+// coordinate system that has no position:sticky.
+//
+// Nothing else lives there to fight over: the plot's x() clamps every bar to
+// x ≥ GEO.GUTTER, so the layer's opaque backing hides only what scrolled behind
+// it.
+let gutterLayer = null;
+function addGutter(node) { (gutterLayer || el.svg).appendChild(node); }
+
+// syncGutterFreeze parks the layer against the viewport's left edge. Called on
+// every scroll (a transform, not a repaint) and at the end of each render, so a
+// live repaint landing while scrolled doesn't drop the column back to 0.
+function syncGutterFreeze() {
+  if (!gutterLayer) return;
+  const dx = Math.max(0, el.wrap.scrollLeft);
+  gutterLayer.setAttribute("transform", dx ? `translate(${dx},0)` : "");
+  const shadow = gutterLayer.querySelector(".tl-gutter-shadow");
+  // the drop shadow is what says "this column is floating over the plot", so it
+  // only exists once there is something underneath it
+  if (shadow) shadow.setAttribute("opacity", dx > 0 ? 1 : 0);
+}
+
 // per-lane vertical layout. Each session is a compact bar: a name-span band
 // stacked directly on the status bar, with the subagent strip reserved only
 // when the session actually delegated — so parallel sessions pack tightly.
@@ -1524,11 +1612,12 @@ const GEO = {
   SUB_ROW_H: 5, SUB_GAP: 2,
   GROUP_HEAD_H: 20,
   NAME_MIN_W: 28,   // hide a span's name text below this px width (tooltip still shows it)
-  COST_MIN_W: 56,   // show the cost on the identifier line only above this span width
+  GUTTER_PAD: 10,   // gutter's own left/right margin
+  GROUP_LABEL_X: 24,// group label's left edge (clear of the caret at GUTTER_PAD)
   OP_LANE_H: 52, OP_BAR_H: 20, // operator free-time lane (sits above the groups)
   PX_PER_HOUR: 240, // min horizontal density → long windows scroll (see plotW)
   AXIS_BOTTOM_H: 24,        // bottom axis-scale strip drawn below the plot
-  GROUP_COLLAPSED_H: 26,    // height of a folded (too-small) project group summary row
+  GROUP_COLLAPSED_H: 32,    // height of a folded (too-small) project group summary row
   GROUP_COLLAPSE_MIN_PX: 24,// fold a group when even its widest session is under this px
   SUB_MIN_PX: 4,            // a subagent sub-bar narrower than this reads as a sliver
   SUB_MERGE_GAP_PX: 3,      // adjacent slivers within this px gap merge into one marker
@@ -1629,10 +1718,13 @@ function rowHeight(laneList) {
   return h;
 }
 
-// windowBounds resolves the [t0, t1] plot window: the summary from/to when
-// present and sane, else the min/max over all interval bounds (with a 1ms floor
-// so span is always positive). Shared by the bar and line charts so both frame
-// the same time window.
+// windowBounds resolves the [t0, t1] plot window. The DATA's own extent is the
+// summary from/to when present and sane, else the min/max over all interval
+// bounds (with a 1ms floor so span is always positive) — and that extent is then
+// widened to the whole calendar day on screen (model.js dayWindowMs), so an
+// empty morning is drawn as the empty morning it was instead of being cropped
+// out of the window. Shared by the bar and line charts so both frame the same
+// time window.
 function windowBounds(data, lanes) {
   const summary = data.summary || {};
   let t0 = Date.parse(summary.from);
@@ -1645,13 +1737,55 @@ function windowBounds(data, lanes) {
     }
     if (!isFinite(t0) || !isFinite(t1) || t1 <= t0) t1 = t0 + 1;
   }
-  return { t0, t1 };
+  // dataT0/dataT1 ride along: the widened window is what gets drawn, but where
+  // the work actually starts is what the initial scroll is anchored on.
+  return { ...dayWindowMs(dataDay, t0, t1, Date.now()), dataT0: t0, dataT1: t1 };
+}
+
+// Initial scroll for a newly framed window. A whole-day window is mostly empty
+// canvas at any useful density, so landing at scrollLeft 0 would greet every day
+// switch with the small hours. The day in progress parks its live edge at the
+// right — that is what you opened the dashboard to look at — and a closed day
+// parks the first thing that happened just inside the left edge.
+//
+// Once per day+view, and never again: a poll repainting under the user must not
+// move the viewport, and neither must the user's own scrolling be undone.
+const SCROLL_LEAD_PX = 36;
+let scrollAnchorKey = null;
+function anchorWindowScroll(xOf, firstActivityMs) {
+  const key = dataDay + "/" + currentView;
+  if (key === scrollAnchorKey) return;
+  scrollAnchorKey = key;
+  const wrap = el.wrap;
+  const max = wrap.scrollWidth - wrap.clientWidth;
+  if (max <= 0) return; // the whole window fits: there is nothing to anchor
+  wrap.scrollLeft = isLiveWindow()
+    ? max
+    : Math.min(max, Math.max(0, xOf(firstActivityMs) - SCROLL_LEAD_PX));
+  syncGutterFreeze(); // the scroll event is async; the column must not lag a frame
+}
+
+// a rule (or background) that spans the whole width is drawn in two halves — the
+// gutter's half rides the frozen column, the plot's half scrolls with the bars.
+// Splitting beats drawing one wide element under an opaque backing: the backing
+// would have to repaint the row striping the element carried.
+function addSplitRule(cls, y, W) {
+  addGutter(svgEl("line", { class: cls, x1: 0, y1: y, x2: GEO.GUTTER, y2: y }));
+  el.svg.appendChild(svgEl("line", { class: cls, x1: GEO.GUTTER, y1: y, x2: W, y2: y }));
+}
+function addSplitBand(cls, y, height, W, bind) {
+  const left = svgEl("rect", { class: cls, x: 0, y, width: GEO.GUTTER, height });
+  const right = svgEl("rect", { class: cls, x: GEO.GUTTER, y, width: Math.max(0, W - GEO.GUTTER), height });
+  if (bind) { bind(left); bind(right); }
+  addGutter(left);
+  el.svg.appendChild(right);
 }
 
 function renderTimeline(data) {
   const lanes = renderableLanes(data.lanes);
   // keep <defs> (first child), drop the rest
   while (el.svg.childNodes.length > 1) el.svg.removeChild(el.svg.lastChild);
+  gutterLayer = null;
   hideTip();
 
   if (lanes.length === 0) {
@@ -1663,7 +1797,7 @@ function renderTimeline(data) {
   }
   el.empty.hidden = true;
 
-  const { t0, t1 } = windowBounds(data, lanes);
+  const { t0, t1, dataT0 } = windowBounds(data, lanes);
   const span = t1 - t0;
 
   // Horizontal scroll: the plot keeps a minimum density (px per hour) so long
@@ -1720,6 +1854,11 @@ function renderTimeline(data) {
   el.svg.style.width = W + "px";
   el.svg.style.height = H + "px";
 
+  // the frozen column: opened here so every draw below can post its gutter-side
+  // half into it, appended (with its shadow) once the plot is drawn.
+  gutterLayer = svgEl("g", { class: "tl-gutter" });
+  gutterLayer.appendChild(svgEl("rect", { class: "tl-gutter-bg", x: 0, y: 0, width: GEO.GUTTER, height: H }));
+
   // Remember the frame so the NEXT day's skeleton can hold the same shape. A
   // switch then keeps the page's geometry put and only swaps its contents,
   // rather than collapsing to nothing and shoving the footer up the screen.
@@ -1772,8 +1911,9 @@ function renderTimeline(data) {
     bot.textContent = fmtTick(t);
     el.svg.appendChild(bot);
   }
-  // vertical axis (gutter edge) + horizontal baseline under the bottom scale
-  el.svg.appendChild(svgEl("line", { class: "axis-line", x1: GEO.GUTTER, y1: GEO.PLOT_TOP, x2: GEO.GUTTER, y2: plotBottom }));
+  // vertical axis (the gutter's own edge, so it freezes with it) + horizontal
+  // baseline under the bottom scale
+  addGutter(svgEl("line", { class: "axis-line", x1: GEO.GUTTER, y1: GEO.PLOT_TOP, x2: GEO.GUTTER, y2: plotBottom }));
   el.svg.appendChild(svgEl("line", { class: "axis-line", x1: GEO.GUTTER, y1: plotBottom, x2: GEO.GUTTER + plotW, y2: plotBottom }));
 
   // context switches (optional, off by default): red verticals at each real
@@ -1804,8 +1944,19 @@ function renderTimeline(data) {
   for (const g of groups) for (const row of g.rows) {
     drawRow(row, x, W, haveActivity, activeGlobal, presentGlobal);
   }
+
+  // the frozen column goes on LAST, so bars scrolling behind it pass underneath
+  gutterLayer.appendChild(svgEl("rect", {
+    class: "tl-gutter-shadow", x: GEO.GUTTER, y: 0, width: 10, height: H,
+    fill: "url(#gutterShadow)", opacity: 0,
+  }));
+  el.svg.appendChild(gutterLayer);
+  syncGutterFreeze();
+
   // on view entry, the sweep's curtain rides on top of everything drawn above
   drawSweepCurtain(W, H, GEO.PLOT_TOP, plotBottom);
+
+  anchorWindowScroll(x, dataT0);
 }
 
 // The sessions reveal is a CURTAIN, not a clip: one rect in the wrap's own
@@ -1890,22 +2041,38 @@ function groupCollapsed(g, msToPx) {
   return ov === undefined ? autoCollapseGroup(g, msToPx) : ov;
 }
 
+// groupLabelEl builds a group's gutter label: the project name in the label
+// voice, ellipsized to `maxPx`, with the session count trailing it dimmed. The
+// count is a tspan of the same <text> so it flows straight off the name however
+// short the name was cut — two positioned elements would have to re-measure the
+// truncated name to know where the second one starts.
+function groupLabelEl(g, y, maxPx) {
+  const count = " · " + g.lanes.length;
+  const countW = textWidth(count, GROUP_LABEL_STYLE);
+  const name = fitText((g.projectFull || g.project).toUpperCase(), maxPx - countW, GROUP_LABEL_STYLE);
+  const gl = svgEl("text", { class: "group-label", x: GEO.GROUP_LABEL_X, y });
+  gl.textContent = name;
+  const c = svgEl("tspan", { class: "group-count" });
+  c.textContent = count;
+  gl.appendChild(c);
+  return gl;
+}
+
 // drawGroupHeader draws an EXPANDED group's header: the full-width rule and a
 // caret+label in the gutter. The gutter is a click target that folds the group.
 function drawGroupHeader(g, W) {
-  const ry = g.headY + GEO.GROUP_HEAD_H - 3;
-  el.svg.appendChild(svgEl("line", { class: "group-rule", x1: 0, y1: ry, x2: W, y2: ry }));
-  const caret = svgEl("text", { class: "group-caret", x: 10, y: g.headY + 13 });
+  addSplitRule("group-rule", g.headY + GEO.GROUP_HEAD_H - 3, W);
+  const caret = svgEl("text", { class: "group-caret", x: GEO.GUTTER_PAD, y: g.headY + 13 });
   caret.textContent = "▾";
-  el.svg.appendChild(caret);
-  const gl = svgEl("text", { class: "group-label", x: 24, y: g.headY + 13 });
-  gl.textContent = ((g.projectFull || g.project) + " · " + g.lanes.length).toUpperCase();
-  el.svg.appendChild(gl);
+  addGutter(caret);
+  // no figure on this row, so the label owns the gutter out to its right margin
+  addGutter(groupLabelEl(g, g.headY + 13, GEO.GUTTER - GEO.GUTTER_PAD - GEO.GROUP_LABEL_X));
   // gutter-wide transparent hit target → click folds the group
   const hit = svgEl("rect", { class: "group-hit", x: 0, y: g.headY, width: GEO.GUTTER, height: GEO.GROUP_HEAD_H });
-  attachTip(hit, () => `<div class="t-hint">click to collapse</div>`);
+  attachTip(hit, () => `<div class="t-status">${escapeHTML(g.projectFull || g.project)}</div>`
+    + `<div class="t-hint">click to collapse</div>`);
   hit.addEventListener("click", () => toggleGroupCollapse(g.project, false));
-  el.svg.appendChild(hit);
+  addGutter(hit);
 }
 
 // drawCollapsedGroup draws a too-small group folded to one line: caret + label, a
@@ -1915,29 +2082,35 @@ function drawGroupHeader(g, W) {
 function drawCollapsedGroup(g, x, W) {
   const top = g.headY;
   const midY = top + GEO.GROUP_COLLAPSED_H / 2;
-  el.svg.appendChild(svgEl("line", { class: "group-rule", x1: 0, y1: top, x2: W, y2: top }));
+  addSplitRule("group-rule", top, W);
 
-  // background rect is the primary click target (labels/sparkbars sit on top)
-  const bg = svgEl("rect", { class: "group-collapsed-bg", x: 0, y: top, width: W, height: GEO.GROUP_COLLAPSED_H });
-  bg.addEventListener("click", () => toggleGroupCollapse(g.project, true));
-  attachTip(bg, () => `<div class="t-hint">click to expand · ${g.lanes.length} session${g.lanes.length === 1 ? "" : "s"}</div>`);
-  el.svg.appendChild(bg);
+  // background band is the primary click target (labels/sparkbars sit on top)
+  addSplitBand("group-collapsed-bg", top, GEO.GROUP_COLLAPSED_H, W, (bg) => {
+    bg.addEventListener("click", () => toggleGroupCollapse(g.project, true));
+    // the name is the thing this row truncates, so the hover carries it in full
+    attachTip(bg, () => `<div class="t-status">${escapeHTML(g.projectFull || g.project)}</div>`
+      + `<div class="t-hint">click to expand · ${g.lanes.length} session${g.lanes.length === 1 ? "" : "s"}</div>`);
+  });
 
-  const caret = svgEl("text", { class: "group-caret", x: 10, y: midY + 4 });
+  const caret = svgEl("text", { class: "group-caret", x: GEO.GUTTER_PAD, y: top + 14 });
   caret.textContent = "▸";
-  el.svg.appendChild(caret);
-  const gl = svgEl("text", { class: "group-label", x: 24, y: midY + 4 });
-  gl.textContent = ((g.projectFull || g.project) + " · " + g.lanes.length).toUpperCase();
-  el.svg.appendChild(gl);
+  addGutter(caret);
 
   let activeMs = 0, cost = 0;
   for (const lane of g.lanes) {
     activeMs += laneActiveMs(lane); // clipped at the evidence bound, like the summary
     if (lane.cost_usd != null) cost += lane.cost_usd;
   }
-  const meta = svgEl("text", { class: "group-collapsed-meta", x: GEO.GUTTER - 10, y: midY + 4, "text-anchor": "end" });
+
+  // Name over figure, on two lines — the same shape the operator lane's gutter
+  // uses, and for the same reason. Side by side in a 232px gutter they fought:
+  // "1h 40m · $2.18" is 92px of it, which cut every real project name down to
+  // about eight characters (and, before that, simply ran the two strings
+  // through each other). Stacked, the name gets the whole width.
+  addGutter(groupLabelEl(g, top + 14, GEO.GUTTER - GEO.GUTTER_PAD - GEO.GROUP_LABEL_X));
+  const meta = svgEl("text", { class: "group-collapsed-meta", x: GEO.GROUP_LABEL_X, y: top + 26 });
   meta.textContent = `${humanDurationCoarseMs(activeMs)}${cost > 0 ? " · " + fmtUSD(cost) : ""}`;
-  el.svg.appendChild(meta);
+  addGutter(meta);
 
   // sparkbars: each folded session's lifespan, so "when" survives the fold.
   const sy = midY - 3;
@@ -1957,9 +2130,9 @@ function drawCollapsedGroup(g, x, W) {
 function drawOperatorLane(op, rowTop, x, W) {
   const barY = rowTop + Math.round((GEO.OP_LANE_H - GEO.OP_BAR_H) / 2);
 
-  el.svg.appendChild(svgEl("rect", { class: "lane-bg op-lane-bg", x: 0, y: rowTop, width: W, height: GEO.OP_LANE_H }));
+  addSplitBand("lane-bg op-lane-bg", rowTop, GEO.OP_LANE_H, W);
   // rule along the bottom edge, separating the operator lane from the groups
-  el.svg.appendChild(svgEl("line", { class: "group-rule", x1: 0, y1: rowTop + GEO.OP_LANE_H, x2: W, y2: rowTop + GEO.OP_LANE_H }));
+  addSplitRule("group-rule", rowTop + GEO.OP_LANE_H, W);
 
   // gutter identity + headline free figure
   const gutter = svgEl("g", { class: "lane-gutter" });
@@ -1970,7 +2143,7 @@ function drawOperatorLane(op, rowTop, x, W) {
   sub.textContent = `free ${humanDurationMs(op.freeMs)}${pct}`;
   gutter.appendChild(main); gutter.appendChild(sub);
   attachTip(gutter, () => operatorTipHTML(op));
-  el.svg.appendChild(gutter);
+  addGutter(gutter);
 
   // free (gold) then occupied (dark red, drawn on top); disjoint within running
   for (const [s, e] of op.free) {
@@ -1996,10 +2169,8 @@ function drawRow(row, x, W, haveActivity, activeGlobal, presentGlobal) {
   const rowTop = row.top;
 
   // row background (subtle alternation per ROW) + separator (group header rules the top edge)
-  el.svg.appendChild(svgEl("rect", {
-    class: row.idx % 2 ? "lane-bg odd" : "lane-bg", x: 0, y: rowTop, width: W, height: row.height,
-  }));
-  if (!row.firstInGroup) el.svg.appendChild(svgEl("line", { class: "lane-sep", x1: 0, y1: rowTop, x2: W, y2: rowTop }));
+  addSplitBand(row.idx % 2 ? "lane-bg odd" : "lane-bg", rowTop, row.height, W);
+  if (!row.firstInGroup) addSplitRule("lane-sep", rowTop, W);
 
   for (const lane of row.lanes) drawSession(lane, rowTop, x, haveActivity, activeGlobal, presentGlobal);
 }
@@ -2014,15 +2185,11 @@ function drawSession(lane, rowTop, x, haveActivity, activeGlobal, presentGlobal)
   const subTop = barY + GEO.BAR_H + GEO.GAP;
 
   // ---- name-span band: each /name slug labels the stretch it was active; the
-  // leading pre-/name stretch falls back to project_full/project (see model.js). ----
-  // cost rides the right end of the identifier (name-span) line above the bar;
-  // the last name segment reserves room for it so label and cost never collide.
+  // leading pre-/name stretch falls back to project_full/project (see model.js).
+  // The band carries the NAME and nothing else: the session's cost used to ride
+  // its right end, which put a column of dollar figures across a view whose
+  // subject is time. Cost is one hover (or one click) away instead. ----
   const segs = nameSegments(lane);
-  const costText = lane.cost_usd != null ? fmtUSD(lane.cost_usd) : "";
-  const sessEnd = x(Date.parse(lane.end));
-  const sessW = Math.max(1, sessEnd - x(Date.parse(lane.start)));
-  const showCost = costText && sessW >= GEO.COST_MIN_W;
-  const costW = showCost ? costText.length * 6.6 + 8 : 0;
   segs.forEach((seg, i) => {
     const sx = x(seg.start), ex = x(seg.end), sw = Math.max(1, ex - sx);
     const isLead = seg.kind === "lead";
@@ -2031,34 +2198,25 @@ function drawSession(lane, rowTop, x, haveActivity, activeGlobal, presentGlobal)
     });
     bg.setAttribute("data-session", laneIdentity(lane)); // bars are keyed by identity, not name
     attachTip(bg, () => nameSegTipHTML(lane, seg));
-    // click pins the archival summary card when session-digest has one WITH
-    // something in it; the empty string is sessionPopoutHTML's way of saying the
-    // click buys nothing, and swallowing it here leaves the event to the
-    // background handler rather than pinning a card of footers. The handler
-    // reads lastSummaries at click time, so summaries arriving after render are
-    // picked up without a repaint — which is also why the pointer cursor on
-    // .name-seg cannot be conditioned on having a card: at draw time we do not
-    // yet know. The tooltip's hint is the affordance that is accurate on hover.
+    // click pins the session's card. Unconditional: the card always holds the
+    // identity and the figures the hover deliberately leaves out, so the pointer
+    // cursor on .name-seg is honest for every bar — which it could not be while
+    // the card was gated on a digest record that may not exist yet. The handler
+    // builds the HTML at click time, so a summary that arrives after the render
+    // is picked up without a repaint.
     bg.addEventListener("click", (ev) => {
-      const html = sessionPopoutHTML(lane);
-      if (html) { ev.stopPropagation(); pinPopout(html, ev); }
+      ev.stopPropagation();
+      pinPopout(sessionPopoutHTML(lane), ev);
     });
     el.svg.appendChild(bg);
     // a dashed divider marks each rename boundary (skip the redundant left edge)
     if (i > 0) el.svg.appendChild(svgEl("line", { class: "name-div", x1: sx, y1: nameY, x2: sx, y2: barY + GEO.BAR_H }));
     if (sw >= GEO.NAME_MIN_W && seg.label) {
-      const reserve = i === segs.length - 1 ? costW : 0; // keep the label clear of the cost
       const t = svgEl("text", { class: "name-seg-label" + (isLead ? " lead" : ""), x: sx + 4, y: nameY + 12.5 });
-      t.textContent = truncate(seg.label, Math.max(1, Math.floor((sw - 6 - reserve) / 7.5)));
+      t.textContent = fitText(seg.label, sw - 8, NAME_LABEL_STYLE);
       el.svg.appendChild(t);
     }
   });
-  if (showCost) {
-    const t = svgEl("text", { class: "name-cost", x: sessEnd - 4, y: nameY + 12.5, "text-anchor": "end" });
-    t.textContent = costText;
-    attachTip(t, () => gutterTipHTML(lane, currentName(lane)));
-    el.svg.appendChild(t);
-  }
 
   // ---- main status bars ----
   for (const iv of lane.intervals || []) {
@@ -2254,7 +2412,6 @@ function currentName(lane) {
   if (labels.length) return labels[labels.length - 1].label;
   return laneFallback(lane);
 }
-function truncate(s, n) { return s && s.length > n ? s.slice(0, n - 1) + "…" : s; }
 
 function axisTicks(t0, t1, plotW) {
   const span = t1 - t0;
@@ -2335,10 +2492,14 @@ function renderConcurrencyChart(data) {
     axis: cssVar("--border", "#2b3240"),
     text: cssVar("--fg-dim", "#6e7681"),
     bg: cssVar("--bg", "#0d1117"),
+    // the wrap's own ground (what the canvas sits on) and the frozen axis's cast
+    // edge — both only used by the frozen strip at the end of paint()
+    elev: cssVar("--bg-elev", "#111720"),
+    shadow: cssVar("--gutter-shadow", "#000000"),
   };
 
   // window + horizontal scale (reuse the zoom density + scroll like the bars)
-  const { t0, t1 } = windowBounds(data, lanes);
+  const { t0, t1, dataT0 } = windowBounds(data, lanes);
   const span = t1 - t0;
   const rightPad = isLiveWindow() ? CGEO.RIGHT_LIVE : CGEO.RIGHT;
   const containerW = Math.max(620, el.wrap.clientWidth);
@@ -2410,7 +2571,11 @@ function renderConcurrencyChart(data) {
 
   // paint draws the whole chart; hoverT (or null) overlays the crosshair. Kept as
   // a closure so the mousemove handler can repaint cheaply (no profile recompute).
+  // lastHoverT is remembered so a repaint the USER didn't ask for — a scroll
+  // moving the frozen axis — doesn't drop the crosshair they are reading.
+  let lastHoverT = null;
   function paint(hoverT) {
+    lastHoverT = hoverT;
     ctx.clearRect(0, 0, W, H);
 
     if (!pts.length) {
@@ -2579,10 +2744,64 @@ function renderConcurrencyChart(data) {
         ctx.beginPath(); ctx.arc(X(hoverT), Y(windowedAvg(hoverT)), 3, 0, 2 * Math.PI); ctx.fill();
       }
     }
+
+    // ---- the frozen y-axis ----
+    // Same promise the sessions gutter makes: the scale a mark is measured
+    // against stays on screen however far into the day you scroll. A canvas has
+    // no layer to translate, so the strip is simply painted again — over the top,
+    // at the scroll offset — which is why this is the last thing paint() does.
+    const dx = Math.max(0, el.wrap.scrollLeft);
+    if (dx > 0) {
+      const axisX = dx + CGEO.LEFT;
+      ctx.save();
+      ctx.fillStyle = C.elev;
+      ctx.fillRect(dx, 0, CGEO.LEFT, H);
+      // cast edge, so the strip reads as floating over the trace behind it
+      const grad = ctx.createLinearGradient(axisX, 0, axisX + 10, 0);
+      grad.addColorStop(0, C.shadow);
+      grad.addColorStop(1, "transparent");
+      ctx.globalAlpha = 0.45;
+      ctx.fillStyle = grad;
+      ctx.fillRect(axisX, 0, 10, H);
+      ctx.globalAlpha = 1;
+
+      ctx.font = "11px " + MONO;
+      ctx.textAlign = "right"; ctx.textBaseline = "middle";
+      ctx.fillStyle = C.text;
+      for (let n = 0; n <= yTop; n += niceIntStep(yTop)) ctx.fillText(String(n), axisX - 8, Y(n));
+      ctx.strokeStyle = C.axis; ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(axisX + 0.5, plotTop); ctx.lineTo(axisX + 0.5, plotBottom);
+      ctx.stroke();
+      // the day-average label rides just inside the axis, so it moves with it
+      if (prof.avgActive != null) {
+        const yy = Math.round(Y(prof.avgActive)) + 0.5;
+        ctx.fillStyle = C.avg; ctx.textAlign = "left"; ctx.textBaseline = "bottom";
+        ctx.fillText("avg " + prof.avgActive.toFixed(1) + "×", axisX + 6, yy - 3);
+      }
+      ctx.restore();
+    }
   }
 
   paint(null);
-  chartHover = { paint, t0, t1, span, plotW, plotLeft: CGEO.LEFT, prof, levelAt, windowedAvg, smoothOn };
+  chartHover = {
+    paint, t0, t1, span, plotW, plotLeft: CGEO.LEFT, prof, levelAt, windowedAvg, smoothOn,
+    repaint: () => paint(lastHoverT),
+  };
+  anchorWindowScroll(X, dataT0);
+}
+
+// scheduleAloftFreeze coalesces the scroll-driven repaints that move the frozen
+// y-axis to one per frame. The canvas repaint is the same one the crosshair runs
+// on every mousemove, so it is cheap — but a scroll fires far denser than a
+// frame, and there is no point rasterizing a chart nobody will see.
+let aloftFreezeRaf = 0;
+function scheduleAloftFreeze() {
+  if (aloftFreezeRaf || !chartHover) return;
+  aloftFreezeRaf = requestAnimationFrame(() => {
+    aloftFreezeRaf = 0;
+    if (chartHover && !sweeping()) chartHover.repaint();
+  });
 }
 
 // repaintAloft re-runs the last render's paint closure, which reads the sweep
@@ -2927,77 +3146,163 @@ function subagentClusterPopoutHTML(cell) {
     + rows + more;
 }
 
-function nameSegTipHTML(lane, seg) {
-  const durMs = seg.end - seg.start;
-  const note = seg.kind === "lead" ? " (before first /name)" : "";
-  const ineff = spanInefficiency(lane, seg.start, seg.end);
-  // identity footer: the name band spans the whole session, so this keeps the
-  // FULL identity reachable on hover even when the in-span identity text is hidden
-  // on a narrow span (the gutter no longer carries it).
-  const idBits = [];
-  if (lane.provider) idBits.push(lane.provider);
-  idBits.push(lane.agent || "?");
-  if (lane.pid != null) idBits.push("pid " + lane.pid);
-  if (lane.cost_usd != null) idBits.push(fmtUSD(lane.cost_usd));
-  const sum = sessionSummary(lane);
-  // the hover stays the one-liner; the hint says what the pinned card adds
-  // (how many task bullets, when the session had more than one).
-  const hint = summaryHintText(sum);
-  return tipHead(`${escapeHTML(seg.label || "(unnamed)")}${note}`, null,
-      `${fmtClock(seg.start)} – ${fmtClock(seg.end)}`, durMs)
-    // a record may now carry token counts and no summary, so the description
-    // is gated on itself rather than on the record existing
-    + (sum && sum.description ? `<div class="t-desc">${escapeHTML(sum.description)}</div>` : "")
-    + (ineff != null ? `<div class="t-row">operator inefficiency ${Math.round(ineff * 100)}% <span class="dim">idle/waiting</span></div>` : "")
-    + tokenRowsHTML(sum && sum.tokens)
-    + memoryRowsHTML(laneMemory(lane, lastMemory))
-    + `<div class="t-id">${escapeHTML(idBits.join(" · "))}</div>`
-    + (lane.session_id ? `<div class="t-id">${escapeHTML(lane.session_id)}</div>` : "")
-    + (hint ? `<div class="t-hint">${escapeHTML(hint)}</div>` : "");
+// railHTML lays a few one-figure cells across the foot of a hover: the topline's
+// value-over-key block at tooltip scale, so a glance at a bar reads in the same
+// voice as a glance at the day. Three at most — a fourth wraps, and a wrapped
+// rail is a table again, which is the thing this replaced.
+function railHTML(cells) {
+  if (!cells.length) return "";
+  return `<div class="t-rail">` + cells.slice(0, 3).map(([k, v]) =>
+    `<div class="t-cell"><span class="t-cell-v">${escapeHTML(v)}</span>`
+    + `<span class="t-cell-k">${escapeHTML(k)}</span></div>`).join("") + `</div>`;
 }
 
-// sessionPopoutHTML is the pinned card for a session bar: the generated
-// archival identity (name, one-liner, task bullets, narrative) from
-// session-digest, plus the lane's own identity footer. The body — bullets over
-// prose, or prose alone — comes from model.js so the node suite can cover it.
-// Empty when there is no summary, and equally empty for a summary with no body
-// (summaryCardHasContent, also in model.js): a record with no tasks and no prose
-// would put only the archival name and the id footer on screen over what the
-// tooltip already showed, so the caller drops the click instead of pinning it.
+// nameSegTipHTML is the session GLANCE: what this bar is, how long it ran, what
+// it was doing, and three figures. It answers the question a pointer asks —
+// "what am I looking at?" — and stops there.
 //
-// Token counts ride along but deliberately do NOT enter that gate: the tooltip
-// already shows them on every hover, so they are never the thing behind an
-// unadvertised click, and letting them make a prose-less record pinnable would
-// break the hint-empty ⇔ card-empty invariant model.test.js pins.
+// It used to answer every question at once: the operator-inefficiency line, four
+// rows of token accounting, two of memory, the provider/agent/pid footer and a
+// raw session UUID, stacked under the description. Those are things you go and
+// ASK, not things you should have to read past, so they moved behind the click,
+// where a card has the room to lay them out (sessionPopoutHTML). What stays here
+// is what a cursor sweeping the day can actually absorb.
+function nameSegTipHTML(lane, seg) {
+  const sum = sessionSummary(lane);
+  const durMs = seg.end - seg.start;
+  const ineff = spanInefficiency(lane, seg.start, seg.end);
+  const tokens = tokenTotals(sum && sum.tokens);
+
+  const cells = [];
+  if (lane.cost_usd != null) cells.push(["cost", fmtUSD(lane.cost_usd)]);
+  if (tokens) cells.push(["tokens out", fmtTokens(tokens.output)]);
+  if (ineff != null) cells.push(["idle", Math.round(ineff * 100) + "%"]);
+
+  return `<div class="t-name">${escapeHTML(seg.label || "(unnamed)")}`
+    + (seg.kind === "lead" ? `<span class="t-note">pre-/name</span>` : "")
+    + `</div>`
+    + `<div class="t-headline"><span class="t-dur">${humanDurationMs(durMs)}</span>`
+    + `<span class="t-span">${fmtClock(seg.start)} → ${fmtClock(seg.end)}</span></div>`
+    // a record may carry token counts and no summary, so the description is
+    // gated on itself rather than on the record existing
+    + (sum && sum.description ? `<div class="t-desc">${escapeHTML(sum.description)}</div>` : "")
+    + railHTML(cells)
+    + (lane.suspect ? `<div class="t-suspect">unverified stretch — excluded from every total</div>` : "")
+    + `<div class="t-more">${escapeHTML(summaryHintText(sum))}</div>`;
+}
+
+// figGridHTML renders [key, value] pairs as the card's reading table: dim key
+// left, mono figure right, one fact per row. A grid rather than the tooltip's
+// prose rows because a card is READ rather than glanced at — the values line up
+// in a column, so "what did this cost / how big did it get" is a scan down one
+// edge instead of a hunt through sentences.
+function figGridHTML(figs) {
+  if (!figs.length) return "";
+  // a key prefixed with "·" is a breakdown of the row above it (the memory
+  // split), and indents rather than reading as a figure of its own
+  return `<div class="po-figs">` + figs.map(([k, v]) => {
+    const sub = k.startsWith("· ");
+    return `<div class="po-fig-k${sub ? " sub" : ""}">${escapeHTML(sub ? k.slice(2) : k)}</div>`
+      + `<div class="po-fig-v${sub ? " sub" : ""}">${v}</div>`;
+  }).join("") + `</div>`;
+}
+
+const poSection = (label) => `<div class="po-sec">${escapeHTML(label)}</div>`;
+
+// sessionPopoutHTML is the pinned card for a session bar — the dossier the
+// glance points at. Every bar pins one: the identity (provider, agent, pid, the
+// session UUID), the full token accounting, the memory high-water marks, what
+// the machine was doing underneath, and — when session-digest has reached this
+// session — its archival name, its steps and its narrative.
+//
+// It is deliberately unconditional. The old card was gated on the digest having
+// written prose, which left a just-started session's pid and token spend
+// reachable nowhere at all once the hover stopped carrying them; and the gate
+// bought a hover that had to advertise the click honestly, which is now simply
+// always true.
 function sessionPopoutHTML(lane) {
   const sum = sessionSummary(lane);
-  if (!summaryCardHasContent(sum)) return "";
+  const startMs = Date.parse(lane.start), endMs = Date.parse(lane.end);
+  const tokens = tokenTotals(sum && sum.tokens);
+  const mem = laneMemory(lane, lastMemory);
+  const press = pressureWindow(lastMemory, startMs, endMs);
+  const ineff = spanInefficiency(lane, startMs, endMs);
+
+  const figs = [];
+  if (lane.cost_usd != null) figs.push(["cost", `<b>${fmtUSD(lane.cost_usd)}</b>`]);
+  if (ineff != null) figs.push(["operator idle", `${Math.round(ineff * 100)}% <span class="dim">idle / waiting</span>`]);
+  if (tokens) {
+    figs.push(["tokens", `<b>${fmtTokens(tokens.output)}</b> out · <b>${fmtTokens(tokens.billedInput)}</b> in`]);
+    figs.push(["cache", `${fmtTokens(tokens.cacheRead)} read · ${fmtTokens(tokens.cacheCreation)} written`]);
+    figs.push(["peak context", `${fmtTokens(tokens.peakContext)} <span class="dim">over ${tokens.responses} turn${tokens.responses === 1 ? "" : "s"}</span>`]);
+    if (tokens.delegatedOutput > 0) {
+      figs.push(["delegated", `${fmtTokens(tokens.delegatedOutput)} out <span class="dim">over ${tokens.delegatedResponses} turn${tokens.delegatedResponses === 1 ? "" : "s"}</span>`]);
+    }
+    if (tokens.models.length > 1) {
+      figs.push(["models", tokens.models.map((m) => `${escapeHTML(m.label)} ${fmtTokens(m.output)}`).join(" · ")]);
+    }
+  }
+  if (mem) {
+    const tree = mem.peakTreeBytes != null ? mem.peakTreeBytes : mem.peakAgentBytes;
+    if (tree != null) {
+      figs.push(["memory", `<b>${fmtBytes(tree)}</b> peak`
+        + (mem.avgTreeBytes != null ? ` <span class="dim">${fmtBytes(mem.avgTreeBytes)} avg</span>` : "")]);
+    }
+    // only when the provider reports the split — a container total has no inner
+    // boundary, and a fabricated 0 for subagents would read as "delegated nothing"
+    if (mem.peakSpawnedBytes != null && mem.peakAgentBytes != null) {
+      figs.push(["· agent / spawned", `${fmtBytes(mem.peakAgentBytes)} · ${fmtBytes(mem.peakSpawnedBytes)}`]);
+    }
+  }
+  if (press && press.totalStallUs > 0) {
+    const pct = press.stallFraction != null
+      ? ` <span class="dim">${(Math.min(1, press.stallFraction) * 100).toFixed(1)}% of the session</span>` : "";
+    figs.push(["machine stalled", humanDurationMs(press.totalStallUs / 1000) + pct]);
+  }
+
   const idBits = [];
   if (lane.provider) idBits.push(lane.provider);
   idBits.push(lane.agent || "?");
   if (lane.pid != null) idBits.push("pid " + lane.pid);
-  if (lane.cost_usd != null) idBits.push(fmtUSD(lane.cost_usd));
-  return `<div class="po-head">${escapeHTML(sum.name || currentName(lane) || "(unnamed)")}</div>`
-    + `<div class="po-desc">${escapeHTML(sum.description)}</div>`
-    + summaryBodyHTML(sum)
-    + tokenRowsHTML(sum.tokens, "po-row")
+
+  const body = summaryBodyHTML(sum);
+  return `<div class="po-head">${escapeHTML((sum && sum.name) || currentName(lane) || "(unnamed)")}</div>`
+    + `<div class="po-headline"><span class="po-dur">${humanDurationMs(endMs - startMs)}</span>`
+    + `<span class="po-span">${fmtClock(lane.start)} → ${fmtClock(lane.end)}</span></div>`
+    + (sum && sum.description ? `<div class="po-desc">${escapeHTML(sum.description)}</div>` : "")
+    + (lane.suspect
+        ? `<div class="po-suspect">unverified stretch to ${fmtClock(lane.end)} — drawn, but excluded from every total`
+          + `<div class="po-suspect-why">${escapeHTML(lane.suspect_reason || "no session end was ever observed")}</div></div>`
+        : "")
+    + (body ? poSection(summaryTasks(sum).length ? "what it did" : "narrative") + body : "")
+    + (figs.length ? poSection("figures") + figGridHTML(figs) : "")
+    + poSection("identity")
     + `<div class="po-id">${escapeHTML(idBits.join(" · "))}</div>`
     + (lane.session_id ? `<div class="po-id">${escapeHTML(lane.session_id)}</div>` : "");
 }
 
+// gutterTipHTML identifies a session from a folded group's sparkbar — the one
+// surface with no card behind it (a click there expands the group instead), so
+// it carries the name-span history the session bar's hover leaves out. Same four
+// blocks as the glance otherwise: a folded row is still a hover, not a table.
 function gutterTipHTML(lane, name) {
-  let html = `<div class="t-status">${escapeHTML(name)}</div>`;
+  const sum = sessionSummary(lane);
+  const startMs = Date.parse(lane.start), endMs = Date.parse(lane.end);
+  const tokens = tokenTotals(sum && sum.tokens);
+
+  const cells = [];
+  if (lane.cost_usd != null) cells.push(["cost", fmtUSD(lane.cost_usd)]);
+  if (tokens) cells.push(["tokens out", fmtTokens(tokens.output)]);
+
+  let html = `<div class="t-name">${escapeHTML(name)}</div>`
+    + `<div class="t-headline"><span class="t-dur">${humanDurationMs(endMs - startMs)}</span>`
+    + `<span class="t-span">${fmtClock(lane.start)} → ${fmtClock(lane.end)}</span></div>`
+    + (sum && sum.description ? `<div class="t-desc">${escapeHTML(sum.description)}</div>` : "")
+    + railHTML(cells);
   if (lane.suspect) {
     html += `<div class="t-suspect">unverified stretch to ${fmtClock(lane.end)}`
       + `<div class="t-suspect-why">${escapeHTML(lane.suspect_reason || "")}</div></div>`;
   }
-  const sum = sessionSummary(lane);
-  if (sum && sum.description) html += `<div class="t-desc">${escapeHTML(sum.description)}</div>`;
-  html += `<div class="t-row">${escapeHTML(lane.agent || "?")}`
-    + (lane.project ? ` · ${escapeHTML(lane.project)}` : "") + ` · pid ${lane.pid}</div>`;
-  if (lane.session_id) html += `<div class="t-id">${escapeHTML(lane.session_id)}</div>`;
-  if (lane.cost_usd != null) html += `<div class="t-row">cost ${fmtUSD(lane.cost_usd)}</div>`;
-  html += tokenRowsHTML(sum && sum.tokens);
   // name-span history (one row per stretch, incl. the pre-/name lead).
   const segs = nameSegments(lane);
   if (segs.length > 1) {
@@ -3648,7 +3953,10 @@ function init() {
     if (!h || sweeping()) return;
     const rect = el.canvas.getBoundingClientRect();
     const px = ev.clientX - rect.left;
-    if (px < h.plotLeft || px > h.plotLeft + h.plotW) { h.paint(null); hideTip(); return; }
+    // the frozen axis strip is painted over the plot, so the stretch of chart
+    // hiding behind it is not hoverable either
+    const overFrozenAxis = ev.clientX - el.wrap.getBoundingClientRect().left < h.plotLeft;
+    if (overFrozenAxis || px < h.plotLeft || px > h.plotLeft + h.plotW) { h.paint(null); hideTip(); return; }
     const t = h.t0 + ((px - h.plotLeft) / h.plotW) * h.span;
     h.paint(t);
     showTip(concurrencyTipHTML(h, t), ev);
@@ -3675,6 +3983,14 @@ function init() {
   }, { passive: true });
 
   let resizeTimer = null;
+  // Horizontal scroll drives the two frozen columns: the sessions gutter is a
+  // transform on a layer (no repaint), the aloft y-axis is part of a canvas and
+  // has to be redrawn, so that one is coalesced to a frame.
+  el.wrap.addEventListener("scroll", () => {
+    syncGutterFreeze();
+    if (currentView === "line") scheduleAloftFreeze();
+  }, { passive: true });
+
   window.addEventListener("resize", () => {
     if (calendarOpen()) placeCalendar(); // the panel is anchored to a field that just moved
     if (resizeTimer) clearTimeout(resizeTimer);

@@ -14,8 +14,13 @@ invocation, so it loads instantly and runs offline.
 
 - **Swimlane timeline**, grouped by project. Each session is a compact bar keyed
   by stable identity (`session_id`, falling back to `pid`); sessions that never
-  overlap in time share a row. Identity (`agent · pid · cost`) is drawn inside
-  each bar.
+  overlap in time share a row. The bars carry the session's NAME and nothing
+  else — identity and spend are one hover (or one click) away.
+- **The whole day, always**: the window runs local midnight to midnight (to
+  `now` on the day in progress), not merely from the first session to the last,
+  so an empty morning reads as an empty morning and the same scale means the same
+  width on every day. The plot scrolls; the project gutter and the aloft chart's
+  y-axis stay frozen against the left edge while it does.
 - **Status at a glance**: `working`, `dormant` (waiting on a subagent), `idle`,
   `permission`, and `suspended`, with a cumulative-time legend that doubles as the
   color key.
@@ -321,12 +326,15 @@ Cost estimation is deliberately out of scope: it needs a per-model rate table
 that has to be maintained, and `byModel` is what a consumer needs to build one.
 
 The dashboard serves the archive at `/api/summaries` (see `--summaries`) and
-surfaces it on the timeline: hovering a session's name band shows the generated
-one-line description (and how many steps the card holds), and clicking pins a
-card with the full name / description / task bullets / narrative — the same
-interaction subagent sub-bars already have. Token counts ride the same hover,
-below the description: output and billed input, the cache split, peak context,
-the delegated share, and a per-model breakdown when a session spanned several.
+surfaces it on the timeline. Hovering a session's name band is a GLANCE: the
+name, the span, the generated one-line description, and three figures (cost,
+output tokens, operator idle). Clicking pins the card behind it — the same
+interaction subagent sub-bars have — and that card is the dossier: the archival
+name, the task bullets and narrative, the full token accounting (billed input,
+the cache split, peak context, the delegated share, a per-model breakdown when a
+session spanned several), the memory high-water marks, what the machine was
+doing underneath, and the session's identity down to its UUID. Every session bar
+pins one, digest or no digest; the hover's `▸` line says what the click holds.
 
 ## HTTP API
 

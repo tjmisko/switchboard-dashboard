@@ -14,8 +14,9 @@ const {
   projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs,
   suspectTailMs, normalizeView, VIEW_ORDER, stepView, scaleGeometry,
   parseISODate, stepISODate, stepISOMonth, clampISODate, monthGrid,
+  localDayBoundsMs, dayWindowMs,
   fmtBytes, spawnedBytes, laneMemory, memoryWindow, pressureWindow,
-  summaryTasks, summaryBodyHTML, summaryHintText, summaryCardHasContent,
+  summaryTasks, summaryBodyHTML, summaryHintText,
   fmtTokens, shortModel, tokenBilled, tokenTotals, tokenRowsHTML,
 } = require("./model.js");
 
@@ -968,7 +969,7 @@ test("summaryHintText should keep the plain hint when there are no tasks to coun
   assert.equal(summaryHintText({ tasks: ["only one"], summary: "s" }), "click for the session summary");
 });
 
-test("summaryHintText should advertise the click when a lone task is all the card holds", () => {
+test("summaryHintText should advertise the summary when a lone task is all the digest holds", () => {
   // the tooltip shows the description only, so that one bullet is still
   // something new behind the click even with no prose to follow it.
   const sum = { description: "d", tasks: ["Fixed the lookup"] };
@@ -976,88 +977,32 @@ test("summaryHintText should advertise the click when a lone task is all the car
   assert.notEqual(summaryBodyHTML(sum), "", "the card does render that bullet");
 });
 
-test("summaryHintText should be empty when the record has nothing behind the click", () => {
-  assert.equal(summaryHintText({ description: "d" }), "");
-  assert.equal(summaryHintText(null), "");
-  // the hint and the card body agree: no hint exactly when there is no body.
-  for (const sum of [{ description: "d" }, { description: "d", tasks: [] }, { description: "d", tasks: ["  "] }]) {
-    assert.equal(summaryHintText(sum) === "", summaryBodyHTML(sum) === "",
-      `hint and body disagree for ${JSON.stringify(sum)}`);
-  }
-});
-
-// summaryCardHasContent is the gate app.js's sessionPopoutHTML runs before it
-// builds the pinned card, and the click handler drops the click on an empty
-// return — so "pins nothing" below means exactly "the bar is not clickable".
-// app.js itself is DOM-bound and cannot be required here; keeping the decision
-// in model.js is what makes it assertable at all.
-
-test("summaryCardHasContent should pin nothing when the record has no tasks and no prose", () => {
-  // the empty record: the card could only restate the archival name and the id
-  // footer, so the bar advertises nothing AND buys nothing.
-  for (const sum of [
-    {},
-    { name: "amber-kite" },
-    { name: "amber-kite", description: "   ", tasks: ["  ", ""], summary: "" },
-  ]) {
-    assert.equal(summaryCardHasContent(sum), false, `pinned an empty card for ${JSON.stringify(sum)}`);
-    assert.equal(summaryHintText(sum), "", "and nothing advertised the click");
-  }
-  assert.equal(summaryCardHasContent(null), false, "a lane with no summary at all pins nothing");
-});
-
-test("summaryCardHasContent should pin nothing when a description is all the record carries", () => {
-  // The case tjmisko/switchboard-dashboard#7 item 2 describes, and the one the
-  // backend can actually serve — handler.go serves no summary fields at all
-  // when the description is empty (a tokens-only entry carries tokens and
-  // nothing else), so this is the fullest empty record. The tooltip
-  // already prints the description; all the card would add is the archival name
-  // and the id footer. Losing that name from the UI is the accepted cost of not
-  // having a bar that pins a card it never advertised.
-  const sum = { name: "amber-kite", description: "Reworked the summary gate" };
-  assert.equal(summaryCardHasContent(sum), false);
-  assert.equal(summaryBodyHTML(sum), "", "there is no body to show");
-  assert.equal(summaryHintText(sum), "", "and the tooltip promised nothing");
-});
-
-test("summaryCardHasContent should pin the card when a lone task is all the record carries", () => {
-  // the already-fixed case: one bullet is content the tooltip never showed, so
-  // it must keep both its hint and its card.
-  const sum = { description: "d", tasks: ["Fixed the lookup"] };
-  assert.equal(summaryCardHasContent(sum), true);
-  assert.notEqual(summaryBodyHTML(sum), "", "the card renders that bullet");
-  assert.equal(summaryHintText(sum), "click for the session summary");
-});
-
-test("summaryCardHasContent should pin the card for an ordinary multi-task session", () => {
-  const sum = {
-    name: "amber-kite",
-    description: "Did three jobs",
-    tasks: ["Fixed the lookup", "Added the endpoint", "Wrote the tests"],
-    summary: "A mixed session that landed on main.",
-  };
-  assert.equal(summaryCardHasContent(sum), true);
-  assert.equal(summaryHintText(sum), "click for 3 steps");
-});
-
-test("summaryCardHasContent should pin a card exactly when the tooltip advertised one", () => {
-  // The invariant the three helpers exist to keep: hint-empty, body-empty and
-  // card-empty are one condition. Both directions are load-bearing. Lose the
-  // forward one and the tooltip promises "click for 4 steps" over a bar whose
-  // click does nothing; lose the reverse and a bar that advertised nothing pins
-  // a card anyway, which is the bug #7 item 2 reported.
+test("summaryHintText should still promise details when the digest has nothing", () => {
+  // Every session bar pins a card now — identity, cost, tokens, memory — so the
+  // hint can never be empty. Before, a digest-less session was unclickable and
+  // its pid and spend were reachable from nowhere at all.
   for (const sum of [
     null, {}, { name: "amber-kite" }, { description: "d" },
     { description: "d", tasks: [] }, { description: "d", tasks: ["  "] },
-    { description: "d", summary: "Prose." }, { tasks: ["only one"] },
-    { description: "d", tasks: ["a", "b"] }, { description: "", tasks: ["a", "b"], summary: "Prose." },
-    { description: "d", tasks: "a\nb", summary: "Prose." },
   ]) {
-    const label = JSON.stringify(sum);
-    assert.equal(summaryHintText(sum) === "", summaryBodyHTML(sum) === "",
-      `hint and body disagree for ${label}`);
-    assert.equal(summaryCardHasContent(sum), summaryHintText(sum) !== "",
-      `card and hint disagree for ${label}`);
+    assert.equal(summaryHintText(sum), "click for details", `for ${JSON.stringify(sum)}`);
+    assert.equal(summaryBodyHTML(sum), "", "and the digest contributes no body");
+  }
+});
+
+test("summaryHintText should sharpen the promise exactly as far as the digest allows", () => {
+  // three tiers, in order of how precisely the card can be described: a counted
+  // list of steps, a summary, or just "details".
+  const cases = [
+    [{ description: "d", tasks: ["a", "b"] }, "click for 2 steps"],
+    [{ description: "", tasks: ["a", "b"], summary: "Prose." }, "click for 2 steps"],
+    [{ description: "d", summary: "Prose." }, "click for the session summary"],
+    [{ tasks: ["only one"] }, "click for the session summary"],
+    [{ description: "d", tasks: "a\nb", summary: "Prose." }, "click for the session summary"],
+    [{ name: "amber-kite", description: "Reworked the gate" }, "click for details"],
+  ];
+  for (const [sum, want] of cases) {
+    assert.equal(summaryHintText(sum), want, `for ${JSON.stringify(sum)}`);
   }
 });
 
@@ -1260,6 +1205,95 @@ test("parseISODate should reject anything that is not a whole ISO day", () => {
   assert.ok(Number.isNaN(parseISODate("2026")));
   assert.ok(Number.isNaN(parseISODate("")));
   assert.ok(Number.isNaN(parseISODate(null)));
+});
+
+// ---------------------------------------------------------------------------
+// the plot window: a named LOCAL day, not merely the busy stretch inside it
+//
+// Written to hold in any TZ the suite happens to run in, so they assert the
+// properties (midnight, one calendar day long, live edge honoured) rather than
+// baked epoch numbers from the author's zone.
+// ---------------------------------------------------------------------------
+
+test("localDayBoundsMs should return local midnight to local midnight", () => {
+  const { t0, t1 } = localDayBoundsMs("2026-08-13");
+  const a = new Date(t0), b = new Date(t1);
+  assert.equal(a.getHours(), 0);
+  assert.equal(a.getMinutes(), 0);
+  assert.equal(a.getDate(), 13);
+  assert.equal(b.getHours(), 0);
+  assert.equal(b.getDate(), 14);
+});
+
+test("localDayBoundsMs should give a DST day its true 23 or 25 hours", () => {
+  // Built by handing day+1 to the Date constructor, not by adding 24h: in a zone
+  // that shifts, the two transition days really are 23h and 25h wide, and a
+  // window one hour off would clip an hour of work off the end of the day.
+  for (const iso of ["2026-03-08", "2026-11-01", "2026-08-13"]) {
+    const { t0, t1 } = localDayBoundsMs(iso);
+    const hours = (t1 - t0) / 3600e3;
+    assert.ok(hours >= 23 && hours <= 25, `${iso} spans ${hours}h`);
+    assert.equal(new Date(t1 - 1).getDate(), Number(iso.slice(8)));
+  }
+});
+
+test("localDayBoundsMs should be NaN for anything that is not a whole ISO day", () => {
+  for (const bad of ["2026-02-31", "2026-8-5", "", null, "2026-08-05T12:00:00Z"]) {
+    assert.ok(Number.isNaN(localDayBoundsMs(bad).t0));
+    assert.ok(Number.isNaN(localDayBoundsMs(bad).t1));
+  }
+});
+
+test("dayWindowMs should frame a closed day whole, however short the work was", () => {
+  const day = localDayBoundsMs("2026-08-13");
+  const workFrom = day.t0 + 13 * 3600e3, workTo = day.t0 + 14 * 3600e3;
+  const w = dayWindowMs("2026-08-13", workFrom, workTo, day.t1 + 5 * 3600e3);
+  assert.equal(w.t0, day.t0, "starts at midnight, not at the first session");
+  assert.equal(w.t1, day.t1, "runs to midnight, not to the last session");
+});
+
+test("dayWindowMs should stop the day in progress at now", () => {
+  const day = localDayBoundsMs("2026-08-13");
+  const now = day.t0 + 17 * 3600e3;
+  const w = dayWindowMs("2026-08-13", day.t0 + 3600e3, now - 60e3, now);
+  assert.equal(w.t0, day.t0);
+  assert.equal(w.t1, now, "a day still being written has no future to draw");
+});
+
+test("dayWindowMs should let data widen the window but never narrow it", () => {
+  const day = localDayBoundsMs("2026-08-13");
+  // a session that started before midnight is drawn whole, not clipped
+  const before = day.t0 - 2 * 3600e3;
+  const closed = dayWindowMs("2026-08-13", before, day.t0 + 3600e3, day.t1 + 1);
+  assert.equal(closed.t0, before);
+  assert.equal(closed.t1, day.t1);
+
+  // a live tail can run past the sample of `now` the caller passed in
+  const now = day.t0 + 17 * 3600e3;
+  const tail = now + 90e3;
+  const live = dayWindowMs("2026-08-13", day.t0, tail, now);
+  assert.equal(live.t1, tail);
+});
+
+test("dayWindowMs should ignore a day the data does not touch at all", () => {
+  // a payload from another day entirely (a mislabeled window, or the dev stub
+  // that answers every day with one fixture): uniting the two would draw weeks
+  // of empty canvas around two specks of work.
+  const june = localDayBoundsMs("2026-06-26");
+  const w = dayWindowMs("2026-08-13", june.t0 + 3600e3, june.t0 + 7200e3, Date.now());
+  assert.deepEqual(w, { t0: june.t0 + 3600e3, t1: june.t0 + 7200e3 });
+});
+
+test("dayWindowMs should fall back to the data's own bounds with no named day", () => {
+  const w = dayWindowMs("", 1000, 5000, 9000);
+  assert.deepEqual(w, { t0: 1000, t1: 5000 });
+});
+
+test("dayWindowMs should always return a positive span", () => {
+  const day = localDayBoundsMs("2026-08-13");
+  // the pathological case: an empty live day whose `now` is midnight itself
+  const w = dayWindowMs("2026-08-13", day.t0, day.t0, day.t0);
+  assert.ok(w.t1 > w.t0);
 });
 
 test("stepISODate should move one day in either direction", () => {

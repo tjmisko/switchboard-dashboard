@@ -921,40 +921,23 @@
     return html;
   }
 
-  // summaryHintText is the hover tooltip's click affordance. The tooltip keeps
-  // the one-line description — bullets are the reason to CLICK, not a second
-  // tooltip — so a multi-task session only advertises how much the card holds.
-  // Empty when nothing extra sits behind the click, which is exactly when
-  // summaryBodyHTML is empty: a lone task still renders a bullet the tooltip
-  // never showed, so it has to advertise the click too.
+  // summaryHintText is the hover tooltip's click affordance.
+  //
+  // It never comes back empty. The hover is a GLANCE now — name, span,
+  // one-liner, three figures — and every session bar pins a card holding what
+  // the glance leaves out: identity, the token breakdown, the machine's
+  // readings, and (when the digest reached this session) its steps and
+  // narrative. So there is always something behind the click, and the only
+  // question left for this function is how precisely it can promise it. A step
+  // count is the sharpest promise available; "details" is the floor.
+  //
+  // The description stays on the hover and the bullets stay off it: bullets are
+  // the reason to click, not a second tooltip.
   function summaryHintText(summary) {
     const count = summaryTasks(summary).length;
     if (count > 1) return `click for ${count} steps`;
     if (count === 1 || (summary && summary.summary)) return "click for the session summary";
-    return "";
-  }
-
-  // summaryCardHasContent gates the pinned card (app.js sessionPopoutHTML): the
-  // bar's click is a no-op unless the card would show something the hover did
-  // not. That is exactly summaryBodyHTML — the task bullets and the framing
-  // prose, both of which the tooltip withholds on purpose so that they stay the
-  // reason to click. A lone task counts: it renders a bullet the hover never
-  // showed.
-  //
-  // A record with neither adds only the digest's archival name and the id
-  // footer over what the tooltip already printed, so it pins nothing. That does
-  // cost something real — the archival name is not shown anywhere else, since
-  // the tooltip heads with the /name slug of the span under the cursor — and it
-  // is the accepted price. A bar that advertises nothing and then pins a card
-  // anyway is the worse failure, and the alternative (advertise the name, so the
-  // click is honest) buys a hint on records whose card is one line of text.
-  //
-  // Deliberately the same predicate as summaryHintText's: hint-empty,
-  // body-empty and card-empty are one condition, not three, so nothing is ever
-  // clickable with nothing behind it. model.test.js pins that as an invariant
-  // across every shape of record.
-  function summaryCardHasContent(summary) {
-    return Boolean(summary) && summaryBodyHTML(summary) !== "";
+    return "click for details";
   }
 
   // -------------------------------------------------------------------------
@@ -1102,6 +1085,56 @@
     return Number.isFinite(t) && new Date(t).toISOString().slice(0, 10) === iso ? t : NaN;
   }
 
+  // localDayBoundsMs turns a YYYY-MM-DD into the LOCAL calendar day it names:
+  // [midnight, next midnight) in epoch ms. The date arithmetic ABOVE is UTC
+  // because it walks a calendar grid; this is the other job — locating a named
+  // day on the wall clock — and it has to be local, because switchboard-ctl's
+  // --day is a local day (cmd/arachne-switchboard-ctl windowBounds) and the
+  // window we draw must be the window we asked for. Built by handing day+1 to
+  // the Date constructor rather than adding 24h, so the two DST days of the year
+  // come out 23h and 25h wide, exactly like the data inside them. NaN bounds for
+  // anything that is not a date.
+  function localDayBoundsMs(iso) {
+    if (!Number.isFinite(parseISODate(iso))) return { t0: NaN, t1: NaN };
+    const [y, m, d] = iso.split("-").map(Number);
+    return {
+      t0: new Date(y, m - 1, d, 0, 0, 0, 0).getTime(),
+      t1: new Date(y, m - 1, d + 1, 0, 0, 0, 0).getTime(),
+    };
+  }
+
+  // dayWindowMs frames the plot on the whole DAY rather than on the stretch that
+  // happened to be busy. An empty morning is a fact about the day — a window
+  // that starts at the first session cannot show it, and two days drawn at the
+  // same scale are not the same width, so nothing is comparable across a day
+  // step either.
+  //
+  // `nowMs` is the live edge: the day in progress runs midnight → now, since a
+  // day still being written has no future to draw, while a closed day runs the
+  // full midnight → midnight. Data always widens the window and never narrows
+  // it — a session that started before midnight, or a live tail that has run
+  // past a sample of `now`, is drawn whole rather than clipped to the calendar.
+  //
+  // Falls back to the data's own bounds when `iso` is not a date, which is what
+  // a caller with no committed day (or a range) gets.
+  function dayWindowMs(iso, dataT0, dataT1, nowMs) {
+    const day = localDayBoundsMs(iso);
+    if (!Number.isFinite(day.t0)) return { t0: dataT0, t1: dataT1 };
+    // Data that does not touch the named day at all is not that day's data — a
+    // mislabeled payload, or the dev stub, which serves one fixture whatever day
+    // is asked of it. Uniting the two would draw a window weeks wide with two
+    // specks in it, so the data's own bounds win outright.
+    if (Number.isFinite(dataT0) && Number.isFinite(dataT1)
+        && (dataT1 < day.t0 || dataT0 > day.t1)) {
+      return { t0: dataT0, t1: dataT1 };
+    }
+    const live = Number.isFinite(nowMs) && nowMs > day.t0 && nowMs < day.t1;
+    const t0 = Number.isFinite(dataT0) ? Math.min(day.t0, dataT0) : day.t0;
+    const end = live ? Math.max(day.t0, nowMs) : day.t1;
+    const t1 = Number.isFinite(dataT1) ? Math.max(end, dataT1) : end;
+    return { t0, t1: t1 > t0 ? t1 : t0 + 1 };
+  }
+
   // stepISODate walks a day forward or back. Returns the input unchanged when
   // it isn't a date, so a caller stepping a blank field can't manufacture one.
   function stepISODate(iso, days) {
@@ -1214,9 +1247,10 @@
     alignLiveTail,
     projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs, suspectTailMs,
     fmtBytes, spawnedBytes, laneMemory, memoryWindow, pressureWindow,
-    summaryTasks, summaryBodyHTML, summaryHintText, summaryCardHasContent, normalizeView,
+    summaryTasks, summaryBodyHTML, summaryHintText, normalizeView,
     fmtTokens, shortModel, tokenBilled, tokenTotals, tokenRowsHTML,
     VIEW_ORDER, stepView,
     parseISODate, stepISODate, stepISOMonth, clampISODate, monthGrid,
+    localDayBoundsMs, dayWindowMs,
   };
 });

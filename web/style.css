@@ -41,6 +41,7 @@
   --error-fg: #ffb4ae;
   --shadow-1: rgba(0, 0, 0, 0.5);
   --shadow-2: rgba(0, 0, 0, 0.6);
+  --gutter-shadow: #000000;   /* cast by the frozen gutter over the scrolling plot */
 }
 
 @media (prefers-color-scheme: light) {
@@ -64,6 +65,7 @@
     --error-fg: #cf222e;
     --shadow-1: rgba(31, 35, 40, 0.16);
     --shadow-2: rgba(31, 35, 40, 0.24);
+    --gutter-shadow: #1f2328;
   }
 }
 
@@ -87,6 +89,7 @@
   --error-fg: #cf222e;
   --shadow-1: rgba(31, 35, 40, 0.16);
   --shadow-2: rgba(31, 35, 40, 0.24);
+  --gutter-shadow: #1f2328;
 }
 
 * { box-sizing: border-box; }
@@ -521,9 +524,23 @@ main { padding: 16px 18px 36px; }
 .lane-label { fill: var(--fg-muted); font-family: var(--mono); font-size: 12.5px; font-weight: 600; }
 .lane-sub { fill: var(--fg-dim); font-family: var(--mono); font-size: 11.5px; }
 
+/* ---------- the frozen project gutter ----------
+   Every element left of the axis lives in one <g class="tl-gutter"> that app.js
+   translates by the wrap's scrollLeft, so the column holding each row's identity
+   stays against the viewport's left edge however far into the afternoon you
+   scroll. It is painted last, so it needs its own opaque ground (the wrap's
+   background) and a soft cast edge to say it is floating. */
+.tl-gutter-bg { fill: var(--bg-elev); }
+.tl-gutter-shadow { pointer-events: none; transition: opacity 0.15s linear; }
+.gutter-shadow-near { stop-color: var(--gutter-shadow); stop-opacity: 0.5; }
+.gutter-shadow-far { stop-color: var(--gutter-shadow); stop-opacity: 0; }
+
 /* project group headers */
 .group-rule { stroke: var(--border); stroke-width: 1; }
 .group-label { fill: var(--fg-muted); font-family: var(--mono); font-size: 12px; font-weight: 700; letter-spacing: 0.6px; pointer-events: none; }
+/* the session count trailing the project name — dimmed, so the name reads first
+   and the count doesn't compete with it for a truncated gutter */
+.group-count { fill: var(--fg-dim); font-weight: 400; }
 .group-caret { fill: var(--fg-dim); font-family: var(--mono); font-size: 11px; pointer-events: none; }
 
 /* group fold/expand affordances */
@@ -547,11 +564,6 @@ main { padding: 16px 18px 36px; }
 .name-div { stroke: rgba(88, 166, 255, 0.5); stroke-width: 1; stroke-dasharray: 2 2; }
 .name-seg-label { fill: var(--fg); font-family: var(--mono); font-size: 12.5px; font-weight: 600; pointer-events: none; }
 .name-seg-label.lead { fill: var(--fg-dim); font-weight: 400; font-style: italic; }
-
-/* session cost, right-aligned on the identifier (name-span) line above the bar.
-   Sits on the themed name band (not over a colored bar), so it just follows --fg
-   — no halo. The bars themselves stay text-free; identity is on hover. */
-.name-cost { fill: var(--fg); font-family: var(--mono); font-size: 11.5px; font-weight: 700; cursor: default; }
 
 .bar { stroke: rgba(0, 0, 0, 0.25); stroke-width: 0.5; cursor: pointer; }
 .bar:hover { stroke: var(--hover-stroke); stroke-width: 1; }
@@ -704,6 +716,47 @@ main { padding: 16px 18px 36px; }
   max-width: 320px;
   box-shadow: 0 6px 24px var(--shadow-1);
 }
+/* ---- the session glance ----
+   Four blocks, in the order a reader wants them: what it is, how long it ran,
+   what it was doing, what it cost. Separated by space and one hairline rather
+   than by a stack of mono rows — the old tooltip put twelve near-identical lines
+   under the cursor and left the eye to sort them. Anything that is not one of
+   those four questions is in the pinned card (.popout), and .t-more says so. */
+.tooltip .t-name {
+  font-family: var(--mono); font-size: 12.5px; font-weight: 700; color: var(--fg);
+  line-height: 1.35; word-break: break-word;
+}
+.tooltip .t-note {
+  margin-left: 7px; font-size: 10px; font-weight: 400; font-style: italic;
+  color: var(--fg-dim); letter-spacing: 0.3px;
+}
+.tooltip .t-headline {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 14px;
+  margin-top: 3px; padding-bottom: 9px; border-bottom: 1px solid var(--border-soft);
+}
+.tooltip .t-headline .t-dur {
+  font-family: var(--mono); font-size: 16px; font-weight: 700; color: var(--fg);
+  letter-spacing: -0.4px; line-height: 1;
+}
+.tooltip .t-span { font-family: var(--mono); font-size: 11px; color: var(--fg-dim); white-space: nowrap; }
+/* the digest one-liner: body copy, clamped — a hover is not where you read four
+   sentences, and an unclamped description used to set the tooltip's whole height */
+.tooltip .t-desc {
+  color: var(--fg); margin-top: 9px; line-height: 1.45;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden;
+}
+/* figure rail: the topline's value-over-key block at tooltip scale, so a glance
+   at one bar reads in the same voice as a glance at the whole day */
+.tooltip .t-rail { display: flex; gap: 18px; margin-top: 10px; }
+.tooltip .t-cell { display: flex; flex-direction: column; gap: 3px; }
+.tooltip .t-cell-v { font-family: var(--mono); font-size: 13px; font-weight: 700; color: var(--fg); line-height: 1; }
+.tooltip .t-cell-k {
+  font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--fg-dim); line-height: 1;
+}
+/* the click affordance, set apart at the foot with a leading caret */
+.tooltip .t-more { margin-top: 11px; color: var(--fg-muted); font-size: 11px; }
+.tooltip .t-more::before { content: "▸ "; color: var(--accent); }
+
 .tooltip .t-status { font-weight: 600; font-family: var(--mono); }
 /* segment head: status on the left, the DURATION promoted (bold, larger) and
    right-aligned as the headline figure, sitting above a dimmed wall-clock line.
@@ -771,7 +824,35 @@ main { padding: 16px 18px 36px; }
    Padding would also be the wrong tool — it shortens EVERY line of a head that
    wraps, where the float shortens only the lines it actually intersects */
 .popout .po-head { font-weight: 700; font-family: var(--mono); }
-.popout .po-desc { color: var(--fg); margin-top: 8px; line-height: 1.4; }
+/* the card's own headline: the same duration-over-clock pairing the glance
+   leads with, so the click reads as an expansion of what was hovered rather
+   than a different document */
+.popout .po-headline {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 14px;
+  margin-top: 4px; padding-bottom: 10px; border-bottom: 1px solid var(--border-soft);
+}
+.popout .po-dur { font-family: var(--mono); font-size: 17px; font-weight: 700; color: var(--fg); letter-spacing: -0.4px; }
+.popout .po-span { font-family: var(--mono); font-size: 11px; color: var(--fg-dim); white-space: nowrap; }
+/* section rule: the card is a dossier with three or four parts, and an
+   uppercase micro-label is how the rest of the page (.box-label) names one */
+.popout .po-sec {
+  margin-top: 14px; margin-bottom: 8px;
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.7px; color: var(--fg-dim);
+}
+/* the reading table: dim key, mono figure, one fact per row. Values line up on
+   their own column, so "what did this cost / how big did it get" is a scan down
+   one edge instead of a hunt through sentences. */
+.popout .po-figs { display: grid; grid-template-columns: max-content 1fr; gap: 5px 14px; align-items: baseline; }
+.popout .po-fig-k { color: var(--fg-dim); font-size: 11.5px; }
+.popout .po-fig-v { font-family: var(--mono); font-size: 12px; color: var(--fg-muted); }
+.popout .po-fig-v b { color: var(--fg); font-weight: 700; }
+/* a breakdown of the row above it — indented and quieter, so it reads as part
+   of that figure rather than as another one */
+.popout .po-fig-k.sub { padding-left: 10px; font-size: 11px; opacity: 0.85; }
+.popout .po-fig-v.sub { font-size: 11.5px; color: var(--fg-dim); }
+.popout .po-suspect { color: var(--suspect); margin-top: 10px; font-size: 12px; line-height: 1.4; }
+.popout .po-suspect-why { color: var(--fg-muted); margin-top: 3px; line-height: 1.45; font-size: 11.5px; }
+.popout .po-desc { color: var(--fg); margin-top: 10px; line-height: 1.45; }
 .popout .po-row { color: var(--fg-muted); margin-top: 6px; font-family: var(--mono); font-size: 12px; }
 .popout .po-row b { color: var(--fg); }
 .popout .po-id { color: var(--fg-dim); margin-top: 8px; font-family: var(--mono); font-size: 11px; word-break: break-all; }
