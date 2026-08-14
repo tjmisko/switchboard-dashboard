@@ -873,10 +873,12 @@ function isLiveWindow() {
 // computeOperatorTime partitions the running window into the operator's
 // "occupied" vs "free" intervals:
 //   running   = union over lanes of running-status intervals (≥1 agent working)
-//   present   = ⋃ [activity-active start, end + OP.awayAfterMs] — you don't stop
+//   present   = ⋃ [activity-active start, end + OP.awayAfterMs]
+//               ∪ [focus arrival, arrival + OP.awayAfterMs] — you don't stop
 //               being at the machine the instant you stop typing, but an agent
 //               window focused and untouched for awayAfterMs means you walked
-//               away and left it up
+//               away and left it up; a focus ARRIVAL is itself input, so it
+//               counts as presence even when the activity watcher missed it
 //   attending = focus ∩ present (at an agent window AND actually there)
 //   ctxRecov  = ⋃ [switch, switch + OP.switchRecoveryMs] over every context
 //               switch (switch arrivals after the first) — clustered switches
@@ -957,8 +959,21 @@ function computeOperatorTime(data) {
   // that, a focused-but-untouched window is you having walked away from it.
   // Without an activity stream there is no evidence you left: any (≥15s) focus
   // counts as attending.
+  //
+  // Presence is evidenced two ways, unioned: the watcher's active spans, and
+  // every real focus ARRIVAL (the dwell-filtered set the switch counter uses)
+  // — a window switch is operator input, so it proves presence even where the
+  // watcher's edges went missing (2026-07-30 logged five activity edges all
+  // day while hundreds of focus events told the true story). Each piece of
+  // evidence decays by the same awayAfterMs. Arrival evidence is gated on the
+  // activity stream existing at all, so a window with no stream keeps the
+  // established degradation above instead of a subtly different one.
   const active = spansToMs((data.activity || []).filter((a) => a.state === "active"));
-  const present = unionMs(active.map(([s, e]) => [s, e + OP.awayAfterMs]));
+  const haveActivityStream = (data.activity || []).length > 0;
+  const present = unionMs([
+    ...active.map(([s, e]) => [s, e + OP.awayAfterMs]),
+    ...(haveActivityStream ? switchStarts.map((t) => [t, t + OP.awayAfterMs]) : []),
+  ]);
   const attending = present.length ? intersectMs(engaged, present) : engaged;
 
   const occupiedAll = unionMs([...ctxRecovery, ...attending]);
