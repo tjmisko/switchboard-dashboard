@@ -15,10 +15,14 @@
   --c-unknown: #3a414c;
   --c-subagent: #a371f7;
 
-  /* the token card's input split: the cache pair are two strengths of one hue
-     (two halves of one mechanism), fresh takes amber as the priciest per token,
-     and green is left to mean "output" alone. */
-  --tok-read: color-mix(in srgb, var(--accent) 52%, var(--bg-elev));
+  /* the token card's input split: ONE hue in three steps, not three hues. The
+     three parts are shares of a single quantity, so a categorical palette would
+     invite a decode the bar does not need — and reads run at ~98% of the track,
+     so they take the faintest step and leave the other two visible. Mixed toward
+     --bg-elev, which is themed, so both steps stay legible on either surface. */
+  --tok-read: color-mix(in srgb, var(--accent) 34%, var(--bg-elev));
+  --tok-written: color-mix(in srgb, var(--accent) 66%, var(--bg-elev));
+  --tok-fresh: var(--accent);
 
   /* The time-back bucket ramp (--fb-*) is NOT here: unlike the status hues it is
      a data ramp, and a ramp has to keep its DIRECTION across themes. Brightest
@@ -909,24 +913,33 @@ body.view-projects .boxes { grid-template-columns: minmax(0, 2.15fr) minmax(0, 0
 .fs-foot-i b { color: var(--fg); font-weight: 700; }
 .fs-foot-k { margin-left: 5px; text-transform: uppercase; letter-spacing: 0.4px; }
 
-/* the token card's four headline figures, 2×2. What the agents wrote, then the
-   three quantities the one-number "input · billed" used to stand for — they
-   differ by orders of magnitude in size and by an order of magnitude in unit
-   price, so the single figure was the biggest number on the page and the least
-   informative one. Equal cells: none of the four leads, the sizes do the
-   ranking. */
+/* the token card's headline figures. Output leads ALONE, because the other three
+   are not its siblings — they are the parts of the input it was generated from,
+   and the 2×2 grid of equal cells this replaced said otherwise. They sit under
+   their own head (which carries the billed total on its right, the way every
+   other section head on the page does) with the proportion bar between, so the
+   grouping is the reading and no colour has to encode it. */
 .tk-figs {
-  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 13px 14px; margin: 2px 0 13px;
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 13px 14px;
 }
+.tk-out { grid-template-columns: minmax(0, 1fr); margin: 2px 0 16px; }
+.tk-parts { margin-top: 2px; }
 .tk-fig { min-width: 0; display: flex; flex-direction: column; gap: 4px; cursor: help; }
 .tk-v {
   font-family: var(--mono); font-size: 20px; font-weight: 700; color: var(--fg);
   line-height: 1; letter-spacing: -0.4px;
 }
+.tk-parts .tk-v { font-size: 18px; }
 .tk-k {
   font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
   color: var(--fg-dim); line-height: 1.15;
+}
+/* narrow card (one-column boxes): three across becomes a squeeze, so the parts
+   fall back to the pairing that still fits. */
+.card.tokens { container-type: inline-size; }
+@container (max-width: 340px) {
+  .tk-figs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1002,9 +1015,10 @@ body.view-projects .boxes { grid-template-columns: minmax(0, 2.15fr) minmax(0, 0
   background: linear-gradient(180deg, #f0a24e, #e07c33);
 }
 .gauge-foot { display: flex; justify-content: space-between; gap: 12px; font-size: 11px; color: var(--fg-dim); margin-top: 5px; }
-/* cached / written / fresh input, in the engagement split's pill. Thinner than
-   that one: it explains the row above it rather than heading a section. */
-.tok-bar { height: 7px; margin: 3px 0 6px; }
+/* read / written / fresh input, in the engagement split's pill. Thinner than
+   that one: it sits between a head and the three figures it partitions rather
+   than heading a section of its own. */
+.tok-bar { height: 7px; margin: 5px 0 9px; }
 .session-costs { margin-top: 6px; border-top: 1px solid var(--border-soft); padding-top: 10px; }
 
 /* ---------- tooltip ---------- */

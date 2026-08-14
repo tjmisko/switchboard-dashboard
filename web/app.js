@@ -3531,35 +3531,35 @@ function sessionPopoutHTML(lane) {
   const ineff = spanInefficiency(lane, startMs, endMs);
 
   const figs = [];
-  if (lane.cost_usd != null) figs.push(["cost", `<b>${fmtUSD(lane.cost_usd)}</b>`]);
-  if (ineff != null) figs.push(["operator idle", `${Math.round(ineff * 100)}% <span class="dim">idle / waiting</span>`]);
+  if (lane.cost_usd != null) figs.push(["Cost", `<b>${fmtUSD(lane.cost_usd)}</b>`]);
+  if (ineff != null) figs.push(["Operator idle", `${Math.round(ineff * 100)}% <span class="dim">idle / waiting</span>`]);
   if (tokens) {
-    figs.push(["tokens", `<b>${fmtTokens(tokens.output)}</b> out · <b>${fmtTokens(tokens.billedInput)}</b> in`]);
-    figs.push(["cache", `${fmtTokens(tokens.cacheRead)} read · ${fmtTokens(tokens.cacheCreation)} written`]);
-    figs.push(["peak context", `${fmtTokens(tokens.peakContext)} <span class="dim">over ${tokens.responses} turn${tokens.responses === 1 ? "" : "s"}</span>`]);
+    figs.push(["Tokens", `<b>${fmtTokens(tokens.output)}</b> out · <b>${fmtTokens(tokens.billedInput)}</b> in`]);
+    figs.push(["Cache", `${fmtTokens(tokens.cacheRead)} read · ${fmtTokens(tokens.cacheCreation)} written`]);
+    figs.push(["Peak context", `${fmtTokens(tokens.peakContext)} <span class="dim">over ${tokens.responses} turn${tokens.responses === 1 ? "" : "s"}</span>`]);
     if (tokens.delegatedOutput > 0) {
-      figs.push(["delegated", `${fmtTokens(tokens.delegatedOutput)} out <span class="dim">over ${tokens.delegatedResponses} turn${tokens.delegatedResponses === 1 ? "" : "s"}</span>`]);
+      figs.push(["Delegated", `${fmtTokens(tokens.delegatedOutput)} out <span class="dim">over ${tokens.delegatedResponses} turn${tokens.delegatedResponses === 1 ? "" : "s"}</span>`]);
     }
     if (tokens.models.length > 1) {
-      figs.push(["models", tokens.models.map((m) => `${escapeHTML(m.label)} ${fmtTokens(m.output)}`).join(" · ")]);
+      figs.push(["Models", tokens.models.map((m) => `${escapeHTML(m.label)} ${fmtTokens(m.output)}`).join(" · ")]);
     }
   }
   if (mem) {
     const tree = mem.peakTreeBytes != null ? mem.peakTreeBytes : mem.peakAgentBytes;
     if (tree != null) {
-      figs.push(["memory", `<b>${fmtBytes(tree)}</b> peak`
+      figs.push(["Memory", `<b>${fmtBytes(tree)}</b> peak`
         + (mem.avgTreeBytes != null ? ` <span class="dim">${fmtBytes(mem.avgTreeBytes)} avg</span>` : "")]);
     }
     // only when the provider reports the split — a container total has no inner
     // boundary, and a fabricated 0 for subagents would read as "delegated nothing"
     if (mem.peakSpawnedBytes != null && mem.peakAgentBytes != null) {
-      figs.push(["· agent / spawned", `${fmtBytes(mem.peakAgentBytes)} · ${fmtBytes(mem.peakSpawnedBytes)}`]);
+      figs.push(["· Agent / spawned", `${fmtBytes(mem.peakAgentBytes)} · ${fmtBytes(mem.peakSpawnedBytes)}`]);
     }
   }
   if (press && press.totalStallUs > 0) {
     const pct = press.stallFraction != null
       ? ` <span class="dim">${(Math.min(1, press.stallFraction) * 100).toFixed(1)}% of the session</span>` : "";
-    figs.push(["machine stalled", humanDurationMs(press.totalStallUs / 1000) + pct]);
+    figs.push(["Machine stalled", humanDurationMs(press.totalStallUs / 1000) + pct]);
   }
 
   const idBits = [];
@@ -4267,20 +4267,25 @@ function renderCostCard(data, plan) {
 // same column, not a ruled-off tail of the cost card, so the two read as two
 // facts rather than one long one.
 //
-// FOUR figures lead, not two. "Input · billed" was one number standing for three
+// TWO blocks, not four peers. "Input · billed" was one number standing for three
 // quantities that differ by orders of magnitude in size AND by an order of
 // magnitude in unit price — cache reads at roughly a tenth of fresh, cache
 // writes at rather more than fresh — so the single figure was both the largest
-// number on the page and the least informative one. Broken out, the same four
-// numbers say what the bill is actually made of: a little output, a mountain of
-// re-read context, the writes that put it there, and the sliver that was
-// genuinely new. Billed input stays, demoted to a row, because it is the figure
-// the dollars above are computed from.
+// number on the page and the least informative one. Broken out, the same numbers
+// say what the bill is actually made of: a little output, a mountain of re-read
+// context, the writes that put it there, and the sliver that was genuinely new.
 //
-// Colour follows the split bar, and green appears exactly once: output is the
-// only thing here that is not input. The cache pair share the accent hue at two
-// strengths (they are two halves of one mechanism), and fresh takes amber as the
-// priciest per token.
+// But those three are not siblings of output — they are the PARTS of it, and a
+// 2×2 grid of four equal cells said otherwise. So output leads alone, and the
+// three input components sit under one head that carries the billed total on its
+// right, in the same idiom as the attention card's section heads. The head is the
+// row the total used to need underneath, so the reading is shorter by a line.
+//
+// No colour on the figures. Four differently tinted numbers read as four
+// categories to decode; they are one quantity in three parts and a total, and the
+// proportion bar already shows the split. The bar is one hue in three steps
+// (position, not category, maps a segment to its figure below), so the two
+// slivers stay visible against a read share that is nearly the whole track.
 // ---------------------------------------------------------------------------
 function tokensBlockHTML(totals) {
   const out = totals.tok_out || 0;
@@ -4290,79 +4295,78 @@ function tokensBlockHTML(totals) {
   const billedIn = fresh + read + written; // model.js tokenBilled, at window scale
   if (!(out || billedIn)) {
     return `<div class="card-label">tokens</div>`
-      + `<div class="kv muted-note">no token counts for this window</div>`;
+      + `<div class="kv muted-note">No token counts for this window</div>`;
   }
   const tip = (obj) => escapeHTML(formulaTipHTML(obj));
   const cachedFrac = billedIn > 0 ? read / billedIn : null;
   const cachedPct = cachedFrac == null ? null : Math.round(cachedFrac * 100);
 
-  const row = (label, valHTML, tipObj, cls = "") =>
-    `<div class="kv ${cls} has-tip" data-tip="${tip(tipObj)}"><span class="k">${label}</span><span class="v">${valHTML}</span></div>`;
-
   // the input split, at the same scale as the engagement split on the attention
   // card: cache reads, then the writes that put them there, then the sliver the
-  // conversation had never paid to cache.
+  // conversation had never paid to cache. One hue, three steps — reads are the
+  // faintest because they are nearly the whole track, which is what leaves the
+  // other two visible at all.
   const pct = (v) => ((v / billedIn) * 100).toFixed(3);
   const cacheBar = billedIn > 0
-    ? `<div class="split-bar tok-bar" role="img" aria-label="cached vs uncached input">`
+    ? `<div class="split-bar tok-bar" role="img" aria-label="Cache read, cache written and fresh input">`
       + `<span class="sb-seg" style="width:${pct(read)}%;background:var(--tok-read)"></span>`
-      + `<span class="sb-seg" style="width:${pct(written)}%;background:var(--accent)"></span>`
-      + `<span class="sb-seg" style="width:${pct(fresh)}%;background:var(--c-idle)"></span>`
+      + `<span class="sb-seg" style="width:${pct(written)}%;background:var(--tok-written)"></span>`
+      + `<span class="sb-seg" style="width:${pct(fresh)}%;background:var(--tok-fresh)"></span>`
       + `</div>`
     : "";
 
-  // Four figures in a 2×2 block: value over key, the topline's voice at card
-  // scale. A row of four would set them at footnote size in a card this narrow,
-  // and these are the card.
-  const bigFig = (value, key, tipObj, color) =>
+  // value over key, the topline's voice at card scale.
+  const bigFig = (value, key, tipObj) =>
     `<div class="tk-fig has-tip" data-tip="${tip(tipObj)}">`
-    + `<span class="tk-v"${color ? ` style="color:${color}"` : ""}>${value}</span>`
+    + `<span class="tk-v">${value}</span>`
     + `<span class="tk-k">${key}</span></div>`;
   const shareOf = (v) => (billedIn > 0 ? Math.round((v / billedIn) * 100) : null);
 
-  return `<div class="card-label">tokens</div>
-    <div class="tk-figs">
-      ${bigFig(fmtTokens(out), "output · generated", {
-        title: "output tokens",
-        formula: "Σ output over every session in the window",
-        result: fmtTokens(out) + ` (${out.toLocaleString()})`,
-        why: "Everything the agents actually wrote this window — the expensive half of the bill, per token.",
-        color: "var(--c-working)",
-      }, "var(--c-working)")}
-      ${bigFig(fmtTokens(read), `cache read${cachedPct != null ? ` · ${cachedPct}%` : ""}`, {
-        title: "cache reads",
-        formula: "cache read ÷ billed input",
-        substitution: `${fmtTokens(read)} ÷ ${fmtTokens(billedIn)}`,
-        result: `${fmtTokens(read)} · ${cachedPct == null ? "—" : cachedPct + "%"} of input`,
-        why: "Every turn resends the whole conversation, and this is the part of it the cache already held — billed at roughly a tenth of fresh. High is good: it is the same context re-sent cheaply.",
-        color: "var(--tok-read)",
-      }, "var(--tok-read)")}
-      ${bigFig(fmtTokens(written), "cache written", {
-        title: "cache writes",
-        formula: "cache creation ÷ billed input",
-        substitution: `${fmtTokens(written)} ÷ ${fmtTokens(billedIn)}`,
-        result: `${fmtTokens(written)} · ${shareOf(written) == null ? "—" : shareOf(written) + "%"} of input`,
-        why: "What it cost to put context INTO the cache — priced above fresh input, and the reason a cache only pays for itself once it is read back.",
-        color: "var(--accent)",
-      }, "var(--accent)")}
-      ${bigFig(fmtTokens(fresh), "fresh · uncached", {
-        title: "fresh input",
-        formula: "uncached input ÷ billed input",
-        substitution: `${fmtTokens(fresh)} ÷ ${fmtTokens(billedIn)}`,
-        result: `${fmtTokens(fresh)} · ${shareOf(fresh) == null ? "—" : shareOf(fresh) + "%"} of input`,
-        why: "Genuinely new tokens, never cached at all. On this workload it is a sliver — which is why quoting billed input as one number said almost nothing about what was actually new.",
-        color: "var(--c-idle)",
-      }, "var(--c-idle)")}
-    </div>
-    <div class="kv-list">
-      ${cacheBar}
-      ${row("billed input <span class=\"dim\">· read + written + fresh</span>", fmtTokens(billedIn), {
-        title: "billed input tokens",
+  const inputHead = `<div class="kv-head fs-head">`
+    + `<span class="fs-head-l">Input<span class="fs-head-gloss"> · read + written + fresh</span></span>`
+    + `<span class="fs-head-r has-tip" data-tip="${tip({
+        title: "Billed input tokens",
         formula: "cache read + cache written + fresh",
         substitution: `${fmtTokens(read)} + ${fmtTokens(written)} + ${fmtTokens(fresh)}`,
         result: fmtTokens(billedIn) + ` (${billedIn.toLocaleString()})`,
         why: "What the dollars above are computed from. Every turn resends the whole conversation, so billed input counts the cache reads too — the uncached remainder alone would understate it by orders of magnitude.",
-      }, "deemph")}
+      })}">${fmtTokens(billedIn)}</span></div>`;
+
+  return `<div class="card-label">tokens</div>
+    <div class="tk-figs tk-out">
+      ${bigFig(fmtTokens(out), "output · generated", {
+        title: "Output tokens",
+        formula: "Σ output over every session in the window",
+        result: fmtTokens(out) + ` (${out.toLocaleString()})`,
+        why: "Everything the agents actually wrote this window — the expensive half of the bill, per token.",
+      })}
+    </div>
+    <div class="tk-input">
+      ${inputHead}
+      ${cacheBar}
+      <div class="tk-figs tk-parts">
+        ${bigFig(fmtTokens(read), `cache read${cachedPct != null ? ` · ${cachedPct}%` : ""}`, {
+          title: "Cache reads",
+          formula: "cache read ÷ billed input",
+          substitution: `${fmtTokens(read)} ÷ ${fmtTokens(billedIn)}`,
+          result: `${fmtTokens(read)} · ${cachedPct == null ? "—" : cachedPct + "%"} of input`,
+          why: "Every turn resends the whole conversation, and this is the part of it the cache already held — billed at roughly a tenth of fresh. High is good: it is the same context re-sent cheaply.",
+        })}
+        ${bigFig(fmtTokens(written), "cache written", {
+          title: "Cache writes",
+          formula: "cache creation ÷ billed input",
+          substitution: `${fmtTokens(written)} ÷ ${fmtTokens(billedIn)}`,
+          result: `${fmtTokens(written)} · ${shareOf(written) == null ? "—" : shareOf(written) + "%"} of input`,
+          why: "What it cost to put context INTO the cache — priced above fresh input, and the reason a cache only pays for itself once it is read back.",
+        })}
+        ${bigFig(fmtTokens(fresh), "fresh · uncached", {
+          title: "Fresh input",
+          formula: "uncached input ÷ billed input",
+          substitution: `${fmtTokens(fresh)} ÷ ${fmtTokens(billedIn)}`,
+          result: `${fmtTokens(fresh)} · ${shareOf(fresh) == null ? "—" : shareOf(fresh) + "%"} of input`,
+          why: "Genuinely new tokens, never cached at all. On this workload it is a sliver — which is why quoting billed input as one number said almost nothing about what was actually new.",
+        })}
+      </div>
     </div>`;
 }
 
