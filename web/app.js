@@ -4790,11 +4790,16 @@ function init() {
   el.canvas.addEventListener("mousemove", (ev) => {
     const h = chartHover;
     if (!h || sweeping()) return;
+    // clientX and getBoundingClientRect are visual pixels; the canvas draws in
+    // LAYOUT pixels (that is the space style.width and every CGEO constant are
+    // written in), so the page zoom has to come back out before an offset means
+    // anything on the plot — see rootZoom. Uncorrected, the crosshair lands a
+    // fifth of the cursor's distance across the plot to its left.
     const rect = el.canvas.getBoundingClientRect();
-    const px = ev.clientX - rect.left;
+    const px = toLayout(ev.clientX - rect.left);
     // the frozen axis strip is painted over the plot, so the stretch of chart
     // hiding behind it is not hoverable either
-    const overFrozenAxis = ev.clientX - el.wrap.getBoundingClientRect().left < h.plotLeft;
+    const overFrozenAxis = toLayout(ev.clientX - el.wrap.getBoundingClientRect().left) < h.plotLeft;
     if (overFrozenAxis || px < h.plotLeft || px > h.plotLeft + h.plotW) { h.paint(null); hideTip(); return; }
     const t = h.t0 + ((px - h.plotLeft) / h.plotW) * h.span;
     h.paint(t);
