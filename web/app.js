@@ -4403,29 +4403,11 @@ function attachFormulaTips(container) {
   });
 }
 
-// rootZoom is the page's global scale — style.css sets `:root { zoom }` so the
-// whole design rescales from one declaration.
-//
-// It has to be read back here because the two halves of placing an overlay live
-// in DIFFERENT coordinate spaces. Everything you MEASURE with — clientX,
-// getBoundingClientRect, innerWidth — is in visual pixels, already scaled. What
-// you ASSIGN — style.left, style.top — resolves in the zoomed layout space, so a
-// value computed from a measurement lands 1/zoom too far out. Left uncorrected,
-// every overlay believes it is about to overflow the right edge while a fifth of
-// the screen is still empty, and flips to the wrong side of the cursor there.
-//
-// Cached lazily: it is a constant of the stylesheet, but reading it before the
-// CSS has applied would cache a 1.
-let rootZoomCache = null;
-function rootZoom() {
-  if (rootZoomCache != null) return rootZoomCache;
-  const z = parseFloat(getComputedStyle(document.documentElement).zoom);
-  if (!Number.isFinite(z) || z <= 0) return 1; // not cached: no styles yet, ask again
-  rootZoomCache = z;
-  return z;
-}
-// toLayout converts a visual-space coordinate into the space style.left expects.
-function toLayout(px) { return px / rootZoom(); }
+// Overlays below place themselves straight from what they measure. That only
+// works while the page has no root scale: a `:root { zoom }` would split
+// measurement (clientX, getBoundingClientRect — visual pixels) from assignment
+// (style.left — layout pixels), and every one of these would land 1/zoom too far
+// out. style.css says why it doesn't set one.
 
 function showTip(html, ev) { el.tooltip.innerHTML = html; el.tooltip.hidden = false; moveTip(ev); }
 function moveTip(ev) {
@@ -4433,7 +4415,7 @@ function moveTip(ev) {
   let x = ev.clientX + pad, y = ev.clientY + pad;
   if (x + r.width > window.innerWidth) x = ev.clientX - r.width - pad;
   if (y + r.height > window.innerHeight) y = ev.clientY - r.height - pad;
-  el.tooltip.style.left = toLayout(x) + "px"; el.tooltip.style.top = toLayout(y) + "px";
+  el.tooltip.style.left = x + "px"; el.tooltip.style.top = y + "px";
 }
 function hideTip() { el.tooltip.hidden = true; }
 
@@ -4446,8 +4428,8 @@ function pinPopout(html, ev) {
   let x = ev.clientX + pad, y = ev.clientY + pad;
   if (x + r.width > window.innerWidth) x = window.innerWidth - r.width - pad;
   if (y + r.height > window.innerHeight) y = ev.clientY - r.height - pad;
-  el.popout.style.left = toLayout(Math.max(8, x)) + "px";
-  el.popout.style.top = toLayout(Math.max(8, y)) + "px";
+  el.popout.style.left = Math.max(8, x) + "px";
+  el.popout.style.top = Math.max(8, y) + "px";
 }
 function hidePopout() { el.popout.hidden = true; }
 
@@ -4557,11 +4539,9 @@ function placeCalendar() {
   let top = anchor.bottom + 6;
   if (top + r.height > window.innerHeight - pad) top = anchor.top - r.height - 6;
   const clamp = (v, max) => Math.max(pad, Math.min(v, Math.max(pad, max)));
-  // clamped in visual space (that is what anchor/r/innerWidth are), then handed
-  // over in layout space — see rootZoom.
-  el.calendar.style.left = toLayout(clamp(anchor.left + anchor.width / 2 - r.width / 2,
-    window.innerWidth - r.width - pad)) + "px";
-  el.calendar.style.top = toLayout(clamp(top, window.innerHeight - r.height - pad)) + "px";
+  el.calendar.style.left = clamp(anchor.left + anchor.width / 2 - r.width / 2,
+    window.innerWidth - r.width - pad) + "px";
+  el.calendar.style.top = clamp(top, window.innerHeight - r.height - pad) + "px";
 }
 
 // renderCalendar stamps the month the cursor is in. Every arrow press re-stamps
@@ -4790,16 +4770,15 @@ function init() {
   el.canvas.addEventListener("mousemove", (ev) => {
     const h = chartHover;
     if (!h || sweeping()) return;
-    // clientX and getBoundingClientRect are visual pixels; the canvas draws in
-    // LAYOUT pixels (that is the space style.width and every CGEO constant are
-    // written in), so the page zoom has to come back out before an offset means
-    // anything on the plot — see rootZoom. Uncorrected, the crosshair lands a
-    // fifth of the cursor's distance across the plot to its left.
+    // The cursor's offset into the canvas IS a plot coordinate — the canvas
+    // draws in the same pixels its box is laid out in, and nothing scales the
+    // page between the two. (It did once, and the crosshair sat a fifth of the
+    // way back toward the axis; see the note on :root in style.css.)
     const rect = el.canvas.getBoundingClientRect();
-    const px = toLayout(ev.clientX - rect.left);
+    const px = ev.clientX - rect.left;
     // the frozen axis strip is painted over the plot, so the stretch of chart
     // hiding behind it is not hoverable either
-    const overFrozenAxis = toLayout(ev.clientX - el.wrap.getBoundingClientRect().left) < h.plotLeft;
+    const overFrozenAxis = ev.clientX - el.wrap.getBoundingClientRect().left < h.plotLeft;
     if (overFrozenAxis || px < h.plotLeft || px > h.plotLeft + h.plotW) { h.paint(null); hideTip(); return; }
     const t = h.t0 + ((px - h.plotLeft) / h.plotW) * h.span;
     h.paint(t);

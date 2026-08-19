@@ -32,28 +32,12 @@
   --mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 
-  /* ---------- global scale ----------
-     The dashboard is DESIGNED at 0.8 of nominal, and this is the one place that
-     says so. Everything else in this file — and every GEO constant app.js draws
-     the swimlanes with — is written at its natural px size, so the whole page
-     rescales from here rather than from four hundred edits.
-
-     It exists because the design was being read at 80% browser zoom every day.
-     The proportions were right and the absolute size was not, and a page you
-     have to zoom out of to see properly is a page whose scale is wrong; fixing
-     it in the browser is fixing it on one machine, in one profile, until the
-     next reset.
-
-     `zoom` and not `transform: scale()` because zoom REFLOWS: the page gets 1.25×
-     the layout width and fills it, which is what browser zoom does and what makes
-     the swimlanes gain hours rather than shrink. A transform would letterbox the
-     same layout into a smaller box.
-
-     Consequence to remember: media queries measure the UNZOOMED viewport, so the
-     width breakpoints below are their layout thresholds × 0.8. Container queries
-     do not — they measure a layout box that is already in this space — so those
-     thresholds are written plainly. */
-  zoom: 0.8;
+  /* No global scale here on purpose. The page used to carry `zoom: 0.8` so it
+     read at the 80% the design was drawn for, but a root zoom splits the page
+     into two coordinate spaces — measurements (clientX, getBoundingClientRect)
+     come back visual, assignments (style.left) resolve in layout — and every
+     overlay and hit test then owes a correction it is easy to forget. One px is
+     one px again; scale it in the browser if you want it smaller. */
 }
 
 /* ---------- theme palettes ----------
@@ -706,11 +690,11 @@ body.view-line .boxes,
 body.view-projects .boxes { grid-template-columns: minmax(0, 2.15fr) minmax(0, 0.7fr); }
 
 /* Collapse to one column while there is still room to spare. At three columns
-   the cost/token stack is the narrowest track, and 20% off it means the squeeze
-   arrives sooner than it used to — below ~1150px "cache written · fresh" starts
-   wrapping to three lines. One full-width column reads better than three starved
-   ones, so the strip gives up on three before that happens rather than after. */
-@media (max-width: 920px) { /* 1150 layout px × the 0.8 global scale */
+   the cost/token stack is the narrowest track: below ~1150px "cache written ·
+   fresh" starts wrapping to three lines. One full-width column reads better than
+   three starved ones, so the strip gives up on three before that happens rather
+   than after. */
+@media (max-width: 1150px) {
   .boxes,
   body.view-line .boxes,
   body.view-projects .boxes { grid-template-columns: 1fr; }
