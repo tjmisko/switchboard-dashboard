@@ -370,6 +370,56 @@ func TestHandleTimeline_mergesMultipleProvidersAndNamespacesLanes(t *testing.T) 
 	}
 }
 
+func TestHandleTimeline_mergePreservesCanonicalCodexAgentTimeline(t *testing.T) {
+	switchboardEnv := `{"window":"2026-08-21","lanes":[{"session_id":"root","pid":42,"agent":"codex","project":"sb","start":"2026-08-21T10:00:00Z","end":"2026-08-21T10:30:00Z","intervals":[{"status":"working","start":"2026-08-21T10:00:00Z","end":"2026-08-21T10:30:00Z"}]}],"summary":{"from":"2026-08-21T10:00:00Z","to":"2026-08-21T10:30:00Z","sessions":1,"by_status":{"working":1800000000000},"attention_union":1800000000000,"attention_per_session":1800000000000,"attention_fanout":1800000000000},"totals":{},"agent_timeline":{"roots":[{"session_id":"root","pid":42,"provider":"codex","nodes":[{"thread_id":"child","parent_thread_id":"root","nickname":"Atlas","role":"explorer","depth":1,"runtime":"idle","attention_state":"none","lifecycle":"completed","activity":[{"start":"2026-08-21T10:05:00Z","end":"2026-08-21T10:20:00Z"}],"attention":[{"reason":"approval","start":"2026-08-21T10:10:00Z","end":"2026-08-21T10:15:00Z"}]}],"agent_activity":900000000000,"user_attention":300000000000}],"summary":{"agent_activity":900000000000,"activity_union":900000000000,"user_attention":300000000000,"user_attention_union":300000000000,"approval_attention":300000000000,"user_input_attention":0,"suspect_spans":0,"suspect_duration":0}}}`
+	emptyEnv := `{"window":"2026-08-21","lanes":[],"summary":{"from":"","to":"","sessions":0,"by_status":{},"attention_union":0,"attention_per_session":0,"attention_fanout":0},"totals":{}}`
+	switchboardStub := writeStub(t, "#!/bin/sh\ncat <<'JSONEOF'\n"+switchboardEnv+"\nJSONEOF\n")
+	emptyStub := writeStub(t, "#!/bin/sh\ncat <<'JSONEOF'\n"+emptyEnv+"\nJSONEOF\n")
+	srv := &Server{Providers: []provider.Provider{
+		provider.NewSubprocessProvider("host", "Switchboard", []string{switchboardStub}, "", provider.Capabilities{}),
+		provider.NewSubprocessProvider("empty", "Empty", []string{emptyStub}, "", provider.Capabilities{}),
+	}}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/timeline?day=2026-08-21", nil)
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %q)", rec.Result().StatusCode, rec.Body.String())
+	}
+	var body struct {
+		AgentTimeline struct {
+			Roots []struct {
+				SessionID string `json:"session_id"`
+				Provider  string `json:"provider"`
+				Nodes     []struct {
+					ThreadID string `json:"thread_id"`
+				} `json:"nodes"`
+			} `json:"roots"`
+			Summary struct {
+				ActivityUnion     int64 `json:"activity_union"`
+				AttentionUnion    int64 `json:"user_attention_union"`
+				ApprovalAttention int64 `json:"approval_attention"`
+			} `json:"summary"`
+		} `json:"agent_timeline"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body not json: %v (%q)", err, rec.Body.String())
+	}
+	if len(body.AgentTimeline.Roots) != 1 {
+		t.Fatalf("agent roots = %+v, want one", body.AgentTimeline.Roots)
+	}
+	root := body.AgentTimeline.Roots[0]
+	if root.SessionID != "host:root" || root.Provider != "codex" || len(root.Nodes) != 1 || root.Nodes[0].ThreadID != "child" {
+		t.Fatalf("canonical root was not preserved and namespaced: %+v", root)
+	}
+	if body.AgentTimeline.Summary.ActivityUnion != 900000000000 ||
+		body.AgentTimeline.Summary.AttentionUnion != 300000000000 ||
+		body.AgentTimeline.Summary.ApprovalAttention != 300000000000 {
+		t.Fatalf("canonical summary changed: %+v", body.AgentTimeline.Summary)
+	}
+}
+
 func TestHandleTimeline_mergeDegradesWhenOneProviderFails(t *testing.T) {
 	goodEnv := `{"window":"x","lanes":[{"session_id":"c1","start":"2026-06-26T10:00:00Z","end":"2026-06-26T10:30:00Z","intervals":[]}],"summary":{"from":"2026-06-26T10:00:00Z","to":"2026-06-26T10:30:00Z","sessions":1,"by_status":{}},"totals":{}}`
 	goodStub := writeStub(t, "#!/bin/sh\ncat <<'JSONEOF'\n"+goodEnv+"\nJSONEOF\n")

@@ -2,9 +2,11 @@
 
 A **provider** is any program that can report what agents did during a time
 window. The dashboard renders a single normalized shape — the **timeline
-envelope** — and knows nothing else about where the data came from. Claude (via
-`switchboard-ctl`) and Arachne (via `arachne-switchboard-ctl`) are both just
-providers; a source of agent logs plugs in the same way, in any language.
+envelope** — and knows nothing else about where the data came from. Switchboard
+(via `switchboard-ctl`) and Arachne (via `arachne-switchboard-ctl`) are adapter
+providers; a source of agent logs plugs in the same way, in any language. One
+adapter may itself multiplex semantic agent providers: current Switchboard
+envelopes can contain both Claude and Codex lanes.
 
 There are two things to get right:
 
@@ -86,15 +88,18 @@ Add it to a providers config and start the dashboard with `--providers`:
 ```
 
 - `id` — required, unique. It namespaces your session ids in the merged view and
-  keys your accent color. Keep it short and stable.
+  identifies adapter errors. Semantic Claude/Codex accents come from
+  `lane.agent`; other sources fall back to this id. Keep it short and stable.
 - `label` — display name; defaults to `id`.
 - `exec` — required, non-empty. `exec[0]` is resolved via `PATH`.
 - `dir` — optional default `--dir` value.
 - `capabilities.plan` — declare `true` only if you emit `plan_window` (the
   rolling plan-usage gauge is an Anthropic-account concept).
 
-With `--providers` unset, the dashboard runs one implicit `claude` provider from
-`--ctl`/`--dir` and proxies its bytes verbatim.
+With `--providers` unset, the dashboard runs one implicit Switchboard adapter
+from `--ctl`/`--dir` and proxies its bytes verbatim. Its adapter id remains
+`claude` for compatibility; semantic Claude/Codex identity comes from each
+lane's `agent`, not that legacy namespace.
 
 ## 3. The envelope
 
@@ -105,6 +110,7 @@ With `--providers` unset, the dashboard runs one implicit `claude` provider from
   "summary": { … },             // window-level aggregates
   "totals": { … },              // window-level token/cost sums
   "activity": [ … ],            // OPTIONAL operator active/idle stream
+  "agent_timeline": { … },      // OPTIONAL canonical descendant-thread graph
   "plan_window": { … },         // OPTIONAL rolling plan-usage total
   "provider_errors": [ … ]      // set by the dashboard; providers omit it
 }
@@ -130,7 +136,7 @@ consumer, so never emit zero-length or inverted spans.
 {
   "session_id": "ce13c0f2-…",       // stable identity; bars are keyed on this
   "pid": 4821,                      // identity fallback when session_id is absent
-  "agent": "claude",                // agent kind, drawn inside the bar
+  "agent": "claude",                // semantic provider: e.g. claude or codex
   "provider": "mysource",           // optional; the dashboard fills in your id
   "project": "switchboard",         // groups lanes into swimlanes — REQUIRED in practice
   "project_full": "switchboard",    // optional pretty name; used as the lead label
@@ -162,6 +168,10 @@ Identity rules that matter:
   `feat-f79#2`), or the dashboard draws them as one impossible bar.
 - `project` is what groups lanes into swimlanes; non-overlapping lanes in a
   project share a row. A provider with no project concept should emit a constant.
+- `agent` and `provider` answer different questions. `agent` selects semantic
+  behavior and presentation (`claude` versus `codex`); `provider` is the adapter
+  namespace used for merged ids. Do not copy your adapter id into every lane if
+  the adapter multiplexes several agent implementations.
 
 ### Interval — one status segment
 
@@ -210,6 +220,57 @@ That is also why `end` carries real weight here: a span that closes early does
 not just shorten one bar, it deletes delegated work from the topline while the
 parent's `dormant` interval credits nothing in its place. See §5.1 for the
 acknowledgement trap that produces exactly that.
+
+### Canonical agent timeline — provider-neutral descendants (optional)
+
+```jsonc
+"agent_timeline": {
+  "roots": [{
+    "session_id": "root-thread", "pid": 4821, "provider": "codex",
+    "nodes": [{
+      "thread_id": "child-thread", "parent_thread_id": "root-thread",
+      "nickname": "Atlas", "role": "explorer", "depth": 1,
+      "runtime": "idle", "attention_state": "none", "lifecycle": "completed",
+      "activity": [{"start": "…", "end": "…"}],
+      "attention": [{"reason": "approval", "start": "…", "end": "…"}]
+    }],
+    "agent_activity": 40000000000,
+    "user_attention": 10000000000
+  }],
+  "summary": {
+    "agent_activity": 40000000000, "activity_union": 40000000000,
+    "user_attention": 10000000000, "user_attention_union": 10000000000,
+    "approval_attention": 10000000000, "user_input_attention": 0,
+    "suspect_spans": 0, "suspect_duration": 0
+  }
+}
+```
+
+This surface is additive to the lane model and contains **descendants only**.
+Root-thread work remains in `lanes[]`; do not repeat it as a graph node. Each
+root joins to its lane by bare `session_id` (falling back to pid only when both
+ids are absent), and `root.provider` carries the semantic provider. Each node
+retains its parent id and depth, so grandchildren stay visible as nested agents.
+
+`activity[]` records the child's pending/running lifetime. `attention[]` records
+child-specific `approval` and `user_input` waits; these may overlap activity and
+the dashboard draws them on that child's bar. Runtime, attention, and lifecycle
+are independent last-observed axes, not one flattened status.
+
+Current Switchboard emits both this graph and legacy `lane.subagents[]` for
+Claude during migration, but Codex has only the canonical graph. The dashboard
+therefore projects canonical nodes only for Codex and keeps Claude's legacy bars,
+preventing duplicate children. It does not infer that a Codex root became
+`dormant` merely because a child ran, nor rewrite the legacy summary: the root
+may continue working in parallel and the graph is explicitly additive evidence.
+Graph-aware dashboard views (agents aloft, projects, and the headline agent-hour
+figures) derive their displayed root-plus-child accounting from those projected
+spans, leaving the producer's summary object untouched.
+
+All graph durations are integer nanoseconds. `agent_activity` and
+`user_attention` are additive sums; `activity_union` and
+`user_attention_union` remove overlap. Suspect graph spans follow the same
+visibility-without-credit rule as suspect subagent spans.
 
 ### Activity — the operator stream (optional, top level)
 
@@ -302,6 +363,7 @@ Everything beyond that is opt-in, and each field buys one specific thing:
 | ------------------------------------- | -------------------------------------------------------- |
 | `tok_*`, `cost_usd` (lane + totals)   | cost card, per-session cost breakdown, in-bar `$` figure |
 | `subagents[]`                         | sub-bars, hover/pin cards, meaningful `attention_fanout`, agents-aloft chart |
+| `agent_timeline`                      | Codex child bars, nested identity/lifecycle, per-child approval/input waits |
 | `name` + `names[]`                    | name-span labels along the bar instead of a bare project name |
 | `focus[]` (+ top-level `activity[]`)  | focus overlay and the operator lane                       |
 | `prompt/attended/delegated_active`    | the delegation-effectiveness card                         |
@@ -385,14 +447,13 @@ an unanswered `tool_use`.** Normally the distortion is small, but it is
 unbounded and concentrates badly — a single overnight wait produced two spans
 that were 92% and 97% dead time, and those two alone are 15.4 h of that 17.6 h.
 
-This is not repaired, and deliberately not papered over with a heuristic. The
-information needed is per-span blocked intervals, which no producer currently
-emits: the history log records a permission `transition` at session level, not
-per delegated writer, so the overlap cannot be reconstructed after the fact for
-a session with more than one agent. Closing it properly means a producer-side
-field (blocked intervals on the subagent span) rather than a consumer-side
-guess, and until then the honest reading of the fanout figure is "agent time in
-flight", not "agent time working".
+This is not repaired, and deliberately not papered over with a heuristic for
+legacy Claude spans. Canonical agent nodes now have the producer-side evidence
+that was missing: their own approval/user-input intervals. The dashboard exposes
+those waits on the child bar, but does not subtract them from the established
+legacy fanout aggregate. Until the producer defines that accounting change, the
+honest reading of the fanout figure remains "agent time in flight", not "agent
+time working".
 
 ## 6. What the merge does to your envelope
 
@@ -410,6 +471,9 @@ Know what survives:
 - **`delegation_effectiveness` is recomputed** from the summed parts.
 - **`from`/`to`** become the min/max across providers; `activity[]` is unioned;
   `plan_window` comes from the first provider that has one.
+- **`agent_timeline` roots survive and are namespaced** by the adapter id using
+  the same rule as their lanes. Its additive fields sum; `activity_union` and
+  `user_attention_union` are recomputed across all retained non-suspect spans.
 - **Fields the Go structs don't model are dropped in the merged path.** The
   single-provider path proxies bytes verbatim, so an extra field survives there
   but not in a merge — if a new field must survive, add it to
@@ -426,6 +490,8 @@ your source genuinely multiplexes several.
 - [ ] Empty window → `lanes: []`, exit 0 (not an error).
 - [ ] Every timestamp RFC3339; every duration integer nanoseconds; `cost_usd` float dollars.
 - [ ] `session_id` stable across polls, bare (unnamespaced), distinct per run.
+- [ ] `lane.agent` names the semantic provider; mixed adapters do not flatten it.
+- [ ] Canonical roots use bare lane ids and contain descendants only.
 - [ ] Every span has `end` strictly after `start`.
 - [ ] Statuses drawn from the table in §3.
 - [ ] `summary` reconciles with the lanes, honoring the suspect clip.

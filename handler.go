@@ -33,19 +33,20 @@ const DefaultPlanPath = "/tmp/claude-plan-usage.json"
 // is expected and surfaced (grayed) rather than treated as an error.
 const planStaleAfter = 5 * time.Minute
 
-// Server wires the configured providers into HTTP handlers. With no explicit
-// Providers, it synthesizes a single "claude" provider from Ctl/Dir, preserving
-// the original byte-for-byte switchboard-ctl proxy behavior.
+// Server wires the configured adapter providers into HTTP handlers. With no
+// explicit Providers, it synthesizes one Switchboard adapter from Ctl/Dir,
+// preserving the original byte-for-byte switchboard-ctl proxy behavior. Its
+// legacy id is "claude", but the envelope may carry both Claude and Codex lanes.
 type Server struct {
-	Ctl      string // path or name of switchboard-ctl for the default claude provider
-	Dir      string // default history dir for the default claude provider; "" lets ctl default
+	Ctl      string // path or name of switchboard-ctl for the default Switchboard adapter
+	Dir      string // default history dir for that adapter; "" lets ctl default
 	PlanPath string // cached OAuth plan-usage file; "" uses DefaultPlanPath
 	// SummariesDir is the session-summary record store written by
 	// cmd/session-digest (<dir>/<project-slug>/<session-id>.json); "" disables
 	// the /api/summaries endpoint (it serves an empty set).
 	SummariesDir string
-	// Providers, when non-empty, replaces the default single-claude provider with
-	// an explicit adapter set whose envelopes are merged into one unified view.
+	// Providers, when non-empty, replaces the default Switchboard adapter with an
+	// explicit adapter set whose envelopes are merged into one unified view.
 	Providers []provider.Provider
 	// Settings are the operator-model tunables served to the frontend. The zero
 	// value is not meaningful — main loads them (defaults when unconfigured).
@@ -64,8 +65,8 @@ func (s *Server) dayCacheRef() *dayCache {
 	return s.days
 }
 
-// providerList returns the configured providers, or a single default claude
-// provider built from Ctl/Dir when none are configured.
+// providerList returns the configured adapters, or one default Switchboard
+// adapter built from Ctl/Dir when none are configured.
 func (s *Server) providerList() []provider.Provider {
 	if len(s.Providers) > 0 {
 		return s.Providers

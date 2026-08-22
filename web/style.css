@@ -654,6 +654,13 @@ main { padding: 16px 18px 36px; }
 
 .subagent-bar { stroke: rgba(0, 0, 0, 0.3); stroke-width: 0.4; cursor: pointer; }
 .subagent-bar:hover { stroke: var(--hover-stroke); stroke-width: 1; }
+.subagent-attention {
+  fill: var(--c-permission); fill-opacity: 0.94;
+  stroke: rgba(255, 255, 255, 0.55); stroke-width: 0.45;
+  cursor: pointer;
+}
+.subagent-attention.user-input { stroke-dasharray: 1.5 1; }
+.subagent-attention:hover { stroke: var(--hover-stroke); stroke-width: 1; }
 
 /* merged sliver marker: a run of too-thin subagents collapsed to one "×N" bar.
    A dashed outline distinguishes it from a single solid sub-bar. */

@@ -17,7 +17,7 @@ type Config struct {
 //
 //	{
 //	  "providers": [
-//	    {"id":"claude","label":"Claude",
+//	    {"id":"claude","label":"Switchboard (Claude + Codex)",
 //	     "exec":["switchboard-ctl","timeline","--json","--plan-window"],
 //	     "capabilities":{"plan":true,"memory":true}},
 //	    {"id":"arachne","label":"Arachne",

@@ -12,7 +12,8 @@
 //   - lanes may be null OR []. Every v2 field is additive + optional → degrade.
 //   - v2 lane fields: labels[], subagents[], focus[], cost_usd, tok_*.
 //   - v2 summary fields: prompt_active, attended_active, delegated_active,
-//     delegation_effectiveness. v2 top-level: plan_window, activity[] (optional).
+//     delegation_effectiveness. v2 top-level: plan_window, activity[], and the
+//     provider-neutral agent_timeline descendant graph (all optional).
 // Live by default: poll, repaint only on change. Status reads "Live" while
 // fresh (<15s) and "last Xs ago" once polling stalls (kills per-second thrash).
 // ---------------------------------------------------------------------------
@@ -97,11 +98,10 @@ function statusColor(s) {
   return STATUS_COLORS[s] !== undefined ? STATUS_COLORS[s] : "#8957e5";
 }
 
-// Provider -> accent color. In the merged, multi-provider view every lane carries
-// a `provider` tag; the accent (a left-edge spine on each bar + a legend chip)
-// lets you tell providers apart at a glance. Known providers get fixed hues;
-// anything else derives a stable hue from its name so new providers still get a
-// distinct, consistent color without a code change.
+// Semantic agent provider -> accent color. A merged adapter gives every lane a
+// `provider` namespace; Switchboard's own mixed feed instead distinguishes
+// Claude from Codex with lane.agent. laneProvider() resolves both forms before
+// the accent (a left-edge spine + a legend chip) is chosen.
 const PROVIDER_COLORS = {
   claude: "#c96442",  // terracotta
   arachne: "#a371f7", // purple
@@ -553,7 +553,7 @@ function settleTimeline(day, text, opts) {
   if (!wasPending && day === dataDay && text === lastTimelineText) { tickLive(); return; }
   lastTimelineText = text;
   dataDay = day;
-  lastData = JSON.parse(text);
+  lastData = adaptProviderTimeline(JSON.parse(text));
   // Smooth the status stream ONCE, here, before anything reads it. A sub-5s
   // `idle` mid-run is the state machine catching its breath, not the agent
   // waiting on anyone — but `idle` is not a running status, so left in place it
@@ -1201,7 +1201,7 @@ function computeOperatorTime(data) {
 
 function render(data) {
   const op = computeOperatorTime(data);
-  renderTopline(data.summary || {}, op);
+  renderTopline(data, op);
   renderStatusKey(data.summary || {}, awayIdleTotalNs(data, op));
   renderProviderKey(data.lanes || []);
   renderChartArea(data);
@@ -1553,10 +1553,11 @@ function handleShortcutKey(ev) {
 //     during active time (≈3 agents in parallel → 3×). Deliberately still on
 //     union: it answers "how many at once while they ran", the same question
 //     the aloft chart's average answers, and the two must agree.
-function renderTopline(summary, op) {
-  const fanout = summary.attention_fanout || 0; // agent-hours, parallelism counted (ns)
-  const union = summary.attention_union || 0;   // wall-clock with ≥1 agent active (ns)
-  const perSession = summary.attention_per_session || 0; // Σ each session's own active time
+function renderTopline(data, op) {
+  const attention = graphAwareAttention(data.summary || {}, data.lanes || []);
+  const fanout = attention.attention_fanout; // agent-hours, parallelism counted (ns)
+  const union = attention.attention_union;   // wall-clock with ≥1 agent active (ns)
+  const perSession = attention.attention_per_session; // Σ each session's own active time
   // fanout is per-session time weighted by concurrent subagents (provider
   // contract), so the excess over per-session IS the subagent contribution.
   // Clamped: a provider that reports fanout < per_session would otherwise
@@ -1692,18 +1693,21 @@ function renderStatusKey(summary, awayIdleNs) {
   attachFormulaTips(el.statusKey);
 }
 
-// renderProviderKey: the provider legend, shown ONLY when lanes carry a provider
-// tag (i.e. the merged multi-provider view). Each chip shows the provider's
-// accent color and its lane count; it stays hidden in the default single-provider
-// view where lanes have no provider field.
+// renderProviderKey: the provider legend, shown for a merged adapter response or
+// a semantically mixed Switchboard feed. Each chip shows the provider's accent
+// and lane count; a single untagged provider keeps the historical clean header.
 function renderProviderKey(lanes) {
   if (!el.providerKey) return;
   const counts = new Map();
   for (const lane of lanes || []) {
-    if (!lane.provider) continue;
-    counts.set(lane.provider, (counts.get(lane.provider) || 0) + 1);
+    const provider = laneProvider(lane);
+    if (!provider) continue;
+    counts.set(provider, (counts.get(provider) || 0) + 1);
   }
-  if (counts.size === 0) {
+  // An untagged, single-provider payload keeps the historical clean legend;
+  // mixed Claude/Codex data is the new case that needs an explicit key.
+  const explicitlyMerged = (lanes || []).some((lane) => !!lane.provider);
+  if (counts.size === 0 || (counts.size === 1 && !explicitlyMerged)) {
     el.providerKey.hidden = true;
     el.providerKey.innerHTML = "";
     return;
@@ -2525,14 +2529,15 @@ function drawSession(lane, rowTop, x, haveActivity, activeGlobal, presentGlobal)
   }
 
   // ---- provider accent spine: a colored left-edge marker keying the session to
-  // its data provider in the merged view (absent in single-provider mode). ----
-  if (lane.provider) {
+  // its semantic data provider in merged or mixed-provider mode. ----
+  const dataProvider = laneProvider(lane);
+  if (lane.provider || lane.data_provider) {
     const spineX = x(Date.parse(lane.start));
     const spine = svgEl("rect", {
       class: "provider-spine", x: spineX, y: nameY, width: 3,
-      height: barY + GEO.BAR_H - nameY, rx: 1, fill: provColor(lane.provider),
+      height: barY + GEO.BAR_H - nameY, rx: 1, fill: provColor(dataProvider),
     });
-    attachTip(spine, () => `<div class="t-status" style="color:${provColor(lane.provider)}">${escapeHTML(lane.provider)}</div><div class="t-hint">Data provider</div>`);
+    attachTip(spine, () => `<div class="t-status" style="color:${provColor(dataProvider)}">${escapeHTML(displayName(dataProvider))}</div><div class="t-hint">Data provider</div>`);
     el.svg.appendChild(spine);
   }
 
@@ -2586,6 +2591,25 @@ function drawSession(lane, rowTop, x, haveActivity, activeGlobal, presentGlobal)
         attachTip(bar, () => subagentTipHTML(sa));
         bar.addEventListener("click", (ev) => { ev.stopPropagation(); pinPopout(subagentPopoutHTML(sa), ev); });
         el.svg.appendChild(bar);
+
+        // Codex child threads carry approval/user-input waits independently of
+        // their activity span. Draw those waits on the child bar itself: a red
+        // interruption on the main lane cannot say which background thread is
+        // asking, while this one can.
+        for (const wait of sa.attention || []) {
+          if (wait.suspect) continue;
+          const ws = Math.max(sa.s, Date.parse(wait.start));
+          const we = Math.min(sa.e, Date.parse(wait.end));
+          if (!(isFinite(ws) && isFinite(we) && we > ws)) continue;
+          const wx = x(ws), ww = Math.max(2, x(we) - wx);
+          const overlay = svgEl("rect", {
+            class: "subagent-attention " + (wait.reason === "user_input" ? "user-input" : "approval"),
+            x: wx, y: ry, width: ww, height: GEO.SUB_ROW_H, rx: 1.5,
+          });
+          attachTip(overlay, () => subagentAttentionTipHTML(sa, wait));
+          overlay.addEventListener("click", (ev) => { ev.stopPropagation(); pinPopout(subagentPopoutHTML(sa), ev); });
+          el.svg.appendChild(overlay);
+        }
       }
     }
   }
@@ -3409,8 +3433,42 @@ function subagentTipHTML(sa) {
   return `<div class="t-status" style="color:${SUBAGENT_COLOR}">${escapeHTML(sa.agent_type || "subagent")}</div>`
     + (sa.description ? `<div class="t-desc">${escapeHTML(sa.description)}</div>` : "")
     + `<div class="t-row">${fmtClock(sa.start)} – ${fmtClock(sa.end)} · ${humanDurationMs(durMs)}</div>`
+    + canonicalAgentStateHTML(sa)
+    + subagentWaitSummaryHTML(sa)
     + (sa.suspect ? `<div class="t-suspect">Phantom span — not counted as work<div class="t-suspect-why">${escapeHTML(sa.suspect_reason || "")}</div></div>` : "")
     + `<div class="t-hint">Click to pin</div>`;
+}
+
+function canonicalAgentStateHTML(sa, rowClass = "t-row", hintClass = "t-hint") {
+  if (!sa || !sa.canonical_agent) return "";
+  const state = [sa.runtime || "unknown", sa.attention_state && sa.attention_state !== "none" ? sa.attention_state.replace("_", " ") : "", sa.lifecycle || "unknown"]
+    .filter(Boolean).join(" · ");
+  const identity = [sa.role, sa.depth > 1 ? `depth ${sa.depth}` : ""].filter(Boolean).join(" · ");
+  return `<div class="${rowClass}">${escapeHTML(state)}</div>`
+    + (identity ? `<div class="${hintClass}">${escapeHTML(identity)}</div>` : "");
+}
+
+function subagentWaitSummaryHTML(sa, rowClass = "t-sub t-sub-wait") {
+  const waits = (sa && sa.attention || []).filter((wait) => !wait.suspect);
+  if (!waits.length) return "";
+  const totals = new Map();
+  for (const wait of waits) {
+    const start = Date.parse(wait.start), end = Date.parse(wait.end);
+    if (!(isFinite(start) && isFinite(end) && end > start)) continue;
+    totals.set(wait.reason, (totals.get(wait.reason) || 0) + end - start);
+  }
+  if (!totals.size) return "";
+  const text = [...totals].map(([reason, ms]) => `${String(reason || "attention").replace("_", " ")} ${humanDurationMs(ms)}`).join(" · ");
+  return `<div class="${rowClass}">${escapeHTML(text)}</div>`;
+}
+
+function subagentAttentionTipHTML(sa, wait) {
+  const start = Date.parse(wait.start), end = Date.parse(wait.end);
+  const reason = wait.reason === "user_input" ? "User input needed" : "Approval needed";
+  return `<div class="t-status" style="color:${statusColor("permission")}">${reason}</div>`
+    + `<div class="t-desc">${escapeHTML(sa.agent_type || "Codex agent")}</div>`
+    + `<div class="t-row">${fmtClock(wait.start)} – ${fmtClock(wait.end)} · ${humanDurationMs(end - start)}</div>`
+    + `<div class="t-hint">Click to pin the child thread record</div>`;
 }
 
 // suspectTipHTML explains the hatched tail. The producer's reason string is
@@ -3433,6 +3491,9 @@ function subagentPopoutHTML(sa) {
     + (sa.description ? `<div class="po-desc">${escapeHTML(sa.description)}</div>` : "")
     + `<div class="po-row">Duration <b>${humanDurationMs(durMs)}</b></div>`
     + `<div class="po-row">${fmtClock(sa.start)} – ${fmtClock(sa.end)}</div>`
+    + canonicalAgentStateHTML(sa, "po-row", "po-row dim")
+    + subagentWaitSummaryHTML(sa, "po-row")
+    + (sa.canonical_agent && sa.parent_thread_id ? `<div class="po-row dim">Parent ${escapeHTML(sa.parent_thread_id)}</div>` : "")
     + (sa.tool_use_id ? `<div class="po-id">${escapeHTML(sa.tool_use_id)}</div>` : "");
 }
 
@@ -3441,7 +3502,8 @@ function subagentClusterTipHTML(cell) {
   const n = cell.members.length;
   let total = 0;
   for (const m of cell.members) total += m.e - m.s;
-  return `<div class="t-status" style="color:${SUBAGENT_COLOR}">${n} subagents</div>`
+  const noun = cell.members.every((m) => m.canonical_agent) ? "Codex agents" : "subagents";
+  return `<div class="t-status" style="color:${SUBAGENT_COLOR}">${n} ${noun}</div>`
     + `<div class="t-row">${fmtClock(cell.s)} – ${fmtClock(cell.e)} · ${humanDurationMs(total)} total</div>`
     + `<div class="t-hint">Too thin to separate — click to list</div>`;
 }
@@ -3452,7 +3514,8 @@ function subagentClusterPopoutHTML(cell) {
     `<div class="po-row">${escapeHTML(m.agent_type || "subagent")} <b>${humanDurationMs(m.e - m.s)}</b> <span class="dim">${fmtClock(m.s)}</span></div>`
   ).join("");
   const more = n > cap ? `<div class="po-row dim">+${n - cap} more</div>` : "";
-  return `<div class="po-head" style="color:${SUBAGENT_COLOR}">${n} subagents</div>`
+  const noun = cell.members.every((m) => m.canonical_agent) ? "Codex agents" : "subagents";
+  return `<div class="po-head" style="color:${SUBAGENT_COLOR}">${n} ${noun}</div>`
     + `<div class="po-desc">Merged — each too thin to draw separately at this scale</div>`
     + rows + more;
 }
@@ -3572,8 +3635,9 @@ function sessionPopoutHTML(lane) {
   }
 
   const idBits = [];
-  if (lane.provider) idBits.push(lane.provider);
-  idBits.push(lane.agent || "?");
+  const dataProvider = laneProvider(lane);
+  if (dataProvider) idBits.push(dataProvider);
+  if (lane.agent && lane.agent !== dataProvider) idBits.push(lane.agent);
   if (lane.pid != null) idBits.push("pid " + lane.pid);
 
   const body = summaryBodyHTML(sum);

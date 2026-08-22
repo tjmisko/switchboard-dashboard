@@ -27,8 +27,10 @@ invocation, so it loads instantly and runs offline.
 - **Session-name spans** drawn along each bar from the `/name` history, so a
   mid-window rename reads as one bar with labeled segments. The pre-`/name`
   stretch falls back to the project name, rendered dim.
-- **Subagent sub-bars** for delegated work — hover for detail, click to pin a
-  popout.
+- **Child-agent sub-bars** for delegated work: Claude `Task` spans and Codex
+  child threads share the timeline treatment, while Codex bars also expose
+  nickname/role, nesting depth, lifecycle, and approval or input waits. Hover
+  for detail; click to pin a popout.
 - **Focus/attention overlay** highlighting spans where the session was focused and
   active; global idle periods are dimmed.
 - **Operator lane** partitioning the running window into work blocks and time
@@ -133,7 +135,7 @@ go build -o switchboard-dashboard .
 | Flag          | Default                       | Description                                                              |
 | ------------- | ----------------------------- | ------------------------------------------------------------------------ |
 | `--port`      | `8080`                        | HTTP port.                                                               |
-| `--ctl`       | `switchboard-ctl`             | The `switchboard-ctl` binary for the default Claude provider.            |
+| `--ctl`       | `switchboard-ctl`             | The `switchboard-ctl` binary for the default Switchboard adapter.        |
 | `--dir`       | `""`                          | History dir passed to ctl; empty uses ctl's own.                         |
 | `--plan`      | `/tmp/claude-plan-usage.json` | Cached plan-usage file, read-only, for the gauge.                        |
 | `--summaries` | `~/.local/share/switchboard/summaries` | Session-summary records from `session-digest`; empty disables.  |
@@ -175,19 +177,33 @@ endpoint changes nothing.
 
 ## Data providers (adapters)
 
-The dashboard renders a normalized **timeline envelope** and knows nothing about
-where it comes from. A _provider_ is any binary that prints that envelope for a
-window — `<exec…> timeline --json [--dir D] [--day D] [--since S] [--until U]`.
-Claude (via `switchboard-ctl`) is just the default provider; any other source
-that can emit the envelope plugs in the same way.
+The dashboard has two provider boundaries that should not be conflated:
 
-With no `--providers`, the dashboard runs the single Claude provider and proxies
-its bytes verbatim (unchanged from before). Point `--providers` at a config to
-**merge** several adapters into one namespaced view — lanes from every provider
-in one timeline and one cross-provider "agents aloft" count, each lane tagged
-with its provider (accent spine + legend chip). A provider that fails is recorded
-in the envelope's `provider_errors` rather than blanking the dashboard; only an
+- An **adapter provider** is a binary that prints a normalized timeline envelope
+  for a window — `<exec…> timeline --json [--dir D] [--day D] [--since S]
+  [--until U]`. Its configured id namespaces sessions when several adapters are
+  merged.
+- The lane's **semantic provider** is `lane.agent`. Switchboard can multiplex
+  both `claude` and `codex` lanes through one `switchboard-ctl` response, and the
+  dashboard keys its Claude/Codex rendering and colors from that field rather
+  than assuming the adapter id describes every lane.
+
+With no `--providers`, the dashboard runs one Switchboard adapter and proxies
+its bytes verbatim. Its historical adapter id remains `claude` for compatibility,
+but a Codex lane is still displayed as Codex. Point `--providers` at a config to
+**merge** several adapter envelopes into one namespaced view — lanes from every
+adapter in one timeline and one cross-provider "agents aloft" count. Semantic
+Claude/Codex lanes in the same envelope also receive distinct accent spines and
+legend chips. A failed adapter lands in `provider_errors`; only an
 all-providers-failed request is a `502`. See `examples/providers.json`.
+
+Claude's established delegated-work surface is `lane.subagents[]`. Codex child
+threads arrive in the provider-neutral top-level `agent_timeline`; the dashboard's
+Codex adapter joins each root to its lane and projects child activity as the same
+sub-bars without changing the root status or Switchboard's legacy aggregates.
+This is intentionally graceful for old or hook-only history: when no canonical
+child events were recorded, the Codex lane still renders and simply has no child
+bars.
 
 **Writing your own provider:** [`docs/provider-contract.md`](docs/provider-contract.md)
 is the full spec — the process contract, the envelope field by field with units,
@@ -385,8 +401,9 @@ implementer's spec for anyone writing a provider:
 - **Durations are nanoseconds**, **token fields are raw counts**, and **`cost_usd`
   is a float in dollars** recomputed by the producer from tokens × per-model price.
 - The envelope is `{window, lanes, summary, totals}` with optional top-level
-  `activity` and `plan_window`. Every v2 field is additive and optional; older
-  day-files omit them and the UI degrades gracefully.
+  `activity`, `agent_timeline`, and `plan_window`. `agent_timeline` is additive:
+  it contains descendant threads only, leaving root work in `lanes`. Every v2
+  field is optional; older day-files omit them and the UI degrades gracefully.
 
 The summary exposes three attention figures: **union** (wall-clock with at least
 one session active), **per-session** (the sum of per-session active time), and

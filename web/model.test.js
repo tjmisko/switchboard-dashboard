@@ -8,10 +8,11 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
-  laneIdentity, rawSessionId, leadLabel, nameSegments, buildBars, spanInefficiency, switchArrivals,
+  laneIdentity, rawSessionId, laneProvider, adaptProviderTimeline,
+  leadLabel, nameSegments, buildBars, spanInefficiency, switchArrivals,
   deflickerIntervals, deflickerLanes, FLICKER_MS,
   presenceSplitMs, awayIdleMs, packLanes,
-  aloftSpans, workIntervalsMs, concurrencyProfile, alignLiveTail,
+  aloftSpans, workIntervalsMs, concurrencyProfile, graphAwareAttention, alignLiveTail,
   projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs,
   freeBlockStats, FREE_BLOCK_DEEP_MS, FREE_BLOCK_FRAG_MS,
   freeBucketStats, FREE_BUCKETS,
@@ -964,6 +965,106 @@ test("rawSessionId should not strip a foreign or coincidental prefix", () => {
 test("rawSessionId should return null when the lane has no session id", () => {
   assert.equal(rawSessionId({ pid: 42 }), null);
   assert.equal(rawSessionId(null), null);
+});
+
+// ---------------------------------------------------------------------------
+// provider adapters — mixed Claude/Codex roots and canonical child threads
+// ---------------------------------------------------------------------------
+
+test("laneProvider should distinguish Codex from Claude inside one switchboard source", () => {
+  assert.equal(laneProvider({ agent: "claude" }), "claude");
+  assert.equal(laneProvider({ agent: "codex" }), "codex");
+  assert.equal(laneProvider({ provider: "claude", agent: "codex" }), "codex",
+    "legacy merged configs called the whole switchboard source claude");
+  assert.equal(laneProvider({ provider: "arachne", agent: "opus" }), "arachne");
+});
+
+test("adaptProviderTimeline should project nested Codex threads without duplicating Claude subagents", () => {
+  const claude = {
+    session_id: "claude:c-root", provider: "claude", agent: "claude", pid: 1,
+    start: at(0), end: at(10),
+    intervals: [
+      { status: "working", start: at(0), end: at(5) },
+      { status: "dormant", start: at(5), end: at(7), subagents: 1 },
+      { status: "working", start: at(7), end: at(10) },
+    ],
+    subagents: [{ agent_type: "Explore", tool_use_id: "legacy", start: at(5), end: at(7) }],
+  };
+  const codex = {
+    // The source namespace says claude because that is what older provider
+    // configs called switchboard-ctl. lane.agent is the semantic provider.
+    session_id: "claude:x-root", provider: "claude", agent: "codex", pid: 2,
+    start: at(0), end: at(10),
+    intervals: [{ status: "working", start: at(0), end: at(10) }],
+  };
+  const input = {
+    lanes: [claude, codex],
+    summary: { by_status: { working: 18 * 60e9, dormant: 2 * 60e9 }, attention_union: 10 * 60e9, attention_per_session: 20 * 60e9, attention_fanout: 20 * 60e9 },
+    totals: { subagents: 1 },
+    agent_timeline: {
+      roots: [{
+        session_id: "claude:x-root", provider: "codex", pid: 2,
+        nodes: [
+          {
+            thread_id: "child-a", parent_thread_id: "x-root", nickname: "Atlas", role: "explorer", depth: 1,
+            runtime: "idle", attention_state: "none", lifecycle: "completed",
+            activity: [{ start: at(2), end: at(8) }],
+            attention: [{ reason: "approval", start: at(3), end: at(4) }],
+          },
+          {
+            thread_id: "child-b", parent_thread_id: "child-a", role: "reviewer", depth: 2,
+            runtime: "idle", attention_state: "none", lifecycle: "completed",
+            activity: [{ start: at(4), end: at(6) }],
+          },
+        ],
+      }],
+      summary: {},
+    },
+  };
+
+  const got = adaptProviderTimeline(input);
+  assert.notEqual(got, input, "the wire payload remains untouched");
+  assert.equal(got.lanes[0].subagents.length, 1, "Claude keeps only its native legacy projection");
+  assert.equal(got.lanes[1].subagents.length, 2, "Codex receives one bar per canonical child activity span");
+  assert.deepEqual(got.lanes[1].subagents.map((child) => child.tool_use_id), ["child-a", "child-b"]);
+  assert.equal(got.lanes[1].subagents[0].agent_type, "Atlas");
+  assert.equal(got.lanes[1].subagents[1].agent_type, "reviewer");
+  assert.equal(got.lanes[1].subagents[1].depth, 2, "nested graph depth reaches the sub-bar record");
+  assert.equal(got.lanes[1].subagents[0].attention[0].reason, "approval");
+  assert.deepEqual(got.lanes.map((lane) => lane.data_provider), ["claude", "codex"],
+    "mixed roots get provider accents even though their adapter namespace is shared");
+
+  assert.deepEqual(got.lanes[1].intervals, codex.intervals,
+    "an active child does not imply the Codex root stopped working");
+  assert.strictEqual(got.summary, input.summary,
+    "canonical graph evidence stays additive instead of silently rewriting the legacy summary");
+  assert.strictEqual(got.totals, input.totals,
+    "canonical nodes are not reclassified as legacy Task launches");
+  const profile = concurrencyProfile(workIntervalsMs(got.lanes));
+  assert.equal(profile.maxN, 4, "nested Codex children are visible as separate agents aloft");
+  assert.equal(profile.integralMs, 28 * MIN,
+    "Codex root work and child work remain separately observable when they overlap");
+  assert.deepEqual(graphAwareAttention(got.summary, got.lanes), {
+    attention_union: 10 * 60e9,
+    attention_per_session: 20 * 60e9,
+    attention_fanout: 28 * 60e9,
+  }, "graph-aware headline accounting is derived without mutating the wire summary");
+});
+
+test("adaptProviderTimeline should degrade without changing accounting when canonical child history is absent", () => {
+  const input = {
+    lanes: [{ session_id: "x", agent: "codex", intervals: [] }],
+    summary: { attention_fanout: 7 }, totals: { subagents: 0 },
+  };
+  const got = adaptProviderTimeline(input);
+  assert.deepEqual(got.summary, input.summary);
+  assert.deepEqual(got.totals, input.totals);
+  assert.deepEqual(got.lanes[0].subagents, undefined);
+  assert.deepEqual(graphAwareAttention(input.summary, got.lanes), {
+    attention_union: 0,
+    attention_per_session: 0,
+    attention_fanout: 7,
+  }, "old and hook-only payloads keep the producer's established figures");
 });
 
 // ---------------------------------------------------------------------------

@@ -20,6 +20,11 @@
 //   - labels[] is the full raw name history (incl. the "Claude Code" default
 //     and auto-generated titles) — used only as a lead-label fallback.
 //   - project_full is an OPTIONAL pretty project name; treat as may-be-absent.
+//   - lane.agent identifies the semantic agent provider (Claude or Codex), while
+//     lane.provider is the adapter namespace used by merged dashboard sources.
+//   - agent_timeline is the provider-neutral child-thread graph. Codex children
+//     are projected into lane.subagents at the provider boundary so every
+//     existing chart can consume them without learning Codex's wire format.
 //   - timestamps are RFC3339; segment start/end here are epoch ms.
 // ---------------------------------------------------------------------------
 
@@ -52,6 +57,114 @@
       return id.slice(lane.provider.length + 1);
     }
     return id;
+  }
+
+  // Providers share the lane envelope but not necessarily the same child-agent
+  // surface. Claude's historical adapter writes lane.subagents[] directly;
+  // Codex records provider-neutral child threads under agent_timeline. Keeping
+  // that distinction explicit prevents a Codex lane from being mistaken for a
+  // Claude lane merely because both arrived through switchboard-ctl (or because
+  // an older merged config still calls that subprocess provider "claude").
+  const PROVIDER_ADAPTERS = Object.freeze({
+    claude: Object.freeze({ children: "lane.subagents" }),
+    codex: Object.freeze({ children: "agent_timeline" }),
+  });
+
+  // laneProvider is the semantic agent-data provider shown by the dashboard.
+  // lane.provider remains the adapter namespace used for merged ids and memory
+  // joins; lane.agent wins only when it names a provider with a first-class
+  // adapter. Thus an Arachne lane whose agent is "opus" stays Arachne, while a
+  // Codex lane arriving through a legacy provider="claude" config reads Codex.
+  function laneProvider(lane) {
+    if (!lane) return "";
+    const agent = String(lane.agent || "").toLowerCase();
+    if (PROVIDER_ADAPTERS[agent]) return agent;
+    return String(lane.provider || agent || "").toLowerCase();
+  }
+
+  function rootMatchesLane(root, lane) {
+    if (!root || !lane) return false;
+    const rootProvider = String(root.provider || "").toLowerCase();
+    if (rootProvider && rootProvider !== laneProvider(lane)) return false;
+
+    const rootID = root.session_id || null;
+    const laneID = lane.session_id || null;
+    if (rootID && laneID) {
+      if (rootID === laneID || rootID === rawSessionId(lane)) return true;
+      // A merged lane and a pre-merge canonical root can meet at this seam when
+      // reading an envelope written by a dashboard version that did not yet
+      // namespace agent_timeline roots.
+      if (lane.provider && laneID === lane.provider + ":" + rootID) return true;
+      return false;
+    }
+    return !rootID && !laneID && root.pid != null && lane.pid != null && root.pid === lane.pid;
+  }
+
+  function codexChildSpans(root) {
+    const out = [];
+    for (const node of (root && root.nodes) || []) {
+      if (!node || !node.thread_id) continue;
+      for (const span of node.activity || []) {
+        const start = Date.parse(span && span.start), end = Date.parse(span && span.end);
+        if (!(Number.isFinite(start) && Number.isFinite(end) && end > start)) continue;
+        out.push({
+          agent_type: node.nickname || node.role || "Codex agent",
+          tool_use_id: node.thread_id,
+          nickname: node.nickname || "",
+          role: node.role || "",
+          parent_thread_id: node.parent_thread_id || "",
+          depth: node.depth || 1,
+          runtime: node.runtime || "unknown",
+          attention_state: node.attention_state || "none",
+          lifecycle: node.lifecycle || "unknown",
+          attention: (node.attention || []).map((wait) => ({ ...wait })),
+          start: span.start,
+          end: span.end,
+          suspect: !!span.suspect,
+          suspect_reason: span.suspect_reason || "",
+          canonical_agent: true,
+        });
+      }
+    }
+    return out;
+  }
+
+  function childSpanKey(span) {
+    return [span && span.tool_use_id, span && span.start, span && span.end].join("\u0000");
+  }
+
+  // adaptProviderTimeline is the provider boundary used when a payload lands.
+  // Claude needs no conversion. Codex roots are joined by stable session id
+  // (pid only before identification) and projected as sub-bars. The canonical
+  // graph is additive evidence: projecting it must not rewrite the root lane's
+  // status or Switchboard's established summary/totals.
+  function adaptProviderTimeline(data) {
+    if (!data || typeof data !== "object") return data;
+    const lanes = (data.lanes || []).map((lane) => ({ ...lane }));
+    const providerKinds = new Set(lanes.map(laneProvider).filter(Boolean));
+    if (providerKinds.size > 1) {
+      for (const lane of lanes) lane.data_provider = laneProvider(lane);
+    }
+    const roots = (data.agent_timeline && data.agent_timeline.roots) || [];
+
+    for (let i = 0; i < lanes.length; i++) {
+      const lane = lanes[i];
+      const adapter = PROVIDER_ADAPTERS[laneProvider(lane)];
+      if (!adapter || adapter.children !== "agent_timeline") continue;
+      const root = roots.find((candidate) => rootMatchesLane(candidate, lane));
+      if (!root) continue;
+      const existing = (lane.subagents || []).map((child) => ({ ...child }));
+      const seen = new Set(existing.map(childSpanKey));
+      const canonical = codexChildSpans(root).filter((child) => {
+        const key = childSpanKey(child);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      if (!canonical.length) continue;
+      lane.subagents = [...existing, ...canonical];
+    }
+    return { ...data, lanes };
   }
 
   // leadLabel is the name shown for the pre-/name stretch: project_full if the
@@ -487,6 +600,35 @@
     return {
       points, maxN, integralMs, activeMs,
       avgActive: activeMs > 0 ? integralMs / activeMs : null,
+    };
+  }
+
+  // graphAwareAttention keeps the canonical Codex surface additive on the wire
+  // while letting graph-aware views report what they actually draw. The legacy
+  // summary remains authoritative until at least one projected canonical child
+  // is present. Then agent-hours and wall-clock are derived from the same root
+  // + child intervals as the aloft chart, and per-session remains a union within
+  // each root lane rather than double-counting parallel children.
+  function graphAwareAttention(summary, lanes) {
+    const base = summary || {};
+    const hasCanonical = (lanes || []).some((lane) =>
+      (lane.subagents || []).some((child) => child.canonical_agent));
+    if (!hasCanonical) {
+      return {
+        attention_union: base.attention_union || 0,
+        attention_per_session: base.attention_per_session || 0,
+        attention_fanout: base.attention_fanout || 0,
+      };
+    }
+    const profile = concurrencyProfile(workIntervalsMs(lanes));
+    let perSessionMs = 0;
+    for (const lane of lanes || []) {
+      perSessionMs += concurrencyProfile(workIntervalsMs([lane])).activeMs;
+    }
+    return {
+      attention_union: profile.activeMs * 1e6,
+      attention_per_session: perSessionMs * 1e6,
+      attention_fanout: profile.integralMs * 1e6,
     };
   }
 
@@ -1494,10 +1636,11 @@
 
   return {
     scaleGeometry,
-    laneIdentity, rawSessionId, leadLabel, nameSegments, buildBar, buildBars,
+    laneIdentity, rawSessionId, laneProvider, adaptProviderTimeline,
+    leadLabel, nameSegments, buildBar, buildBars,
     spanInefficiency, switchArrivals, presenceSplitMs, awayIdleMs,
     deflickerIntervals, deflickerLanes, FLICKER_MS,
-    packLanes, aloftSpans, workIntervalsMs, concurrencyProfile,
+    packLanes, aloftSpans, workIntervalsMs, concurrencyProfile, graphAwareAttention,
     alignLiveTail,
     projectHoursMs, suspectSinceMs, clipSpanMs, laneActiveMs, suspectTailMs,
     freeBlockStats, FREE_BLOCK_DEEP_MS, FREE_BLOCK_FRAG_MS,

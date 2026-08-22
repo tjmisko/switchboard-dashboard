@@ -22,7 +22,7 @@ func main() {
 	dir := flag.String("dir", "", "history dir passed to ctl as --dir; empty uses ctl's own default")
 	plan := flag.String("plan", DefaultPlanPath, "cached OAuth plan-usage file, read read-only for the utilization gauge")
 	summaries := flag.String("summaries", defaultSummariesDir(), "session-summary records written by session-digest; empty disables /api/summaries")
-	providers := flag.String("providers", "", "providers config JSON; when set, replaces the default single claude provider with a merged adapter set")
+	providers := flag.String("providers", "", "providers config JSON; when set, replaces the default Switchboard adapter with a merged adapter set")
 	settingsPath := flag.String("settings", DefaultSettingsPath(), "operator-model settings JSON (away threshold, switch recovery); missing file means defaults")
 	flag.Parse()
 

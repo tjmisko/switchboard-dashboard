@@ -102,6 +102,7 @@ func Merge(inputs []Sourced, opts MergeOptions) *Timeline {
 		if out.PlanWindow == nil && t.PlanWindow != nil {
 			out.PlanWindow = t.PlanWindow
 		}
+		mergeAgentTimeline(out, in)
 		out.ProviderErrors = append(out.ProviderErrors, t.ProviderErrors...)
 		if len(t.Activity) > 0 {
 			activityInputs = append(activityInputs, t.Activity)
@@ -133,11 +134,72 @@ func Merge(inputs []Sourced, opts MergeOptions) *Timeline {
 	out.Summary.AttentionUnion = UnionNanos(spans)
 
 	out.Activity = mergeActivity(activityInputs)
+	recomputeAgentUnions(out.AgentTimeline)
 
 	if opts.Window != "" {
 		out.Window = opts.Window
 	}
 	return out
+}
+
+// mergeAgentTimeline preserves Switchboard's additive child-thread surface in
+// a multi-provider response. Root ids are namespaced with the adapter id by the
+// same rule as lane ids, so the frontend can join a child graph to its session
+// without collisions. The root's own Provider field remains Claude/Codex: it is
+// the graph semantics discriminator, not the subprocess adapter namespace.
+func mergeAgentTimeline(out *Timeline, in Sourced) {
+	if in.Timeline == nil || in.Timeline.AgentTimeline == nil {
+		return
+	}
+	if out.AgentTimeline == nil {
+		out.AgentTimeline = &AgentTimeline{Roots: []AgentRootTimeline{}}
+	}
+	src := in.Timeline.AgentTimeline
+	for i, root := range src.Roots {
+		root.SessionID = namespaceID(in.Provider, root.SessionID, root.PID, i)
+		if root.Provider == "" {
+			root.Provider = in.Provider
+		}
+		out.AgentTimeline.Roots = append(out.AgentTimeline.Roots, root)
+	}
+	out.AgentTimeline.Summary.AgentActivity += src.Summary.AgentActivity
+	out.AgentTimeline.Summary.UserAttention += src.Summary.UserAttention
+	out.AgentTimeline.Summary.ApprovalAttention += src.Summary.ApprovalAttention
+	out.AgentTimeline.Summary.UserInputAttention += src.Summary.UserInputAttention
+	out.AgentTimeline.Summary.SuspectSpans += src.Summary.SuspectSpans
+	out.AgentTimeline.Summary.SuspectDuration += src.Summary.SuspectDuration
+}
+
+// recomputeAgentUnions handles the two canonical graph figures that cannot be
+// added across providers. Suspect spans stay visible but carry no credit, just
+// as they do in Switchboard's producer and in laneAloftSpans above.
+func recomputeAgentUnions(agents *AgentTimeline) {
+	if agents == nil {
+		return
+	}
+	var activity, attention [][2]int64
+	for _, root := range agents.Roots {
+		for _, node := range root.Nodes {
+			for _, span := range node.Activity {
+				if span.Suspect {
+					continue
+				}
+				if start, end, ok := SpanNanos(span.Start, span.End); ok {
+					activity = append(activity, [2]int64{start, end})
+				}
+			}
+			for _, span := range node.Attention {
+				if span.Suspect {
+					continue
+				}
+				if start, end, ok := SpanNanos(span.Start, span.End); ok {
+					attention = append(attention, [2]int64{start, end})
+				}
+			}
+		}
+	}
+	agents.Summary.ActivityUnion = UnionNanos(activity)
+	agents.Summary.UserAttentionUnion = UnionNanos(attention)
 }
 
 // namespaceID prefixes a lane's identity with its provider so merged sessions

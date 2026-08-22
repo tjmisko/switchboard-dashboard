@@ -133,6 +133,61 @@ func TestMerge_shouldOverrideWindowLabelWhenOptionSet(t *testing.T) {
 	}
 }
 
+func TestMerge_shouldPreserveNamespaceAndUnionCanonicalAgentTimelines(t *testing.T) {
+	const minute = int64(60 * 1e9)
+	inputs := []Sourced{
+		{Provider: "host", Timeline: &Timeline{
+			AgentTimeline: &AgentTimeline{
+				Roots: []AgentRootTimeline{{
+					SessionID: "root-a", PID: 11, Provider: "codex",
+					Nodes: []AgentTimelineNode{{
+						ThreadID: "child-a", ParentThreadID: "root-a", Depth: 1,
+						Activity:  []AgentActivitySpan{{Start: "2026-06-26T10:05:00Z", End: "2026-06-26T10:20:00Z"}},
+						Attention: []AgentAttentionSpan{{Reason: "approval", Start: "2026-06-26T10:10:00Z", End: "2026-06-26T10:15:00Z"}},
+					}},
+				}},
+				Summary: AgentSummary{AgentActivity: 15 * minute, UserAttention: 5 * minute, ApprovalAttention: 5 * minute},
+			},
+			Summary: Summary{ByStatus: map[string]int64{}},
+		}},
+		{Provider: "remote", Timeline: &Timeline{
+			AgentTimeline: &AgentTimeline{
+				Roots: []AgentRootTimeline{{
+					SessionID: "root-b", PID: 22, Provider: "claude",
+					Nodes: []AgentTimelineNode{{
+						ThreadID: "child-b", ParentThreadID: "root-b", Depth: 1,
+						Activity:  []AgentActivitySpan{{Start: "2026-06-26T10:10:00Z", End: "2026-06-26T10:25:00Z"}},
+						Attention: []AgentAttentionSpan{{Reason: "user_input", Start: "2026-06-26T10:12:00Z", End: "2026-06-26T10:18:00Z"}},
+					}},
+				}},
+				Summary: AgentSummary{AgentActivity: 15 * minute, UserAttention: 6 * minute, UserInputAttention: 6 * minute},
+			},
+			Summary: Summary{ByStatus: map[string]int64{}},
+		}},
+	}
+
+	out := Merge(inputs, MergeOptions{})
+	if out.AgentTimeline == nil || len(out.AgentTimeline.Roots) != 2 {
+		t.Fatalf("agent_timeline = %+v, want two roots", out.AgentTimeline)
+	}
+	if got := out.AgentTimeline.Roots[0]; got.SessionID != "host:root-a" || got.Provider != "codex" {
+		t.Fatalf("first root = %+v, want namespaced id with Codex semantics retained", got)
+	}
+	if got := out.AgentTimeline.Roots[1]; got.SessionID != "remote:root-b" || got.Provider != "claude" {
+		t.Fatalf("second root = %+v, want namespaced id with Claude semantics retained", got)
+	}
+	summary := out.AgentTimeline.Summary
+	if summary.AgentActivity != 30*minute || summary.ActivityUnion != 20*minute {
+		t.Fatalf("agent activity = sum %d / union %d, want 30m / 20m", summary.AgentActivity, summary.ActivityUnion)
+	}
+	if summary.UserAttention != 11*minute || summary.UserAttentionUnion != 8*minute {
+		t.Fatalf("user attention = sum %d / union %d, want 11m / 8m", summary.UserAttention, summary.UserAttentionUnion)
+	}
+	if summary.ApprovalAttention != 5*minute || summary.UserInputAttention != 6*minute {
+		t.Fatalf("attention reasons lost: %+v", summary)
+	}
+}
+
 // oneLane wraps a single lane as a single provider's envelope.
 func oneLane(lane Lane) []Sourced {
 	return []Sourced{{Provider: "claude", Timeline: &Timeline{
