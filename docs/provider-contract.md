@@ -172,6 +172,10 @@ Identity rules that matter:
   behavior and presentation (`claude` versus `codex`); `provider` is the adapter
   namespace used for merged ids. Do not copy your adapter id into every lane if
   the adapter multiplexes several agent implementations.
+- Known semantic ids also select stable dashboard labels. In particular,
+  `agent: "codex"` renders as **Codex / OpenAI**, including in a default live feed
+  where Codex is the only provider present. This presentation label is not a
+  wire identity; continue to emit the lowercase `codex` id.
 
 ### Interval — one status segment
 
@@ -231,7 +235,10 @@ acknowledgement trap that produces exactly that.
       "thread_id": "child-thread", "parent_thread_id": "root-thread",
       "nickname": "Atlas", "role": "explorer", "depth": 1,
       "runtime": "idle", "attention_state": "none", "lifecycle": "completed",
-      "activity": [{"start": "…", "end": "…"}],
+      "activity": [
+        {"start": "…", "end": "…"},
+        {"start": "…", "end": "…"} // same child restarted later
+      ],
       "attention": [{"reason": "approval", "start": "…", "end": "…"}]
     }],
     "agent_activity": 40000000000,
@@ -252,10 +259,27 @@ root joins to its lane by bare `session_id` (falling back to pid only when both
 ids are absent), and `root.provider` carries the semantic provider. Each node
 retains its parent id and depth, so grandchildren stay visible as nested agents.
 
-`activity[]` records the child's pending/running lifetime. `attention[]` records
-child-specific `approval` and `user_input` waits; these may overlap activity and
-the dashboard draws them on that child's bar. Runtime, attention, and lifecycle
-are independent last-observed axes, not one flattened status.
+Each `activity[]` entry records one pending/running interval. A child identity is
+stable across reactivation: a stop closes the current interval and a later start
+adds another interval to the same node, so consumers must not assume one node
+equals one span. `attention[]` records child-specific `approval` and
+`user_input` waits; these may overlap activity and the dashboard draws them on
+that child's bar. Runtime, attention, and lifecycle are independent
+last-observed axes, not one flattened status, so a completed node can still
+carry earlier activity spans.
+
+Topology is not positive liveness. A node with `runtime: "not_loaded"` (or
+`"unknown"`), `lifecycle: "unknown"`, no actionable attention, and no
+`activity[]` remains valid structural evidence but contributes zero fanout. Do
+not synthesize activity from its mere presence, nickname, or parentage.
+
+On Switchboard's current ordinary-Codex path, a standalone app-server supplies
+the exact child graph while standard `SubagentStart`/`SubagentStop` hooks supply
+reversible lifecycle edges only after their exact child id matches a fresh
+non-root graph node for the same root lifetime. The graph remains the structural
+authority, so hook-overlay provenance does not add a new timeline field. Missing
+hooks or stale/unmatched topology degrade to a visible-but-uncredited node, not
+to a guessed span.
 
 Current Switchboard emits both this graph and legacy `lane.subagents[]` for
 Claude during migration, but Codex has only the canonical graph. The dashboard
@@ -492,6 +516,8 @@ your source genuinely multiplexes several.
 - [ ] `session_id` stable across polls, bare (unnamespaced), distinct per run.
 - [ ] `lane.agent` names the semantic provider; mixed adapters do not flatten it.
 - [ ] Canonical roots use bare lane ids and contain descendants only.
+- [ ] Repeated starts for one child append activity spans under the same thread id.
+- [ ] Topology-only children receive no activity or fanout credit.
 - [ ] Every span has `end` strictly after `start`.
 - [ ] Statuses drawn from the table in §3.
 - [ ] `summary` reconciles with the lanes, honoring the suspect clip.

@@ -66,8 +66,8 @@
   // Claude lane merely because both arrived through switchboard-ctl (or because
   // an older merged config still calls that subprocess provider "claude").
   const PROVIDER_ADAPTERS = Object.freeze({
-    claude: Object.freeze({ children: "lane.subagents" }),
-    codex: Object.freeze({ children: "agent_timeline" }),
+    claude: Object.freeze({ children: "lane.subagents", label: "Claude" }),
+    codex: Object.freeze({ children: "agent_timeline", label: "Codex / OpenAI" }),
   });
 
   // laneProvider is the semantic agent-data provider shown by the dashboard.
@@ -80,6 +80,37 @@
     const agent = String(lane.agent || "").toLowerCase();
     if (PROVIDER_ADAPTERS[agent]) return agent;
     return String(lane.provider || agent || "").toLowerCase();
+  }
+
+  // providerLabel is presentation metadata for a semantic provider id. Keep it
+  // here, beside the adapter registry, so the legend, lane hover, and session
+  // identity card cannot drift into three different names for the same source.
+  function providerLabel(provider) {
+    const id = String(provider || "").toLowerCase();
+    if (!id) return "";
+    const adapter = PROVIDER_ADAPTERS[id];
+    if (adapter && adapter.label) return adapter.label;
+    return id.charAt(0).toUpperCase() + id.slice(1);
+  }
+
+  // providerLegend returns the semantic provider key the UI should render.
+  // An adapter namespace or data_provider marker opts a single-provider feed
+  // into the key; a completely untagged single Claude feed stays compact.
+  function providerLegend(lanes) {
+    const list = lanes || [];
+    const counts = new Map();
+    for (const lane of list) {
+      const provider = laneProvider(lane);
+      if (!provider) continue;
+      counts.set(provider, (counts.get(provider) || 0) + 1);
+    }
+    const explicitlyIdentified = list.some((lane) => !!(lane.provider || lane.data_provider));
+    if (counts.size === 0 || (counts.size === 1 && !explicitlyIdentified)) return [];
+    return [...counts.keys()].sort().map((provider) => ({
+      provider,
+      label: providerLabel(provider),
+      count: counts.get(provider),
+    }));
   }
 
   function rootMatchesLane(root, lane) {
@@ -142,7 +173,10 @@
     if (!data || typeof data !== "object") return data;
     const lanes = (data.lanes || []).map((lane) => ({ ...lane }));
     const providerKinds = new Set(lanes.map(laneProvider).filter(Boolean));
-    if (providerKinds.size > 1) {
+    // A lone Claude feed keeps the historical unadorned lane treatment. Codex
+    // is always identified, including when it is the only live provider; mixed
+    // semantic feeds identify every lane so the accent key is complete.
+    if (providerKinds.size > 1 || providerKinds.has("codex")) {
       for (const lane of lanes) lane.data_provider = laneProvider(lane);
     }
     const roots = (data.agent_timeline && data.agent_timeline.roots) || [];
@@ -1636,7 +1670,7 @@
 
   return {
     scaleGeometry,
-    laneIdentity, rawSessionId, laneProvider, adaptProviderTimeline,
+    laneIdentity, rawSessionId, laneProvider, providerLabel, providerLegend, adaptProviderTimeline,
     leadLabel, nameSegments, buildBar, buildBars,
     spanInefficiency, switchArrivals, presenceSplitMs, awayIdleMs,
     deflickerIntervals, deflickerLanes, FLICKER_MS,

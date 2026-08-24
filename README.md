@@ -29,8 +29,8 @@ invocation, so it loads instantly and runs offline.
   stretch falls back to the project name, rendered dim.
 - **Child-agent sub-bars** for delegated work: Claude `Task` spans and Codex
   child threads share the timeline treatment, while Codex bars also expose
-  nickname/role, nesting depth, lifecycle, and approval or input waits. Hover
-  for detail; click to pin a popout.
+  nickname/role, nesting depth, lifecycle, stop/restart intervals, and approval
+  or input waits. Hover for detail; click to pin a popout.
 - **Focus/attention overlay** highlighting spans where the session was focused and
   active; global idle periods are dimmed.
 - **Operator lane** partitioning the running window into work blocks and time
@@ -190,20 +190,22 @@ The dashboard has two provider boundaries that should not be conflated:
 
 With no `--providers`, the dashboard runs one Switchboard adapter and proxies
 its bytes verbatim. Its historical adapter id remains `claude` for compatibility,
-but a Codex lane is still displayed as Codex. Point `--providers` at a config to
-**merge** several adapter envelopes into one namespaced view — lanes from every
-adapter in one timeline and one cross-provider "agents aloft" count. Semantic
-Claude/Codex lanes in the same envelope also receive distinct accent spines and
-legend chips. A failed adapter lands in `provider_errors`; only an
+but a Codex lane is displayed under the explicit **Codex / OpenAI** provider
+label even when it is the only semantic provider online. Point `--providers` at
+a config to **merge** several adapter envelopes into one namespaced view — lanes
+from every adapter in one timeline and one cross-provider "agents aloft" count.
+Semantic Claude/Codex lanes in the same envelope also receive distinct accent
+spines and legend chips. A failed adapter lands in `provider_errors`; only an
 all-providers-failed request is a `502`. See `examples/providers.json`.
 
 Claude's established delegated-work surface is `lane.subagents[]`. Codex child
 threads arrive in the provider-neutral top-level `agent_timeline`; the dashboard's
 Codex adapter joins each root to its lane and projects child activity as the same
-sub-bars without changing the root status or Switchboard's legacy aggregates.
-This is intentionally graceful for old or hook-only history: when no canonical
-child events were recorded, the Codex lane still renders and simply has no child
-bars.
+sub-bars without changing the root status or Switchboard's legacy aggregates. A
+single exact child can contribute several disjoint bars when Codex stops and
+later restarts it. Topology-only children (`not_loaded`/`unknown`, with no
+positive lifecycle interval) remain zero-credit evidence: the Codex lane still
+renders, but the dashboard does not manufacture fanout from their presence.
 
 **Writing your own provider:** [`docs/provider-contract.md`](docs/provider-contract.md)
 is the full spec — the process contract, the envelope field by field with units,
@@ -402,8 +404,10 @@ implementer's spec for anyone writing a provider:
   is a float in dollars** recomputed by the producer from tokens × per-model price.
 - The envelope is `{window, lanes, summary, totals}` with optional top-level
   `activity`, `agent_timeline`, and `plan_window`. `agent_timeline` is additive:
-  it contains descendant threads only, leaving root work in `lanes`. Every v2
-  field is optional; older day-files omit them and the UI degrades gracefully.
+  it contains descendant threads only, leaving root work in `lanes`. One child
+  may have multiple activity spans after stop/restart; a topology-only child may
+  have none. Every v2 field is optional; older day-files omit them and the UI
+  degrades gracefully.
 
 The summary exposes three attention figures: **union** (wall-clock with at least
 one session active), **per-session** (the sum of per-session active time), and

@@ -33,8 +33,10 @@ type Timeline struct {
 }
 
 // Lane is one session's bar. Identity is keyed by session_id (falling back to
-// pid); Provider names the adapter that produced it so the UI can tag/color it
-// and so merged session ids never collide across providers.
+// pid). Agent names the semantic agent implementation (for example claude or
+// codex); Provider names the adapter namespace used to merge it. A Switchboard
+// adapter can therefore emit both semantic kinds without flattening their UI
+// identity or colliding with another adapter's session ids.
 type Lane struct {
 	SessionID      string     `json:"session_id,omitempty"`
 	PID            int        `json:"pid,omitempty"`
@@ -133,9 +135,11 @@ type AgentRootTimeline struct {
 	UserAttention int64               `json:"user_attention"`
 }
 
-// AgentTimelineNode is one provider-neutral child thread. The three current
-// axes are retained for display; Activity and Attention carry the history the
-// dashboard can draw and account for.
+// AgentTimelineNode is one provider-neutral child thread. Runtime, attention,
+// and lifecycle are the last observed values for display; Activity and
+// Attention carry the historical intervals the dashboard can draw and account
+// for. Structural presence alone is not activity: a topology-only node can
+// legitimately have no Activity spans.
 type AgentTimelineNode struct {
 	ThreadID       string               `json:"thread_id"`
 	ParentThreadID string               `json:"parent_thread_id,omitempty"`
@@ -149,7 +153,9 @@ type AgentTimelineNode struct {
 	Attention      []AgentAttentionSpan `json:"attention,omitempty"`
 }
 
-// AgentActivitySpan is one child thread's pending/running lifetime.
+// AgentActivitySpan is one child thread's pending/running interval. A child can
+// stop and later restart, so one AgentTimelineNode may carry several disjoint
+// spans with the same stable ThreadID.
 type AgentActivitySpan struct {
 	Start         string `json:"start"`
 	End           string `json:"end"`

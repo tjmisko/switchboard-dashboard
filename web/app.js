@@ -84,10 +84,9 @@ const STATUS_MEANING = {
   delegating: "Legacy: parent delegating to a subagent.",
 };
 
-// displayName renders a wire identifier (a status, a provider) as the dashboard's
-// own label. The contract's vocabulary is lowercase and the field guide teaches
-// it that way; a legend beside "Working" and "Idle" is the dashboard speaking,
-// not the wire, so it gets a capital. Formula strings still quote the raw value.
+// displayName renders a wire status identifier as the dashboard's own label.
+// Semantic provider names come from model.js providerLabel(), where product and
+// company presentation metadata live beside the provider adapter contract.
 function displayName(s) {
   return String(s).charAt(0).toUpperCase() + String(s).slice(1);
 }
@@ -1693,32 +1692,24 @@ function renderStatusKey(summary, awayIdleNs) {
   attachFormulaTips(el.statusKey);
 }
 
-// renderProviderKey: the provider legend, shown for a merged adapter response or
-// a semantically mixed Switchboard feed. Each chip shows the provider's accent
-// and lane count; a single untagged provider keeps the historical clean header.
+// renderProviderKey: the provider legend, shown for a merged adapter response, a
+// semantically mixed Switchboard feed, or a Codex-only feed explicitly tagged by
+// adaptProviderTimeline. Each chip shows the semantic provider's accent and lane
+// count; a lone untagged Claude feed keeps the historical clean header.
 function renderProviderKey(lanes) {
   if (!el.providerKey) return;
-  const counts = new Map();
-  for (const lane of lanes || []) {
-    const provider = laneProvider(lane);
-    if (!provider) continue;
-    counts.set(provider, (counts.get(provider) || 0) + 1);
-  }
-  // An untagged, single-provider payload keeps the historical clean legend;
-  // mixed Claude/Codex data is the new case that needs an explicit key.
-  const explicitlyMerged = (lanes || []).some((lane) => !!lane.provider);
-  if (counts.size === 0 || (counts.size === 1 && !explicitlyMerged)) {
+  const entries = providerLegend(lanes);
+  if (!entries.length) {
     el.providerKey.hidden = true;
     el.providerKey.innerHTML = "";
     return;
   }
-  const names = [...counts.keys()].sort();
   el.providerKey.hidden = false;
-  el.providerKey.innerHTML = names.map((p) =>
+  el.providerKey.innerHTML = entries.map((entry) =>
     `<span class="pk">
-        <span class="pk-dot" style="background:${provColor(p)}"></span>
-        <span class="pk-name">${escapeHTML(displayName(p))}</span>
-        <span class="pk-count">${counts.get(p)}</span>
+        <span class="pk-dot" style="background:${provColor(entry.provider)}"></span>
+        <span class="pk-name">${escapeHTML(entry.label)}</span>
+        <span class="pk-count">${entry.count}</span>
       </span>`).join("");
 }
 
@@ -2537,7 +2528,7 @@ function drawSession(lane, rowTop, x, haveActivity, activeGlobal, presentGlobal)
       class: "provider-spine", x: spineX, y: nameY, width: 3,
       height: barY + GEO.BAR_H - nameY, rx: 1, fill: provColor(dataProvider),
     });
-    attachTip(spine, () => `<div class="t-status" style="color:${provColor(dataProvider)}">${escapeHTML(displayName(dataProvider))}</div><div class="t-hint">Data provider</div>`);
+    attachTip(spine, () => `<div class="t-status" style="color:${provColor(dataProvider)}">${escapeHTML(providerLabel(dataProvider))}</div><div class="t-hint">Data provider</div>`);
     el.svg.appendChild(spine);
   }
 
@@ -3636,7 +3627,7 @@ function sessionPopoutHTML(lane) {
 
   const idBits = [];
   const dataProvider = laneProvider(lane);
-  if (dataProvider) idBits.push(dataProvider);
+  if (dataProvider) idBits.push(providerLabel(dataProvider));
   if (lane.agent && lane.agent !== dataProvider) idBits.push(lane.agent);
   if (lane.pid != null) idBits.push("pid " + lane.pid);
 

@@ -8,7 +8,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
-  laneIdentity, rawSessionId, laneProvider, adaptProviderTimeline,
+  laneIdentity, rawSessionId, laneProvider, providerLabel, providerLegend, adaptProviderTimeline,
   leadLabel, nameSegments, buildBars, spanInefficiency, switchArrivals,
   deflickerIntervals, deflickerLanes, FLICKER_MS,
   presenceSplitMs, awayIdleMs, packLanes,
@@ -979,6 +979,12 @@ test("laneProvider should distinguish Codex from Claude inside one switchboard s
   assert.equal(laneProvider({ provider: "arachne", agent: "opus" }), "arachne");
 });
 
+test("providerLabel should give Codex its product and company identity", () => {
+  assert.equal(providerLabel("codex"), "Codex / OpenAI");
+  assert.equal(providerLabel("claude"), "Claude");
+  assert.equal(providerLabel("arachne"), "Arachne");
+});
+
 test("adaptProviderTimeline should project nested Codex threads without duplicating Claude subagents", () => {
   const claude = {
     session_id: "claude:c-root", provider: "claude", agent: "claude", pid: 1,
@@ -1059,12 +1065,72 @@ test("adaptProviderTimeline should degrade without changing accounting when cano
   const got = adaptProviderTimeline(input);
   assert.deepEqual(got.summary, input.summary);
   assert.deepEqual(got.totals, input.totals);
+  assert.equal(got.lanes[0].data_provider, "codex",
+    "a Codex-only live feed still opts into the provider label and accent");
+  assert.deepEqual(providerLegend(got.lanes), [{
+    provider: "codex", label: "Codex / OpenAI", count: 1,
+  }], "the rendered provider key remains visible for one online Codex session");
   assert.deepEqual(got.lanes[0].subagents, undefined);
   assert.deepEqual(graphAwareAttention(input.summary, got.lanes), {
     attention_union: 0,
     attention_per_session: 0,
     attention_fanout: 7,
-  }, "old and hook-only payloads keep the producer's established figures");
+  }, "old and activity-free payloads keep the producer's established figures");
+});
+
+test("adaptProviderTimeline should keep a lone Claude feed visually untagged", () => {
+  const got = adaptProviderTimeline({ lanes: [{ session_id: "c", agent: "claude", intervals: [] }] });
+  assert.equal(got.lanes[0].data_provider, undefined);
+  assert.deepEqual(providerLegend(got.lanes), []);
+});
+
+test("adaptProviderTimeline should preserve stop-and-restart spans for one exact Codex child", () => {
+  const input = {
+    lanes: [{
+      session_id: "root", agent: "codex", pid: 7,
+      intervals: [{ status: "working", start: at(0), end: at(20) }],
+    }],
+    summary: { attention_union: 20 * MIN * 1e6, attention_per_session: 20 * MIN * 1e6, attention_fanout: 20 * MIN * 1e6 },
+    agent_timeline: { roots: [{
+      session_id: "root", pid: 7, provider: "codex",
+      nodes: [{
+        thread_id: "child", parent_thread_id: "root", nickname: "Atlas", depth: 1,
+        runtime: "idle", attention_state: "none", lifecycle: "completed",
+        activity: [
+          { start: at(2), end: at(12) },
+          { start: at(14), end: at(18) },
+        ],
+      }],
+    }], summary: { agent_activity: 14 * MIN * 1e6 } },
+  };
+
+  const got = adaptProviderTimeline(input);
+  assert.deepEqual(got.lanes[0].subagents.map((span) => [span.tool_use_id, span.start, span.end]), [
+    ["child", at(2), at(12)],
+    ["child", at(14), at(18)],
+  ], "one child identity may contribute several disjoint activity intervals");
+  assert.equal(concurrencyProfile(workIntervalsMs(got.lanes)).integralMs, 34 * MIN,
+    "the root and both exact child intervals contribute to fanout");
+});
+
+test("adaptProviderTimeline should not infer fanout from topology-only Codex children", () => {
+  const input = {
+    lanes: [{ session_id: "root", agent: "codex", pid: 7, intervals: [] }],
+    summary: { attention_fanout: 11 },
+    agent_timeline: { roots: [{
+      session_id: "root", pid: 7, provider: "codex",
+      nodes: [{
+        thread_id: "child", parent_thread_id: "root", depth: 1,
+        runtime: "not_loaded", attention_state: "none", lifecycle: "unknown",
+      }],
+    }], summary: {} },
+  };
+
+  const got = adaptProviderTimeline(input);
+  assert.equal(got.lanes[0].subagents, undefined,
+    "structural presence without positive lifecycle evidence is not activity");
+  assert.equal(graphAwareAttention(got.summary, got.lanes).attention_fanout, 11,
+    "a topology-only node does not opt the headline into inferred accounting");
 });
 
 // ---------------------------------------------------------------------------
