@@ -9,8 +9,8 @@ Two questions, one investigation:
 2. **What is actually blocking it?** Four things, all in `app.js`, all free to
    fix, none of them the provider.
 
-All figures: 2026-08-13, live server on `localhost:8080`, real provider
-(2 merged), Chrome 151 over CDP.
+All figures: 2026-08-13, live server on `localhost:8080` (the default at the
+time; current builds use `8780`), real provider (2 merged), Chrome 151 over CDP.
 
 ## The blockers, ranked by what they cost you
 
@@ -220,10 +220,10 @@ hold to.
 
 ```bash
 curl -s -o /dev/null -w '%{time_total}\n' -D - \
-  "http://localhost:8080/api/timeline?day=2026-08-04" | rg -i '^x-cache'
+  "http://localhost:8780/api/timeline?day=2026-08-04" | rg -i '^x-cache'
 ```
 
 In-page figures: drive headless Chrome over CDP (see the repo memory note),
-navigate to `http://localhost:8080/`, and instrument `window.fetch` while calling
+navigate to `http://localhost:8780/`, and instrument `window.fetch` while calling
 `commitWindow` / `stepDay` — `app.js` top-level bindings (`dayCache`, `dataDay`,
 `win`, `settleTimeline`) are reachable from `Runtime.evaluate`.

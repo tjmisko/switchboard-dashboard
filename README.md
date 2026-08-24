@@ -110,7 +110,7 @@ page that teaches a machine the daemon does not run.
 
 ```sh
 go build -o switchboard-dashboard .
-./switchboard-dashboard            # serves http://localhost:8080
+./switchboard-dashboard            # serves http://localhost:8780
 ```
 
 It requires a current `switchboard-ctl` on `PATH` (with the `timeline` subcommand
@@ -127,14 +127,14 @@ with no Switchboard install:
 ```sh
 go build -o switchboard-dashboard .
 ./switchboard-dashboard --ctl ./testdata/stub-ctl.sh --plan ./testdata/plan-usage.json
-# open http://localhost:8080/?day=2026-06-26
+# open http://localhost:8780/?day=2026-06-26
 ```
 
 ## Flags
 
 | Flag          | Default                       | Description                                                              |
 | ------------- | ----------------------------- | ------------------------------------------------------------------------ |
-| `--port`      | `8080`                        | HTTP port.                                                               |
+| `--port`      | `8780`                        | HTTP port.                                                               |
 | `--ctl`       | `switchboard-ctl`             | The `switchboard-ctl` binary for the default Switchboard adapter.        |
 | `--dir`       | `""`                          | History dir passed to ctl; empty uses ctl's own.                         |
 | `--plan`      | `/tmp/claude-plan-usage.json` | Cached plan-usage file, read-only, for the gauge.                        |

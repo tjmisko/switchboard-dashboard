@@ -537,7 +537,7 @@ stub the fastest way to iterate on the shape — see
 ./switchboard-dashboard --providers examples/providers.json
 
 # check the wire shape directly
-curl -s 'localhost:8080/api/timeline?day=2026-06-26' | jq '{window, lanes: (.lanes|length), summary, provider_errors}'
+curl -s 'localhost:8780/api/timeline?day=2026-06-26' | jq '{window, lanes: (.lanes|length), summary, provider_errors}'
 ```
 
 If your provider is written in Go and lives in this repo, reuse

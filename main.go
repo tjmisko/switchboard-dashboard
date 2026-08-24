@@ -16,8 +16,10 @@ import (
 	"github.com/tjmisko/switchboard-dashboard/internal/provider"
 )
 
+const defaultPort = 8780
+
 func main() {
-	port := flag.Int("port", 8080, "HTTP port to listen on")
+	port := flag.Int("port", defaultPort, "HTTP port to listen on")
 	ctl := flag.String("ctl", "switchboard-ctl", "switchboard-ctl binary (resolved via PATH)")
 	dir := flag.String("dir", "", "history dir passed to ctl as --dir; empty uses ctl's own default")
 	plan := flag.String("plan", DefaultPlanPath, "cached OAuth plan-usage file, read read-only for the utilization gauge")
