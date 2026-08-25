@@ -62,6 +62,7 @@ type Lane struct {
 	// it is deliberately separate from additive window cost.
 	PricingGroups []PricingGroup        `json:"pricing_groups,omitempty"`
 	VendorUsage   *VendorUsageAggregate `json:"vendor_usage,omitempty"`
+	UsageCoverage string                `json:"usage_coverage,omitempty"`
 
 	// Agent is the client implementation. These fields identify who executed and
 	// billed the request; neither can safely be inferred from Agent alone.
@@ -245,6 +246,7 @@ type Totals struct {
 	PricingGroups  []PricingGroup        `json:"pricing_groups,omitempty"`
 	VendorUsage    *VendorUsageAggregate `json:"vendor_usage,omitempty"`
 	Cost           *CostEstimate         `json:"cost,omitempty"`
+	UsageCoverage  string                `json:"usage_coverage,omitempty"`
 }
 
 // PlanWindow is the rolling plan-usage total (a Claude/Anthropic capability;
@@ -258,6 +260,7 @@ type PlanWindow struct {
 	PricingGroups            []PricingGroup  `json:"pricing_groups,omitempty"`
 	Cost                     *CostEstimate   `json:"cost,omitempty"`
 	VendorUsageOmittedReason string          `json:"vendor_usage_omitted_reason,omitempty"`
+	UsageCoverage            string          `json:"usage_coverage,omitempty"`
 	TokIn                    int64           `json:"tok_in,omitempty"`
 	TokOut                   int64           `json:"tok_out,omitempty"`
 	TokCacheRead             int64           `json:"tok_cache_read,omitempty"`

@@ -102,6 +102,7 @@ func Merge(inputs []Sourced, opts MergeOptions) *Timeline {
 		mergeUsageBreakdown(&out.Totals.Usage, t.Totals.Usage)
 		out.Totals.PricingGroups = append(out.Totals.PricingGroups, t.Totals.PricingGroups...)
 		out.Totals.VendorUsage = mergeVendorUsage(out.Totals.VendorUsage, t.Totals.VendorUsage)
+		out.Totals.UsageCoverage = mergedIdentity(out.Totals.UsageCoverage, t.Totals.UsageCoverage)
 		out.Totals.Cost = mergeCostEstimates(
 			out.Totals.Cost,
 			t.Totals.Cost,
