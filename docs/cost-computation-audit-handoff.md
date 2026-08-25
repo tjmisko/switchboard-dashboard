@@ -1,6 +1,6 @@
 # Claude and Codex cost computation: audit and implementation handoff
 
-Status: live pricing release deployed; post-activation legacy-display correction in progress
+Status: live pricing release deployed; legacy-display correction installed, dashboard restart pending
 Audit date: 2026-08-25  
 Repositories:
 
@@ -926,3 +926,63 @@ JavaScript suites, targeted race tests, `go vet`, JavaScript syntax checks, and
 an exact release build. The service must be restarted after installing the new
 dashboard binary so its embedded assets and ten-minute timeline cache are both
 replaced; a browser hard refresh then evicts any previously cached JavaScript.
+
+#### Correction release record
+
+Prepared and installed: 2026-08-25
+
+Source commits:
+
+- local integration: `cd664f8` (`fix: remove legacy dashboard cost estimates`)
+- clean delivery branch: `799df94` on
+  `cost-audit-dashboard-20260825`
+
+Passing gates from the exact clean delivery commit:
+
+```text
+go test ./...
+go test -race ./internal/timeline .
+go vet ./...
+node --test --test-reporter=tap web/model.test.js web/states.test.js
+  260 passed, 0 failed
+node --check web/model.js
+node --check web/app.js
+git diff --check
+```
+
+The pricing-aware provider command was also exercised directly against the
+live 2026-08-25 window. Its totals carried a non-null structured
+`api_equivalent_usd`, `status=partial`, and the official OpenAI pricing source;
+zero lanes were legacy-only. The exact dollar total changed during the checks
+because active sessions continued to add usage.
+
+Installed artifact:
+
+```text
+f828e22a4b672ad755dfd731036b492d82a9fd735e82c736b01c18bf0b8b0acc  %h/.config/switchboard/bin/switchboard-dashboard
+```
+
+The installed artifact is byte-identical to the staged clean-worktree build.
+Its embedded assets contain the structured-only normalization path and no
+`Legacy estimate` UI string. The prior `bcf3dfaf...` dashboard is recoverable
+from:
+
+```text
+%h/.config/switchboard/bin/.switchboard-backup-20260825-no-legacy/switchboard-dashboard
+```
+
+Activation remains at the host boundary. Both the normal and approved elevated
+restart attempts were rejected by the managed environment's user-bus isolation;
+the running service therefore still needs to load the installed artifact and
+the corrected provider registry. No unit file changed, so no daemon reload is
+required. Run from the host session:
+
+```bash
+systemctl --user restart switchboard-dashboard.service
+systemctl --user show switchboard-dashboard.service \
+  -p ActiveState -p SubState -p MainPID -p ExecMainStartTimestamp -p Result
+```
+
+Then hard-refresh `http://localhost:8780`. The cost card should show a sourced
+structured estimate when supported, or `— · Unknown`; it must never show the
+removed legacy status.
