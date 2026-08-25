@@ -463,6 +463,8 @@ func mergeUsageBreakdown(dst **UsageBreakdown, src *UsageBreakdown) {
 	d.ModelContextWindow = max(d.ModelContextWindow, src.ModelContextWindow)
 	d.WebSearchRequests += src.WebSearchRequests
 	d.WebFetchRequests += src.WebFetchRequests
+	d.CodeExecutionRequests += src.CodeExecutionRequests
+	d.UnclassifiedServerToolUnits += src.UnclassifiedServerToolUnits
 }
 
 // mergeAgentTimeline preserves Switchboard's additive child-thread surface in
