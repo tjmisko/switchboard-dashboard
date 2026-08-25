@@ -90,13 +90,15 @@ normalization → shared reducer → chip and history edges.
 
 It documents the three independent node axes in Switchboard's
 `internal/agentgraph`, the reducer's priority order and positive-liveness rule,
-and the distinct evidence pipelines under `internal/provider/claude` and
-`internal/provider/codex`. The interactive projection uses the same pure model.
+and the provider-specific extended state machines under
+`internal/provider/claude` and `internal/provider/codex`. The interactive
+statechart exposes their orthogonal control regions; the projection sandbox uses
+the same pure graph model as the daemon.
 
 `web/states-model.js` mirrors the graph vocabulary, structural normalization,
-liveness predicate, and reducer cases. `web/states.test.js` ports their Go
-invariants and guards the guide against references to the removed per-writer
-state-machine architecture.
+liveness predicate, reducer cases, and documented provider transitions.
+`web/states.test.js` ports the graph invariants and checks that the former flat
+writer FSM is labeled as an unmerged design rather than current architecture.
 
 ## Quickstart
 
