@@ -207,6 +207,7 @@ func TestMerge_shouldKeepCostConceptsAndProvenanceSeparate(t *testing.T) {
 func TestMerge_shouldPreservePricingGroupsAndScopedVendorSnapshots(t *testing.T) {
 	inputs := []Sourced{
 		{Provider: "switchboard-a", Timeline: &Timeline{Totals: Totals{
+			UsageCoverage: "partial_legacy_cutover",
 			PricingGroups: []PricingGroup{{
 				Identity: BillingIdentity{AgentClient: "codex", ExecutionProvider: "openai", Model: "gpt-5.6-sol"},
 				Usage:    UsageBreakdown{InputTokens: 10}, Events: 1,
@@ -218,6 +219,7 @@ func TestMerge_shouldPreservePricingGroupsAndScopedVendorSnapshots(t *testing.T)
 			},
 		}}},
 		{Provider: "switchboard-b", Timeline: &Timeline{Totals: Totals{
+			UsageCoverage: "partial_tool_units_unobserved",
 			PricingGroups: []PricingGroup{{
 				Identity: BillingIdentity{AgentClient: "claude", ExecutionProvider: "anthropic", Model: "claude-opus-4-8"},
 				Usage:    UsageBreakdown{OutputTokens: 20}, Events: 1,
@@ -234,6 +236,9 @@ func TestMerge_shouldPreservePricingGroupsAndScopedVendorSnapshots(t *testing.T)
 	if len(out.Totals.PricingGroups) != 2 || out.Totals.PricingGroups[0].Identity.ExecutionProvider != "openai" ||
 		out.Totals.PricingGroups[1].Identity.ExecutionProvider != "anthropic" {
 		t.Fatalf("pricing groups lost: %+v", out.Totals.PricingGroups)
+	}
+	if out.Totals.UsageCoverage != "mixed" {
+		t.Fatalf("usage coverage = %q, want mixed", out.Totals.UsageCoverage)
 	}
 	vendor := out.Totals.VendorUsage
 	if vendor == nil || len(vendor.Snapshots) != 2 || vendor.Cost.VendorEstimatedUSD == nil ||
