@@ -999,6 +999,13 @@ test("billingProviderLabel should identify client and execution provider separat
   assert.equal(billingProviderLabel({ agent: "codex", execution_provider: "openai" }), "Codex via OpenAI");
   assert.equal(billingProviderLabel({ agent: "claude", execution_provider: "aws-bedrock" }), "Claude via Amazon Bedrock");
   assert.equal(billingProviderLabel({ agent: "codex" }), "Codex");
+  assert.equal(billingProviderLabel({ agent: "codex", pricing_groups: [
+    { identity: { execution_provider: "openai" } },
+  ] }), "Codex via OpenAI");
+  assert.equal(billingProviderLabel({ agent: "codex", pricing_groups: [
+    { identity: { execution_provider: "openai" } },
+    { identity: { execution_provider: "azure-openai" } },
+  ] }), "Codex via multiple providers");
 });
 
 test("normalizedCost should preserve canonical billing concepts and explicit zero", () => {
@@ -1023,8 +1030,11 @@ test("normalizedCost should preserve canonical billing concepts and explicit zer
     pricingRetrievedAt: null,
     pricingAsOf: null,
     pricingVersion: null,
+    pricingVersions: [],
     pricingSources: ["https://example.test/prices"],
     mixedPricingVersions: false,
+    vendorStatus: null,
+    vendorScope: null,
     pricedTokens: 0,
     unpricedUsageEvents: 0,
     unpricedTokens: 0,
@@ -1032,6 +1042,22 @@ test("normalizedCost should preserve canonical billing concepts and explicit zer
     unpricedToolUnits: 0,
     unpricedReasons: [],
   });
+});
+
+test("normalizedCost should expose a provider-native cumulative estimate without treating it as API cost", () => {
+  const cost = normalizedCost({
+    cost: { api_equivalent_usd: 2, status: "estimated", pricing_versions: ["a", "b"] },
+    vendor_usage: {
+      scope: "latest_cumulative_thread_snapshot",
+      cost: { vendor_estimated_usd: 1.5, plan_credits: 10, status: "stale" },
+    },
+  });
+  assert.equal(cost.apiEquivalentUsd, 2);
+  assert.equal(cost.vendorEstimatedUsd, 1.5);
+  assert.equal(cost.planCredits, 10);
+  assert.equal(cost.vendorStatus, "stale");
+  assert.equal(cost.vendorScope, "latest_cumulative_thread_snapshot");
+  assert.deepEqual(cost.pricingVersions, ["a", "b"]);
 });
 
 test("normalizedCost should accept canonical pricing provenance and coverage fields", () => {

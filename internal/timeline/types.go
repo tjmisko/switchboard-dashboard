@@ -57,6 +57,11 @@ type Lane struct {
 	// real, fully representable observation.
 	CostUSD *float64      `json:"cost_usd,omitempty"`
 	Cost    *CostEstimate `json:"cost,omitempty"`
+	// PricingGroups retain the exact provider/model/route dimensions used to
+	// price this lane. VendorUsage is provider-native cumulative corroboration;
+	// it is deliberately separate from additive window cost.
+	PricingGroups []PricingGroup        `json:"pricing_groups,omitempty"`
+	VendorUsage   *VendorUsageAggregate `json:"vendor_usage,omitempty"`
 
 	// Agent is the client implementation. These fields identify who executed and
 	// billed the request; neither can safely be inferred from Agent alone.
@@ -230,29 +235,33 @@ type Summary struct {
 
 // Totals carries window-level token/cost/subagent sums.
 type Totals struct {
-	TokIn          int64           `json:"tok_in,omitempty"`
-	TokOut         int64           `json:"tok_out,omitempty"`
-	TokCacheRead   int64           `json:"tok_cache_read,omitempty"`
-	TokCacheCreate int64           `json:"tok_cache_create,omitempty"`
-	Subagents      int             `json:"subagents,omitempty"`
-	CostUSD        *float64        `json:"cost_usd,omitempty"`
-	Usage          *UsageBreakdown `json:"usage,omitempty"`
-	Cost           *CostEstimate   `json:"cost,omitempty"`
+	TokIn          int64                 `json:"tok_in,omitempty"`
+	TokOut         int64                 `json:"tok_out,omitempty"`
+	TokCacheRead   int64                 `json:"tok_cache_read,omitempty"`
+	TokCacheCreate int64                 `json:"tok_cache_create,omitempty"`
+	Subagents      int                   `json:"subagents,omitempty"`
+	CostUSD        *float64              `json:"cost_usd,omitempty"`
+	Usage          *UsageBreakdown       `json:"usage,omitempty"`
+	PricingGroups  []PricingGroup        `json:"pricing_groups,omitempty"`
+	VendorUsage    *VendorUsageAggregate `json:"vendor_usage,omitempty"`
+	Cost           *CostEstimate         `json:"cost,omitempty"`
 }
 
 // PlanWindow is the rolling plan-usage total (a Claude/Anthropic capability;
 // providers without a plan concept omit it).
 type PlanWindow struct {
-	Hours          float64         `json:"hours,omitempty"`
-	From           string          `json:"from,omitempty"`
-	To             string          `json:"to,omitempty"`
-	CostUSD        *float64        `json:"cost_usd,omitempty"`
-	Usage          *UsageBreakdown `json:"usage,omitempty"`
-	Cost           *CostEstimate   `json:"cost,omitempty"`
-	TokIn          int64           `json:"tok_in,omitempty"`
-	TokOut         int64           `json:"tok_out,omitempty"`
-	TokCacheRead   int64           `json:"tok_cache_read,omitempty"`
-	TokCacheCreate int64           `json:"tok_cache_create,omitempty"`
+	Hours                    float64         `json:"hours,omitempty"`
+	From                     string          `json:"from,omitempty"`
+	To                       string          `json:"to,omitempty"`
+	CostUSD                  *float64        `json:"cost_usd,omitempty"`
+	Usage                    *UsageBreakdown `json:"usage,omitempty"`
+	PricingGroups            []PricingGroup  `json:"pricing_groups,omitempty"`
+	Cost                     *CostEstimate   `json:"cost,omitempty"`
+	VendorUsageOmittedReason string          `json:"vendor_usage_omitted_reason,omitempty"`
+	TokIn                    int64           `json:"tok_in,omitempty"`
+	TokOut                   int64           `json:"tok_out,omitempty"`
+	TokCacheRead             int64           `json:"tok_cache_read,omitempty"`
+	TokCacheCreate           int64           `json:"tok_cache_create,omitempty"`
 }
 
 // UsageBreakdown preserves provider billing dimensions that cannot be safely
@@ -270,6 +279,72 @@ type UsageBreakdown struct {
 	ModelContextWindow      int64 `json:"model_context_window,omitempty"`
 	WebSearchRequests       int64 `json:"web_search_requests,omitempty"`
 	WebFetchRequests        int64 `json:"web_fetch_requests,omitempty"`
+}
+
+// BillingIdentity answers three separate questions: which client initiated a
+// request, which provider executed it, and which route/account was billed.
+// Empty fields remain unknown; consumers must not infer them from AgentClient.
+type BillingIdentity struct {
+	AgentClient       string `json:"agent_client,omitempty"`
+	ExecutionProvider string `json:"execution_provider,omitempty"`
+	BillingRoute      string `json:"billing_route,omitempty"`
+	AccountKind       string `json:"account_kind,omitempty"`
+	AuthMode          string `json:"auth_mode,omitempty"`
+	Model             string `json:"model,omitempty"`
+	ServiceTier       string `json:"service_tier,omitempty"`
+	Speed             string `json:"speed,omitempty"`
+	InferenceGeo      string `json:"inference_geo,omitempty"`
+	ReasoningEffort   string `json:"reasoning_effort,omitempty"`
+}
+
+// PricingGroup keeps unlike request identities auditable instead of flattening
+// a session that changed model, tier, geography, or billing route.
+type PricingGroup struct {
+	Identity BillingIdentity `json:"identity"`
+	Usage    UsageBreakdown  `json:"usage"`
+	Cost     CostEstimate    `json:"cost"`
+	Events   int64           `json:"events"`
+}
+
+// VendorUsageSnapshot is a provider's cumulative thread/account estimate. It
+// is not an additive token delta and therefore never contributes to window
+// token totals without a matching baseline.
+type VendorUsageSnapshot struct {
+	ThreadID              string             `json:"thread_id,omitempty"`
+	EstimatedUsageCredits float64            `json:"estimated_usage_credits"`
+	EstimatedUsageUSD     *float64           `json:"estimated_usage_usd"`
+	Groups                []VendorUsageGroup `json:"groups,omitempty"`
+	ObservedAt            string             `json:"observed_at"`
+	Revision              int64              `json:"revision,omitempty"`
+	Stale                 bool               `json:"stale,omitempty"`
+}
+
+type VendorUsageGroup struct {
+	Model                 *string `json:"model"`
+	ReasoningEffort       *string `json:"reasoning_effort"`
+	Speed                 *string `json:"speed"`
+	InputTokens           *int64  `json:"input_tokens"`
+	CachedInputTokens     *int64  `json:"cached_input_tokens"`
+	NetNewInputTokens     *int64  `json:"net_new_input_tokens"`
+	OutputTokens          *int64  `json:"output_tokens"`
+	TotalTokens           *int64  `json:"total_tokens"`
+	EstimatedUsageCredits float64 `json:"estimated_usage_credits"`
+}
+
+type ScopedVendorUsage struct {
+	SessionID     string              `json:"session_id,omitempty"`
+	ThreadID      string              `json:"thread_id,omitempty"`
+	UsageEventID  string              `json:"usage_event_id,omitempty"`
+	UsageRevision int64               `json:"usage_revision,omitempty"`
+	UsageSourceID string              `json:"usage_source_id,omitempty"`
+	Identity      BillingIdentity     `json:"identity"`
+	Snapshot      VendorUsageSnapshot `json:"snapshot"`
+}
+
+type VendorUsageAggregate struct {
+	Scope     string              `json:"scope"`
+	Snapshots []ScopedVendorUsage `json:"snapshots"`
+	Cost      CostEstimate        `json:"cost"`
 }
 
 // CostEstimate keeps unlike billing concepts separate. APIEquivalentUSD is a
@@ -307,6 +382,7 @@ type CostEstimate struct {
 	PricingEffectiveAt   string   `json:"pricing_effective_at,omitempty"`
 	PricingAsOf          string   `json:"pricing_as_of,omitempty"` // rolling-upgrade alias
 	PricingVersion       string   `json:"pricing_version,omitempty"`
+	PricingVersions      []string `json:"pricing_versions,omitempty"`
 	MixedPricingVersions bool     `json:"mixed_pricing_versions,omitempty"`
 }
 

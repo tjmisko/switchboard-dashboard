@@ -204,6 +204,68 @@ func TestMerge_shouldKeepCostConceptsAndProvenanceSeparate(t *testing.T) {
 	}
 }
 
+func TestMerge_shouldPreservePricingGroupsAndScopedVendorSnapshots(t *testing.T) {
+	inputs := []Sourced{
+		{Provider: "switchboard-a", Timeline: &Timeline{Totals: Totals{
+			PricingGroups: []PricingGroup{{
+				Identity: BillingIdentity{AgentClient: "codex", ExecutionProvider: "openai", Model: "gpt-5.6-sol"},
+				Usage:    UsageBreakdown{InputTokens: 10}, Events: 1,
+			}},
+			VendorUsage: &VendorUsageAggregate{
+				Scope:     "latest_cumulative_thread_snapshot",
+				Snapshots: []ScopedVendorUsage{{SessionID: "s1", ThreadID: "t1"}},
+				Cost:      CostEstimate{VendorEstimatedUSD: ptrF64(1.25), PlanCredits: ptrF64(3), Status: "estimated"},
+			},
+		}}},
+		{Provider: "switchboard-b", Timeline: &Timeline{Totals: Totals{
+			PricingGroups: []PricingGroup{{
+				Identity: BillingIdentity{AgentClient: "claude", ExecutionProvider: "anthropic", Model: "claude-opus-4-8"},
+				Usage:    UsageBreakdown{OutputTokens: 20}, Events: 1,
+			}},
+			VendorUsage: &VendorUsageAggregate{
+				Scope:     "latest_cumulative_thread_snapshot",
+				Snapshots: []ScopedVendorUsage{{SessionID: "s2", ThreadID: "t2"}},
+				Cost:      CostEstimate{VendorEstimatedUSD: ptrF64(2.75), PlanCredits: ptrF64(7), Status: "stale"},
+			},
+		}}},
+	}
+
+	out := Merge(inputs, MergeOptions{})
+	if len(out.Totals.PricingGroups) != 2 || out.Totals.PricingGroups[0].Identity.ExecutionProvider != "openai" ||
+		out.Totals.PricingGroups[1].Identity.ExecutionProvider != "anthropic" {
+		t.Fatalf("pricing groups lost: %+v", out.Totals.PricingGroups)
+	}
+	vendor := out.Totals.VendorUsage
+	if vendor == nil || len(vendor.Snapshots) != 2 || vendor.Cost.VendorEstimatedUSD == nil ||
+		*vendor.Cost.VendorEstimatedUSD != 4 || vendor.Cost.PlanCredits == nil || *vendor.Cost.PlanCredits != 10 ||
+		vendor.Cost.Status != "stale" {
+		t.Fatalf("vendor snapshots = %+v, want separately merged cumulative estimate", vendor)
+	}
+	if out.Totals.Cost != nil {
+		t.Fatalf("vendor cumulative estimate leaked into additive window cost: %+v", out.Totals.Cost)
+	}
+}
+
+func TestTimelineRoundTrip_shouldPreservePricingVersionSetAndPlanOmissionReason(t *testing.T) {
+	in := &Timeline{PlanWindow: &PlanWindow{
+		VendorUsageOmittedReason: "cumulative snapshot has no baseline",
+		PricingGroups:            []PricingGroup{{Identity: BillingIdentity{ExecutionProvider: "openai"}}},
+		Cost:                     &CostEstimate{PricingVersion: "mixed", PricingVersions: []string{"v1", "v2"}, MixedPricingVersions: true},
+	}}
+	b, err := in.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := Parse(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.PlanWindow == nil || out.PlanWindow.VendorUsageOmittedReason == "" ||
+		len(out.PlanWindow.PricingGroups) != 1 || len(out.PlanWindow.Cost.PricingVersions) != 2 {
+		t.Fatalf("round trip lost pricing audit metadata: %s", b)
+	}
+}
+
 func TestMerge_shouldWeightCanonicalCoverageByPricedUnits(t *testing.T) {
 	inputs := []Sourced{
 		{Provider: "a", Timeline: &Timeline{Totals: Totals{Cost: &CostEstimate{

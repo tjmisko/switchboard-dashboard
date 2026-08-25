@@ -3638,6 +3638,12 @@ function sessionPopoutHTML(lane) {
   } else if (laneCost.status === "included") {
     figs.push(["Billing", `<b>Included</b> <span class="dim">no incremental dollar estimate</span>`]);
   }
+  if (laneCost.vendorEstimatedUsd != null && laneCost.vendorEstimatedUsd !== laneCost.estimatedBilledUsd) {
+    const note = laneCost.vendorScope
+      ? ` <span class="dim">cumulative${laneCost.vendorStatus === "stale" ? " · stale" : ""}</span>`
+      : "";
+    figs.push(["Vendor estimate", `<b>${fmtUSD(laneCost.vendorEstimatedUsd)}</b>${note}`]);
+  }
   if (laneCost.planCredits != null) figs.push(["Plan usage", `<b>${escapeHTML(fmtCredits(laneCost.planCredits))}</b>`]);
   if (laneCost.pricingSources.length) figs.push(["Pricing", `<span class="dim">${escapeHTML(costSourceText(laneCost))}</span>`]);
   if (ineff != null) figs.push(["Operator idle", `${Math.round(ineff * 100)}% <span class="dim">idle / waiting</span>`]);

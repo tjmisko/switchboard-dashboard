@@ -111,11 +111,19 @@
   function billingProviderLabel(lane) {
     if (!lane) return "";
     const client = providerLabel(laneProvider(lane));
-    const raw = String(
+    let raw = String(
       lane.execution_provider ||
       (lane.billing_identity && lane.billing_identity.execution_provider) ||
       ""
     ).toLowerCase();
+    if (!raw && Array.isArray(lane.pricing_groups)) {
+      const providers = [...new Set(lane.pricing_groups
+        .map((group) => group && group.identity && group.identity.execution_provider)
+        .filter((provider) => typeof provider === "string" && provider)
+        .map((provider) => provider.toLowerCase()))];
+      if (providers.length > 1) return client ? `${client} via multiple providers` : "Multiple providers";
+      if (providers.length === 1) raw = providers[0];
+    }
     if (!raw) return client;
     const execution = EXECUTION_PROVIDER_LABELS[raw] || providerLabel(raw);
     if (!client || client.toLowerCase() === execution.toLowerCase()) return execution;
@@ -130,6 +138,9 @@
     const raw = obj.cost && typeof obj.cost === "object"
       ? obj.cost
       : (obj.cost_estimate && typeof obj.cost_estimate === "object" ? obj.cost_estimate : null);
+    const vendor = obj.vendor_usage && obj.vendor_usage.cost && typeof obj.vendor_usage.cost === "object"
+      ? obj.vendor_usage.cost
+      : null;
     const finite = (v) => Number.isFinite(v) ? v : null;
     const legacy = finite(obj.cost_usd);
     const apiEquivalentUsd = raw && finite(raw.api_equivalent_usd) != null
@@ -145,11 +156,23 @@
     if (raw && typeof raw.pricing_source === "string" && raw.pricing_source && !sources.includes(raw.pricing_source)) {
       sources.push(raw.pricing_source);
     }
+    const versions = raw && Array.isArray(raw.pricing_versions)
+      ? raw.pricing_versions.filter((v) => typeof v === "string" && v)
+      : [];
+    if (raw && typeof raw.pricing_version === "string" && raw.pricing_version && raw.pricing_version !== "mixed" && !versions.includes(raw.pricing_version)) {
+      versions.push(raw.pricing_version);
+    }
     return {
       apiEquivalentUsd,
-      vendorEstimatedUsd: raw ? finite(raw.vendor_estimated_usd) : null,
-      planCredits: raw ? finite(raw.plan_credits) : null,
-      estimatedBilledUsd: raw ? finite(raw.estimated_billed_usd) : null,
+      vendorEstimatedUsd: raw && finite(raw.vendor_estimated_usd) != null
+        ? finite(raw.vendor_estimated_usd)
+        : (vendor ? finite(vendor.vendor_estimated_usd) : null),
+      planCredits: raw && finite(raw.plan_credits) != null
+        ? finite(raw.plan_credits)
+        : (vendor ? finite(vendor.plan_credits) : null),
+      estimatedBilledUsd: raw && finite(raw.estimated_billed_usd) != null
+        ? finite(raw.estimated_billed_usd)
+        : (vendor ? finite(vendor.estimated_billed_usd) : null),
       status,
       coverage: raw ? finite(raw.coverage) : null,
       legacy: raw ? raw.legacy === true : legacy != null,
@@ -162,8 +185,11 @@
         ? String(raw.pricing_effective_at || raw.pricing_as_of)
         : null,
       pricingVersion: raw && raw.pricing_version ? String(raw.pricing_version) : null,
+      pricingVersions: versions,
       pricingSources: sources,
       mixedPricingVersions: raw ? raw.mixed_pricing_versions === true : false,
+      vendorStatus: vendor && vendor.status ? String(vendor.status).toLowerCase() : null,
+      vendorScope: obj.vendor_usage && obj.vendor_usage.scope ? String(obj.vendor_usage.scope) : null,
       pricedTokens: raw && Number.isFinite(raw.priced_tokens) ? raw.priced_tokens : 0,
       unpricedTokens: raw && Number.isFinite(raw.unpriced_tokens) ? raw.unpriced_tokens : 0,
       pricedToolUnits: raw && Number.isFinite(raw.priced_tool_units) ? raw.priced_tool_units : 0,
