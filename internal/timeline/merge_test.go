@@ -251,6 +251,21 @@ func TestMerge_shouldPreservePricingGroupsAndScopedVendorSnapshots(t *testing.T)
 	}
 }
 
+func TestMerge_shouldPreserveUnpricedServerToolCoverage(t *testing.T) {
+	out := Merge([]Sourced{
+		{Provider: "a", Timeline: &Timeline{Totals: Totals{Usage: &UsageBreakdown{
+			CodeExecutionRequests: 1, UnclassifiedServerToolUnits: 2,
+		}}}},
+		{Provider: "b", Timeline: &Timeline{Totals: Totals{Usage: &UsageBreakdown{
+			CodeExecutionRequests: 3, UnclassifiedServerToolUnits: 4,
+		}}}},
+	}, MergeOptions{})
+	if out.Totals.Usage == nil || out.Totals.Usage.CodeExecutionRequests != 4 ||
+		out.Totals.Usage.UnclassifiedServerToolUnits != 6 {
+		t.Fatalf("server-tool usage = %+v", out.Totals.Usage)
+	}
+}
+
 func TestTimelineRoundTrip_shouldPreservePricingVersionSetAndPlanOmissionReason(t *testing.T) {
 	in := &Timeline{PlanWindow: &PlanWindow{
 		VendorUsageOmittedReason: "cumulative snapshot has no baseline",

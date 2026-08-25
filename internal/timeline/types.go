@@ -271,17 +271,19 @@ type PlanWindow struct {
 // collapsed into the four legacy tok_* fields. ReasoningOutputTokens is a
 // breakdown of OutputTokens, not an additional billable bucket.
 type UsageBreakdown struct {
-	InputTokens             int64 `json:"input_tokens,omitempty"`
-	CachedInputTokens       int64 `json:"cached_input_tokens,omitempty"`
-	CacheWriteInputTokens   int64 `json:"cache_write_input_tokens,omitempty"`
-	CacheWrite5mInputTokens int64 `json:"cache_write_5m_input_tokens,omitempty"`
-	CacheWrite1hInputTokens int64 `json:"cache_write_1h_input_tokens,omitempty"`
-	OutputTokens            int64 `json:"output_tokens,omitempty"`
-	ReasoningOutputTokens   int64 `json:"reasoning_output_tokens,omitempty"`
-	TotalTokens             int64 `json:"total_tokens,omitempty"`
-	ModelContextWindow      int64 `json:"model_context_window,omitempty"`
-	WebSearchRequests       int64 `json:"web_search_requests,omitempty"`
-	WebFetchRequests        int64 `json:"web_fetch_requests,omitempty"`
+	InputTokens                 int64 `json:"input_tokens,omitempty"`
+	CachedInputTokens           int64 `json:"cached_input_tokens,omitempty"`
+	CacheWriteInputTokens       int64 `json:"cache_write_input_tokens,omitempty"`
+	CacheWrite5mInputTokens     int64 `json:"cache_write_5m_input_tokens,omitempty"`
+	CacheWrite1hInputTokens     int64 `json:"cache_write_1h_input_tokens,omitempty"`
+	OutputTokens                int64 `json:"output_tokens,omitempty"`
+	ReasoningOutputTokens       int64 `json:"reasoning_output_tokens,omitempty"`
+	TotalTokens                 int64 `json:"total_tokens,omitempty"`
+	ModelContextWindow          int64 `json:"model_context_window,omitempty"`
+	WebSearchRequests           int64 `json:"web_search_requests,omitempty"`
+	WebFetchRequests            int64 `json:"web_fetch_requests,omitempty"`
+	CodeExecutionRequests       int64 `json:"code_execution_requests,omitempty"`
+	UnclassifiedServerToolUnits int64 `json:"unclassified_server_tool_units,omitempty"`
 }
 
 // BillingIdentity answers three separate questions: which client initiated a
