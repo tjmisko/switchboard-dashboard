@@ -697,3 +697,137 @@ to stale or unusable LKG state.
 - Pre-cutover history is retained and explicitly partial. No existing history
   was rewritten or deleted, and no private transcript, prompt, response,
   credential, environment file, or personal account identifier was inspected.
+
+## Deployment execution record
+
+Attempted: 2026-08-25
+
+### Deployment plan and locked inputs
+
+Deployment was deliberately locked to the reviewed, pushed heads rather than
+building from either repository's moving `main` branch:
+
+- Switchboard daemon and CLI source: `9a88123a53fbd71e1e3eb79aaeae765fa961e72d`
+- Dashboard source: `83fc260e0fefce5522036de69091b69ea02d0761`
+
+This kept unrelated local commits and worktree changes out of the release. The
+installed systemd configuration was inspected before installation. The daemon
+unit resolves `SWITCHBOARD_BIN` to `%h/.config/switchboard/bin/switchboard` via
+its existing `local-binary.conf` drop-in. The dashboard unit formerly resolved
+the dashboard and CLI from `%h/go/bin`.
+
+The release sequence was:
+
+1. inspect the installed units, drop-ins, old binary metadata, and service paths;
+2. build immutable artifacts from the two reviewed worktrees;
+3. run focused non-race and race tests, dashboard tests, JavaScript model tests,
+   syntax checks, and vet;
+4. copy the artifacts to same-filesystem temporary names, compare them byte for
+   byte, and atomically rename them into the service-owned binary directory;
+5. reload and restart only `switchboard.service` and
+   `switchboard-dashboard.service`; and
+6. force a first-party price refresh, inspect freshness diagnostics, and verify
+   provider/cost fields in a real timeline response.
+
+Steps 1 through 4 completed. Steps 5 and 6 reached a managed-environment
+boundary described below.
+
+### Release gate
+
+The first invocation could not use Go's default build cache because that cache
+is read-only in the managed environment. It failed during package setup, before
+compilation or test execution. The same commands were rerun with
+`GOCACHE=/tmp/switchboard-cost-gocache`.
+
+Passing Switchboard checks:
+
+```text
+go test ./internal/pricing ./internal/transcript ./internal/history ./internal/provider/codex ./internal/state
+go test -race ./internal/pricing ./internal/transcript ./internal/history ./internal/provider/codex ./internal/state
+go test ./cmd/switchboard -run 'Pricing|Usage|Fanout|Codex'
+go test ./cmd/switchboard-ctl -run 'Pricing|Timeline|Cost|Usage'
+go vet ./internal/pricing ./internal/transcript ./internal/history ./internal/provider/codex ./internal/state ./cmd/switchboard ./cmd/switchboard-ctl
+```
+
+Passing dashboard checks:
+
+```text
+go test ./...
+node web/model.test.js
+node --check web/app.js
+node --check web/model.js
+go vet ./...
+```
+
+The dashboard linked worktree could not obtain Go VCS status during its first
+standalone build. It was rebuilt with `-buildvcs=false`; the immutable source
+SHA above is the authoritative provenance recorded for the artifact.
+
+Release artifact hashes:
+
+```text
+4955d77ad300682a624b9ae3f9778e25ae77e6be5e897fee324d66d913822fb5  switchboard
+c07dc290863709434b6b75b3b38de5d5c456515e7e963dea02b275b845719204  switchboard-ctl
+bcf3dfaf15e3cfd3d916ef1c872a4b048b33fc91bf5a045a7d50219caef96010  switchboard-dashboard
+```
+
+### Installed state
+
+`%h/go/bin` is mounted read-only to this managed execution environment, so the
+release was installed into Switchboard's existing private development binary
+directory instead:
+
+```text
+%h/.config/switchboard/bin/switchboard
+%h/.config/switchboard/bin/switchboard-ctl
+%h/.config/switchboard/bin/switchboard-dashboard
+```
+
+All three installed files match the staged hashes above. The prior daemon and
+CLI were copied before replacement to:
+
+```text
+%h/.config/switchboard/bin/.switchboard-backup-20260825-9a88123/
+```
+
+The old dashboard remains untouched at `%h/go/bin/switchboard-dashboard`. The
+dashboard's existing non-destructive systemd override now points both executable
+paths at `%h/.config/switchboard/bin`, while retaining its existing merged
+provider configuration.
+
+The installed new CLI runs and reports both bundled catalogs, with 15 Anthropic
+models and 3 OpenAI models. As expected before first live refresh, both catalogs
+are explicitly `stale`, `needs_refresh=true`, and `used_fallback=true`; no value
+is misrepresented as live.
+
+### Activation boundary and exact handoff
+
+The environment blocks connections to `/run/user/1000/bus`, including approved
+elevated `systemctl --user` and systemd's `.host` machine transport. It also
+hides the service PIDs through the PID namespace. The service cgroups expose
+only a force-kill control; that was intentionally not used because it would
+turn a normal deployment into a SIGKILL and could discard in-flight state.
+
+The same network policy blocks the fixed Anthropic and OpenAI pricing domains
+before the installed refresher receives an HTTP response. Consequently, the
+artifacts and unit override are installed but the already-running processes
+have not loaded them, and live HTTP freshness/end-to-end cost output has not yet
+been claimed as verified.
+
+Run these commands in the normal host session to finish the graceful boundary:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user restart switchboard.service switchboard-dashboard.service
+~/.config/switchboard/bin/switchboard-ctl pricing refresh --json
+~/.config/switchboard/bin/switchboard-ctl pricing status --json
+systemctl --user show switchboard.service switchboard-dashboard.service \
+  -p ActiveState -p SubState -p MainPID -p ExecMainStartTimestamp -p Result
+```
+
+Acceptance requires both services to be `active/running`, both pricing
+diagnostics to report `fresh` with `used_fallback=false`, and a subsequent real
+timeline response to preserve provider identity, nullable cost semantics,
+catalog source/hash, pricing kind, and coverage/completeness fields. Codex rows
+must remain `tokens_only`/partial rather than implying provider-tool coverage;
+an unproved billing route or amount must remain null rather than `$0`.
