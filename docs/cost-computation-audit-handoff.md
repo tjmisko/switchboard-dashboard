@@ -644,6 +644,7 @@ Passing upstream checks:
 ```text
 go test ./internal/pricing ./internal/transcript ./internal/history ./internal/provider/codex ./internal/state
 go test ./cmd/switchboard -run '^(TestObserveUsage|TestProductionCodexConfig|TestCodexRootAndChildHooksBind|TestRollout)'
+go test ./cmd/switchboard-ctl -run '^TestPricing'
 go test -race ./internal/pricing ./internal/transcript ./internal/history ./internal/provider/codex ./internal/state
 go test -race ./cmd/switchboard -run '^(TestObserveUsage|TestProductionCodexConfig|TestCodexRootAndChildHooksBind|TestRollout)'
 go vet ./internal/pricing ./internal/transcript ./internal/history ./internal/provider/codex ./internal/state ./cmd/switchboard
