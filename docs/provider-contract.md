@@ -123,7 +123,7 @@ lane's `agent`, not that legacy namespace.
 | Timestamps   | RFC3339 strings, fractional seconds allowed (`2026-06-26T13:00:00Z`). UTC is the safe choice. |
 | Durations    | **integer nanoseconds** (`by_status.*`, `attention_*`, `*_active`, `suspect_duration`). |
 | Tokens       | raw counts, integers.                                             |
-| Cost         | `cost_usd`, a float in dollars, recomputed by you from tokens × per-model price. |
+| Cost         | nullable dollar floats under `cost`; legacy `cost_usd` is a nullable API-equivalent alias. |
 
 Every field is **additive and optional** except where noted: omit what your
 source can't observe and the UI degrades gracefully rather than breaking. A
@@ -136,8 +136,12 @@ consumer, so never emit zero-length or inverted spans.
 {
   "session_id": "ce13c0f2-…",       // stable identity; bars are keyed on this
   "pid": 4821,                      // identity fallback when session_id is absent
-  "agent": "claude",                // semantic provider: e.g. claude or codex
+  "agent": "claude",                // agent client: e.g. claude or codex
   "provider": "mysource",           // optional; the dashboard fills in your id
+  "execution_provider": "anthropic",// who executed the model request
+  "billing_route": "api",           // api, subscription, credits, cloud, unknown
+  "model": "claude-sonnet-5",       // exact provider model id
+  "service_tier": "standard",       // optional per-response price dimension
   "project": "switchboard",         // groups lanes into swimlanes — REQUIRED in practice
   "project_full": "switchboard",    // optional pretty name; used as the lead label
   "start": "2026-06-26T13:00:00Z",  // REQUIRED
@@ -148,7 +152,18 @@ consumer, so never emit zero-length or inverted spans.
   "names":   [ {"label","start","end"} ],  // optional name-span history, in order
   "subagents": [ … ],               // optional delegated sub-bars
   "focus":   [ {"start","end"} ],   // optional: when this session had operator focus
-  "cost_usd": 3.41,
+  "cost_usd": 3.41,                  // compatibility alias; omit when unknown
+  "cost": {
+    "api_equivalent_usd": 3.41,
+    "vendor_estimated_usd": null,
+    "plan_credits": null,
+    "estimated_billed_usd": 3.41,
+    "status": "estimated",
+    "coverage": 1.0,
+    "pricing_source": "https://platform.claude.com/docs/en/about-claude/pricing",
+    "pricing_retrieved_at": "2026-08-25T12:00:00Z",
+    "pricing_version": "sha256:…"
+  },
   "tok_in": 41000, "tok_out": 18000,
   "tok_cache_read": 5100000, "tok_cache_create": 96000,
   "suspect": false, "suspect_reason": "", "suspect_since": ""   // see §5
@@ -168,14 +183,39 @@ Identity rules that matter:
   `feat-f79#2`), or the dashboard draws them as one impossible bar.
 - `project` is what groups lanes into swimlanes; non-overlapping lanes in a
   project share a row. A provider with no project concept should emit a constant.
-- `agent` and `provider` answer different questions. `agent` selects semantic
-  behavior and presentation (`claude` versus `codex`); `provider` is the adapter
-  namespace used for merged ids. Do not copy your adapter id into every lane if
-  the adapter multiplexes several agent implementations.
-- Known semantic ids also select stable dashboard labels. In particular,
-  `agent: "codex"` renders as **Codex / OpenAI**, including in a default live feed
-  where Codex is the only provider present. This presentation label is not a
-  wire identity; continue to emit the lowercase `codex` id.
+- `agent`, `execution_provider`, and `provider` answer different questions.
+  `agent` is the client implementation (`claude` versus `codex`),
+  `execution_provider` is the company/service that ran the request, and
+  `provider` is the adapter namespace used for merged ids. A Codex session may
+  use OpenAI, Azure, or a custom model provider; a Claude session may use
+  Anthropic, Bedrock, or Vertex. Do not infer one field from another.
+- `billing_route` explains whether the marginal charge comes from an API
+  account, a subscription, credits, or a cloud-provider account. Omit secrets
+  and personal account identifiers.
+
+### Cost and usage — explicit semantics
+
+`cost_usd` remains readable for compatibility, but new providers must emit the
+structured `cost` object. Its dollar fields are deliberately not interchangeable:
+
+| Field | Meaning |
+| --- | --- |
+| `api_equivalent_usd` | Usage valued at sourced public on-demand API rates. |
+| `vendor_estimated_usd` | Per-session/thread estimate returned by the vendor. |
+| `plan_credits` | Vendor credits consumed; not dollars unless the vendor says so. |
+| `estimated_billed_usd` | Best supported incremental dollar charge. Null for included subscription use unless a charge is reported. |
+
+`status` is one of `estimated`, `included`, `partial`, `stale`, or `unknown`.
+Include `coverage`, unpriced counts, price source URL, retrieval/as-of time, and
+catalog version whenever available. An explicit numeric zero means a supported
+zero. An omitted amount means unknown and must never be encoded as zero.
+
+Providers may also emit a canonical `usage` object alongside the legacy token
+fields. It preserves `input_tokens`, `cached_input_tokens`,
+`cache_write_input_tokens`, `cache_write_5m_input_tokens`,
+`cache_write_1h_input_tokens`, `output_tokens`, `reasoning_output_tokens`, tool
+request counts, and model context window. Reasoning output is a breakdown of
+output and must not be charged twice.
 
 ### Interval — one status segment
 
@@ -256,7 +296,7 @@ acknowledgement trap that produces exactly that.
 This surface is additive to the lane model and contains **descendants only**.
 Root-thread work remains in `lanes[]`; do not repeat it as a graph node. Each
 root joins to its lane by bare `session_id` (falling back to pid only when both
-ids are absent), and `root.provider` carries the semantic provider. Each node
+ids are absent), and `root.provider` carries the agent-client kind. Each node
 retains its parent id and depth, so grandchildren stay visible as nested agents.
 
 Each `activity[]` entry records one pending/running interval. A child identity is
@@ -342,12 +382,16 @@ conflated:
 
 ```jsonc
 "totals": {"tok_in": …, "tok_out": …, "tok_cache_read": …,
-           "tok_cache_create": …, "subagents": 8, "cost_usd": 8.19}
+           "tok_cache_create": …, "subagents": 8,
+           "cost_usd": 8.19, "cost": {"api_equivalent_usd": 8.19, …}}
 ```
 
-`plan_window` is the rolling plan-usage total (`hours`, `from`, `to`, `cost_usd`,
-`tok_*`). It is an Anthropic-account concept; providers without one omit it, and
-in a merged view the first provider that supplies one wins.
+`totals.cost` uses the same semantics as a lane. It must carry partial/unknown
+coverage forward rather than summing a missing estimate as zero.
+
+`plan_window` is the rolling plan-usage total (`hours`, `from`, `to`, `cost`,
+the legacy `cost_usd`, and token fields). Providers without a plan concept omit
+it, and in a merged view the first provider that supplies one wins.
 
 ## 4. The minimum viable provider
 
@@ -488,7 +532,11 @@ Know what survives:
   config `id`), and their `session_id` rewritten to `"<provider>:<id>"`.
 - **Additive fields sum**: `sessions`, `by_status`, `attention_per_session`,
   `attention_fanout`, `prompt/attended/delegated_active`, `suspect_lanes`,
-  `suspect_duration`, and all of `totals`.
+  `suspect_duration`, token counts, and like-for-like cost amounts.
+- **Cost absence is preserved.** API equivalent, vendor estimate, plan credits,
+  and estimated billed dollars are summed independently. Unknown inputs make a
+  known subtotal `partial`; an explicit zero remains zero. Status, coverage,
+  unpriced counts, and all price sources survive the merge.
 - **`attention_union` is recomputed** across providers — it is the one
   non-additive figure — as the wall-clock during which any lane anywhere was
   aloft, applying the suspect clip described above.
@@ -512,9 +560,13 @@ your source genuinely multiplexes several.
 - [ ] Exits 0 and prints one JSON envelope on stdout; diagnostics on stderr.
 - [ ] Accepts `--dir`, `--day`, `--since`, `--until`; ignores flags it doesn't use.
 - [ ] Empty window → `lanes: []`, exit 0 (not an error).
-- [ ] Every timestamp RFC3339; every duration integer nanoseconds; `cost_usd` float dollars.
+- [ ] Every timestamp RFC3339; every duration integer nanoseconds; dollar estimates are nullable floats.
+- [ ] Missing cost is omitted/null, never zero; explicit zero has supporting `status` and coverage.
+- [ ] `agent`, `execution_provider`, and `billing_route` are distinct and evidence-backed.
+- [ ] Structured cost keeps API-equivalent, vendor, credits, and billed estimates separate.
+- [ ] Every derived amount carries price source, retrieval/as-of time, version, status, and coverage.
 - [ ] `session_id` stable across polls, bare (unnamespaced), distinct per run.
-- [ ] `lane.agent` names the semantic provider; mixed adapters do not flatten it.
+- [ ] `lane.agent` names the agent client; mixed adapters do not flatten it or confuse it with execution provider.
 - [ ] Canonical roots use bare lane ids and contain descendants only.
 - [ ] Repeated starts for one child append activity spans under the same thread id.
 - [ ] Topology-only children receive no activity or fanout credit.

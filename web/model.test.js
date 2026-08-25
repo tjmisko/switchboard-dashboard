@@ -8,7 +8,8 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
-  laneIdentity, rawSessionId, laneProvider, providerLabel, providerLegend, adaptProviderTimeline,
+  laneIdentity, rawSessionId, laneProvider, providerLabel, billingProviderLabel, providerLegend, adaptProviderTimeline,
+  normalizedCost, apiEquivalentCost,
   leadLabel, nameSegments, buildBars, spanInefficiency, switchArrivals,
   deflickerIntervals, deflickerLanes, FLICKER_MS,
   presenceSplitMs, awayIdleMs, packLanes,
@@ -712,6 +713,15 @@ test("projectHoursMs sums cost over the lanes that contributed the time", () => 
   assert.deepEqual(row.parts.map((p) => p.costUsd), [4.5, 1.25]);
 });
 
+test("projectHoursMs uses canonical API-equivalent cost before the legacy alias", () => {
+  const lanes = [{
+    project: "sb", start: at(0), cost_usd: 99,
+    cost: { api_equivalent_usd: 2.75, status: "estimated" },
+    intervals: [interval("working", ms(0), ms(10))],
+  }];
+  assert.equal(projectHoursMs(lanes)[0].costUsd, 2.75);
+});
+
 test("projectHoursMs reports costUsd null when no contributing lane recorded a cost", () => {
   // "not recorded" must not render as "$0.00 spent" — a provider that omits
   // cost is silent, not free.
@@ -979,10 +989,52 @@ test("laneProvider should distinguish Codex from Claude inside one switchboard s
   assert.equal(laneProvider({ provider: "arachne", agent: "opus" }), "arachne");
 });
 
-test("providerLabel should give Codex its product and company identity", () => {
-  assert.equal(providerLabel("codex"), "Codex / OpenAI");
+test("providerLabel should identify the agent client without assuming its execution provider", () => {
+  assert.equal(providerLabel("codex"), "Codex");
   assert.equal(providerLabel("claude"), "Claude");
   assert.equal(providerLabel("arachne"), "Arachne");
+});
+
+test("billingProviderLabel should identify client and execution provider separately", () => {
+  assert.equal(billingProviderLabel({ agent: "codex", execution_provider: "openai" }), "Codex via OpenAI");
+  assert.equal(billingProviderLabel({ agent: "claude", execution_provider: "aws-bedrock" }), "Claude via Amazon Bedrock");
+  assert.equal(billingProviderLabel({ agent: "codex" }), "Codex");
+});
+
+test("normalizedCost should preserve canonical billing concepts and explicit zero", () => {
+  assert.deepEqual(normalizedCost({ cost: {
+    api_equivalent_usd: 1.25,
+    vendor_estimated_usd: 1.1,
+    estimated_billed_usd: 0,
+    plan_credits: 42,
+    status: "included",
+    coverage: 1,
+    pricing_source: "https://example.test/prices",
+  }}), {
+    apiEquivalentUsd: 1.25,
+    vendorEstimatedUsd: 1.1,
+    planCredits: 42,
+    estimatedBilledUsd: 0,
+    status: "included",
+    coverage: 1,
+    legacy: false,
+    priceKind: null,
+    pricingRetrievedAt: null,
+    pricingAsOf: null,
+    pricingVersion: null,
+    pricingSources: ["https://example.test/prices"],
+    unpricedUsageEvents: 0,
+    unpricedTokens: 0,
+  });
+});
+
+test("normalizedCost should keep missing, legacy zero, and unknown distinct", () => {
+  assert.equal(apiEquivalentCost({}), null);
+  assert.equal(normalizedCost({}).status, "unknown");
+  assert.equal(normalizedCost({}).legacy, false);
+  assert.equal(apiEquivalentCost({ cost_usd: 0 }), 0);
+  assert.equal(normalizedCost({ cost_usd: 0 }).status, "legacy");
+  assert.equal(normalizedCost({ cost: { status: "unknown" } }).apiEquivalentUsd, null);
 });
 
 test("adaptProviderTimeline should project nested Codex threads without duplicating Claude subagents", () => {
@@ -1068,7 +1120,7 @@ test("adaptProviderTimeline should degrade without changing accounting when cano
   assert.equal(got.lanes[0].data_provider, "codex",
     "a Codex-only live feed still opts into the provider label and accent");
   assert.deepEqual(providerLegend(got.lanes), [{
-    provider: "codex", label: "Codex / OpenAI", count: 1,
+    provider: "codex", label: "Codex", count: 1,
   }], "the rendered provider key remains visible for one online Codex session");
   assert.deepEqual(got.lanes[0].subagents, undefined);
   assert.deepEqual(graphAwareAttention(input.summary, got.lanes), {

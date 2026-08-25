@@ -98,6 +98,14 @@ func Compile(events []Event, opts CompileOptions) *timeline.Timeline {
 			subs = append(subs, sa)
 		}
 
+		// Legacy Arachne history did not preserve whether cost_usd was omitted, so
+		// its zero cannot support a "free" claim. Keep it absent unless the source
+		// supplied a non-zero cumulative amount.
+		var costUSD *float64
+		if s.usage.CostUSD != 0 {
+			v := s.usage.CostUSD
+			costUSD = &v
+		}
 		lane := timeline.Lane{
 			SessionID:      s.id,
 			Agent:          orDefault(s.start.Agent, "arachne"),
@@ -112,7 +120,7 @@ func Compile(events []Event, opts CompileOptions) *timeline.Timeline {
 			TokOut:         s.usage.TokOut,
 			TokCacheRead:   s.usage.TokCacheRead,
 			TokCacheCreate: s.usage.TokCacheCreate,
-			CostUSD:        s.usage.CostUSD,
+			CostUSD:        costUSD,
 		}
 		if s.start.TaskID != "" {
 			lane.Name = s.start.TaskID
@@ -201,7 +209,13 @@ func Compile(events []Event, opts CompileOptions) *timeline.Timeline {
 		out.Totals.TokOut += s.usage.TokOut
 		out.Totals.TokCacheRead += s.usage.TokCacheRead
 		out.Totals.TokCacheCreate += s.usage.TokCacheCreate
-		out.Totals.CostUSD += s.usage.CostUSD
+		if s.usage.CostUSD != 0 {
+			if out.Totals.CostUSD == nil {
+				zero := 0.0
+				out.Totals.CostUSD = &zero
+			}
+			*out.Totals.CostUSD += s.usage.CostUSD
+		}
 		out.Totals.Subagents += len(subs)
 	}
 

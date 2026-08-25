@@ -67,7 +67,19 @@
   // an older merged config still calls that subprocess provider "claude").
   const PROVIDER_ADAPTERS = Object.freeze({
     claude: Object.freeze({ children: "lane.subagents", label: "Claude" }),
-    codex: Object.freeze({ children: "agent_timeline", label: "Codex / OpenAI" }),
+    codex: Object.freeze({ children: "agent_timeline", label: "Codex" }),
+  });
+
+  const EXECUTION_PROVIDER_LABELS = Object.freeze({
+    anthropic: "Anthropic",
+    openai: "OpenAI",
+    "aws-bedrock": "Amazon Bedrock",
+    bedrock: "Amazon Bedrock",
+    "google-vertex": "Google Vertex AI",
+    vertex: "Google Vertex AI",
+    azure: "Microsoft Azure",
+    "azure-openai": "Azure OpenAI",
+    custom: "custom provider",
   });
 
   // laneProvider is the semantic agent-data provider shown by the dashboard.
@@ -91,6 +103,68 @@
     const adapter = PROVIDER_ADAPTERS[id];
     if (adapter && adapter.label) return adapter.label;
     return id.charAt(0).toUpperCase() + id.slice(1);
+  }
+
+  // billingProviderLabel separates the agent client from the company/service
+  // that executed the request. "Codex" alone is not evidence of OpenAI API
+  // billing, just as "Claude" alone does not prove a direct Anthropic route.
+  function billingProviderLabel(lane) {
+    if (!lane) return "";
+    const client = providerLabel(laneProvider(lane));
+    const raw = String(
+      lane.execution_provider ||
+      (lane.billing_identity && lane.billing_identity.execution_provider) ||
+      ""
+    ).toLowerCase();
+    if (!raw) return client;
+    const execution = EXECUTION_PROVIDER_LABELS[raw] || providerLabel(raw);
+    if (!client || client.toLowerCase() === execution.toLowerCase()) return execution;
+    return `${client} via ${execution}`;
+  }
+
+  // normalizedCost is the only compatibility seam for cost data. New providers
+  // emit a structured cost object; older providers expose cost_usd only. Missing
+  // remains null, and an explicit numeric zero remains zero.
+  function normalizedCost(record) {
+    const obj = record || {};
+    const raw = obj.cost && typeof obj.cost === "object"
+      ? obj.cost
+      : (obj.cost_estimate && typeof obj.cost_estimate === "object" ? obj.cost_estimate : null);
+    const finite = (v) => Number.isFinite(v) ? v : null;
+    const legacy = finite(obj.cost_usd);
+    const apiEquivalentUsd = raw && finite(raw.api_equivalent_usd) != null
+      ? finite(raw.api_equivalent_usd)
+      : legacy;
+    const status = String(
+      (raw && (raw.status || raw.cost_status)) || obj.cost_status ||
+      (legacy != null ? "legacy" : "unknown")
+    ).toLowerCase();
+    const sources = raw && Array.isArray(raw.pricing_sources)
+      ? raw.pricing_sources.filter((v) => typeof v === "string" && v)
+      : [];
+    if (raw && typeof raw.pricing_source === "string" && raw.pricing_source && !sources.includes(raw.pricing_source)) {
+      sources.push(raw.pricing_source);
+    }
+    return {
+      apiEquivalentUsd,
+      vendorEstimatedUsd: raw ? finite(raw.vendor_estimated_usd) : null,
+      planCredits: raw ? finite(raw.plan_credits) : null,
+      estimatedBilledUsd: raw ? finite(raw.estimated_billed_usd) : null,
+      status,
+      coverage: raw ? finite(raw.coverage) : null,
+      legacy: raw ? raw.legacy === true : legacy != null,
+      priceKind: raw && raw.price_kind ? String(raw.price_kind) : null,
+      pricingRetrievedAt: raw && raw.pricing_retrieved_at ? String(raw.pricing_retrieved_at) : null,
+      pricingAsOf: raw && raw.pricing_as_of ? String(raw.pricing_as_of) : null,
+      pricingVersion: raw && raw.pricing_version ? String(raw.pricing_version) : null,
+      pricingSources: sources,
+      unpricedUsageEvents: raw && Number.isInteger(raw.unpriced_usage_events) ? raw.unpriced_usage_events : 0,
+      unpricedTokens: raw && Number.isFinite(raw.unpriced_tokens) ? raw.unpriced_tokens : 0,
+    };
+  }
+
+  function apiEquivalentCost(record) {
+    return normalizedCost(record).apiEquivalentUsd;
   }
 
   // providerLegend returns the semantic provider key the UI should render.
@@ -730,7 +804,7 @@
       if (laneMs <= 0) continue;
       const project = lane.project_full || lane.project || "(no project)";
       const start = Date.parse(lane.start);
-      const cost = Number.isFinite(lane.cost_usd) ? lane.cost_usd : null;
+      const cost = apiEquivalentCost(lane);
       const acc = totals.get(project) || { ms: 0, cost: 0, hasCost: false, parts: [] };
       acc.ms += laneMs;
       if (cost != null) { acc.cost += cost; acc.hasCost = true; }
@@ -1670,7 +1744,8 @@
 
   return {
     scaleGeometry,
-    laneIdentity, rawSessionId, laneProvider, providerLabel, providerLegend, adaptProviderTimeline,
+    laneIdentity, rawSessionId, laneProvider, providerLabel, billingProviderLabel, providerLegend, adaptProviderTimeline,
+    normalizedCost, apiEquivalentCost,
     leadLabel, nameSegments, buildBar, buildBars,
     spanInefficiency, switchArrivals, presenceSplitMs, awayIdleMs,
     deflickerIntervals, deflickerLanes, FLICKER_MS,
