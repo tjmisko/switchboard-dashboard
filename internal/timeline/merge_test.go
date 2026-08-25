@@ -2,7 +2,8 @@ package timeline
 
 import "testing"
 
-func ptrI64(v int64) *int64 { return &v }
+func ptrI64(v int64) *int64     { return &v }
+func ptrF64(v float64) *float64 { return &v }
 
 // twoProviders builds two single-lane envelopes with overlapping working
 // intervals so union-vs-sum behavior is observable.
@@ -17,7 +18,7 @@ func twoProviders() []Sourced {
 			Start:     "2026-06-26T10:00:00Z",
 			End:       "2026-06-26T10:30:00Z",
 			Intervals: []Interval{{Status: "working", Start: "2026-06-26T10:00:00Z", End: "2026-06-26T10:30:00Z"}},
-			CostUSD:   2.0,
+			CostUSD:   ptrF64(2.0),
 			TokIn:     100,
 		}},
 		Summary: Summary{
@@ -26,8 +27,8 @@ func twoProviders() []Sourced {
 			AttentionPerSession: 1800000000000, AttentionFanout: 1800000000000,
 			AttendedActive: ptrI64(100000000000), DelegatedActive: ptrI64(300000000000),
 		},
-		Totals:     Totals{TokIn: 100, CostUSD: 2.0, Subagents: 0},
-		PlanWindow: &PlanWindow{Hours: 5, CostUSD: 5.0},
+		Totals:     Totals{TokIn: 100, CostUSD: ptrF64(2.0), Subagents: 0},
+		PlanWindow: &PlanWindow{Hours: 5, CostUSD: ptrF64(5.0)},
 	}
 	b := &Timeline{
 		Window: "2026-06-26",
@@ -38,7 +39,7 @@ func twoProviders() []Sourced {
 			Start:     "2026-06-26T10:15:00Z",
 			End:       "2026-06-26T10:45:00Z",
 			Intervals: []Interval{{Status: "working", Start: "2026-06-26T10:15:00Z", End: "2026-06-26T10:45:00Z"}},
-			CostUSD:   1.0,
+			CostUSD:   ptrF64(1.0),
 			TokIn:     50,
 		}},
 		Summary: Summary{
@@ -46,8 +47,8 @@ func twoProviders() []Sourced {
 			Sessions: 1, ByStatus: map[string]int64{"working": 1800000000000},
 			AttentionPerSession: 1800000000000, AttentionFanout: 1800000000000,
 		},
-		Totals:     Totals{TokIn: 50, CostUSD: 1.0, Subagents: 2},
-		PlanWindow: &PlanWindow{Hours: 5, CostUSD: 9.0},
+		Totals:     Totals{TokIn: 50, CostUSD: ptrF64(1.0), Subagents: 2},
+		PlanWindow: &PlanWindow{Hours: 5, CostUSD: ptrF64(9.0)},
 	}
 	return []Sourced{{Provider: "claude", Timeline: a}, {Provider: "arachne", Timeline: b}}
 }
@@ -83,7 +84,7 @@ func TestMerge_shouldSumAdditiveSummaryAndTotalsWhenMerging(t *testing.T) {
 	if out.Summary.AttentionPerSession != 3600000000000 {
 		t.Fatalf("attention_per_session = %d, want 3.6e12", out.Summary.AttentionPerSession)
 	}
-	if out.Totals.TokIn != 150 || out.Totals.CostUSD != 3.0 || out.Totals.Subagents != 2 {
+	if out.Totals.TokIn != 150 || out.Totals.CostUSD == nil || *out.Totals.CostUSD != 3.0 || out.Totals.Subagents != 2 {
 		t.Fatalf("totals not summed: %+v", out.Totals)
 	}
 }
@@ -121,8 +122,84 @@ func TestMerge_shouldRecomputeDelegationEffectivenessFromSummedComponents(t *tes
 
 func TestMerge_shouldTakePlanWindowFromFirstProviderThatSuppliesOne(t *testing.T) {
 	out := Merge(twoProviders(), MergeOptions{})
-	if out.PlanWindow == nil || out.PlanWindow.CostUSD != 5.0 {
+	if out.PlanWindow == nil || out.PlanWindow.CostUSD == nil || *out.PlanWindow.CostUSD != 5.0 {
 		t.Fatalf("plan_window = %+v, want first provider's (cost 5.0)", out.PlanWindow)
+	}
+}
+
+func TestMerge_shouldPreserveUnknownCostInsteadOfAddingZero(t *testing.T) {
+	priced := &Timeline{Totals: Totals{
+		TokIn: 10,
+		Cost: &CostEstimate{
+			APIEquivalentUSD: ptrF64(2.5),
+			Status:           "estimated",
+			Coverage:         ptrF64(1),
+			PricingSource:    "https://example.test/prices-a",
+			PricingVersion:   "a",
+		},
+	}}
+	unpriced := &Timeline{Totals: Totals{TokIn: 20}}
+
+	out := Merge([]Sourced{{Provider: "a", Timeline: priced}, {Provider: "b", Timeline: unpriced}}, MergeOptions{})
+	if out.Totals.Cost == nil || out.Totals.Cost.Status != "partial" {
+		t.Fatalf("cost = %+v, want explicit partial estimate", out.Totals.Cost)
+	}
+	if out.Totals.Cost.APIEquivalentUSD == nil || *out.Totals.Cost.APIEquivalentUSD != 2.5 {
+		t.Fatalf("api-equivalent cost = %+v, want known subtotal 2.5", out.Totals.Cost.APIEquivalentUSD)
+	}
+	if out.Totals.CostUSD == nil || *out.Totals.CostUSD != 2.5 {
+		t.Fatalf("legacy alias = %+v, want known subtotal 2.5", out.Totals.CostUSD)
+	}
+	if out.Totals.Cost.Coverage == nil || *out.Totals.Cost.Coverage != 0.5 {
+		t.Fatalf("coverage = %+v, want 0.5 from one priced and one unpriced component", out.Totals.Cost.Coverage)
+	}
+}
+
+func TestMerge_shouldKeepExplicitZeroDistinctFromMissingCost(t *testing.T) {
+	zero := &Timeline{Totals: Totals{
+		Cost: &CostEstimate{APIEquivalentUSD: ptrF64(0), Status: "estimated", Coverage: ptrF64(1)},
+	}}
+	out := Merge([]Sourced{{Provider: "zero", Timeline: zero}}, MergeOptions{})
+	if out.Totals.CostUSD == nil || *out.Totals.CostUSD != 0 {
+		t.Fatalf("explicit zero was lost: %+v", out.Totals)
+	}
+	b, err := out.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := Parse(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Totals.CostUSD == nil || *parsed.Totals.CostUSD != 0 {
+		t.Fatalf("round trip lost explicit zero: %s", b)
+	}
+}
+
+func TestMerge_shouldKeepCostConceptsAndProvenanceSeparate(t *testing.T) {
+	inputs := []Sourced{
+		{Provider: "a", Timeline: &Timeline{Totals: Totals{Cost: &CostEstimate{
+			APIEquivalentUSD: ptrF64(1), EstimatedBilledUSD: ptrF64(0.25),
+			PlanCredits: ptrF64(20), Status: "estimated", Coverage: ptrF64(1),
+			PricingSource: "https://example.test/a", PricingVersion: "one",
+			PricingRetrievedAt: "2026-08-25T10:00:00Z",
+		}}}},
+		{Provider: "b", Timeline: &Timeline{Totals: Totals{Cost: &CostEstimate{
+			APIEquivalentUSD: ptrF64(2), EstimatedBilledUSD: ptrF64(0.75),
+			PlanCredits: ptrF64(30), Status: "estimated", Coverage: ptrF64(1),
+			PricingSource: "https://example.test/b", PricingVersion: "two",
+			PricingRetrievedAt: "2026-08-25T11:00:00Z",
+		}}}},
+	}
+	out := Merge(inputs, MergeOptions{})
+	c := out.Totals.Cost
+	if c == nil || c.APIEquivalentUSD == nil || *c.APIEquivalentUSD != 3 ||
+		c.EstimatedBilledUSD == nil || *c.EstimatedBilledUSD != 1 ||
+		c.PlanCredits == nil || *c.PlanCredits != 50 {
+		t.Fatalf("unlike cost concepts were not summed independently: %+v", c)
+	}
+	if c.PricingVersion != "mixed" || c.PricingRetrievedAt != "2026-08-25T10:00:00Z" || len(c.PricingSources) != 2 {
+		t.Fatalf("provenance = %+v, want mixed versions, oldest retrieval, two sources", c)
 	}
 }
 

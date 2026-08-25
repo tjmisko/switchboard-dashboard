@@ -7,7 +7,7 @@
 //
 // Contract notes that drive this code:
 //   - durations (by_status.*, attention_*, *_active) are NANOSECONDS (÷1e9).
-//   - token fields are RAW COUNTS; cost_usd is FLOAT DOLLARS.
+//   - token fields are RAW COUNTS; cost amounts are nullable FLOAT DOLLARS.
 //   - timestamps are RFC3339 (variable fractional secs / offset); Date.parse OK.
 //   - lanes may be null OR []. Every v2 field is additive + optional → degrade.
 //   - v2 lane fields: labels[], subagents[], focus[], cost_usd, tok_*.
@@ -177,6 +177,34 @@ function fmtUSD(v) {
   if (v === 0) return "$0.00";
   if (v < 0.01) return "<$0.01";
   return "$" + v.toFixed(2);
+}
+
+function fmtCredits(v) {
+  if (v == null) return "—";
+  return v.toLocaleString(undefined, { maximumFractionDigits: 2 }) + " credits";
+}
+
+function costStatusText(cost) {
+  if (!cost) return "Unknown";
+  if (cost.legacy) return "Legacy estimate";
+  if (cost.status === "included") return "Included plan";
+  if (cost.status === "partial") {
+    return cost.coverage != null ? `Partial · ${Math.round(cost.coverage * 100)}% covered` : "Partial coverage";
+  }
+  if (cost.status === "stale") return "Stale prices";
+  if (cost.status === "unknown") return "Unknown";
+  return "Estimated";
+}
+
+function costSourceText(cost) {
+  if (!cost || !cost.pricingSources.length) return "Price source unavailable";
+  const names = cost.pricingSources.map((source) => {
+    try { return new URL(source).hostname; } catch (_) { return source; }
+  });
+  const stamp = cost.pricingAsOf || cost.pricingRetrievedAt;
+  const parsed = stamp ? new Date(stamp) : null;
+  const asOf = parsed && !Number.isNaN(parsed.getTime()) ? parsed.toLocaleString() : stamp;
+  return `${names.join(" + ")}${asOf ? ` · as of ${asOf}` : ""}`;
 }
 
 function fmtClock(dateStr) {
@@ -2332,10 +2360,14 @@ function drawCollapsedGroup(g, x, W) {
   caret.textContent = "▸";
   addGutter(caret);
 
-  let activeMs = 0, cost = 0;
+  let activeMs = 0, cost = 0, haveCost = false;
   for (const lane of g.lanes) {
     activeMs += laneActiveMs(lane); // clipped at the evidence bound, like the summary
-    if (lane.cost_usd != null) cost += lane.cost_usd;
+    const amount = apiEquivalentCost(lane);
+    if (amount != null) {
+      cost += amount;
+      haveCost = true;
+    }
   }
 
   // Name over figure, on two lines — the same shape the operator lane's gutter
@@ -2345,7 +2377,7 @@ function drawCollapsedGroup(g, x, W) {
   // through each other). Stacked, the name gets the whole width.
   addGutter(groupLabelEl(g, top + 14, GEO.GUTTER - GEO.GUTTER_PAD - GEO.GROUP_LABEL_X));
   const meta = svgEl("text", { class: "group-collapsed-meta", x: GEO.GROUP_LABEL_X, y: top + 26 });
-  meta.textContent = `${humanDurationCoarseMs(activeMs)}${cost > 0 ? " · " + fmtUSD(cost) : ""}`;
+  meta.textContent = `${humanDurationCoarseMs(activeMs)}${haveCost ? " · " + fmtUSD(cost) : ""}`;
   addGutter(meta);
 
   // sparkbars: each folded session's lifespan, so "when" survives the fold.
@@ -3537,9 +3569,10 @@ function nameSegTipHTML(lane, seg) {
   const durMs = seg.end - seg.start;
   const ineff = spanInefficiency(lane, seg.start, seg.end);
   const tokens = tokenTotals(sum && sum.tokens);
+  const laneCost = normalizedCost(lane);
 
   const cells = [];
-  if (lane.cost_usd != null) cells.push(["cost", fmtUSD(lane.cost_usd)]);
+  if (laneCost.apiEquivalentUsd != null) cells.push(["API eq.", fmtUSD(laneCost.apiEquivalentUsd)]);
   if (tokens) cells.push(["tokens out", fmtTokens(tokens.output)]);
   if (ineff != null) cells.push(["idle", Math.round(ineff * 100) + "%"]);
 
@@ -3592,9 +3625,21 @@ function sessionPopoutHTML(lane) {
   const mem = laneMemory(lane, lastMemory);
   const press = pressureWindow(lastMemory, startMs, endMs);
   const ineff = spanInefficiency(lane, startMs, endMs);
+  const laneCost = normalizedCost(lane);
 
   const figs = [];
-  if (lane.cost_usd != null) figs.push(["Cost", `<b>${fmtUSD(lane.cost_usd)}</b>`]);
+  if (laneCost.apiEquivalentUsd != null) {
+    figs.push(["API equivalent", `<b>${fmtUSD(laneCost.apiEquivalentUsd)}</b> <span class="dim">${escapeHTML(costStatusText(laneCost))}</span>`]);
+  } else if (laneCost.status === "unknown" && (tokens || lane.cost)) {
+    figs.push(["API equivalent", `<b>—</b> <span class="dim">Unknown</span>`]);
+  }
+  if (laneCost.estimatedBilledUsd != null) {
+    figs.push(["Estimated billed", `<b>${fmtUSD(laneCost.estimatedBilledUsd)}</b>`]);
+  } else if (laneCost.status === "included") {
+    figs.push(["Billing", `<b>Included</b> <span class="dim">no incremental dollar estimate</span>`]);
+  }
+  if (laneCost.planCredits != null) figs.push(["Plan usage", `<b>${escapeHTML(fmtCredits(laneCost.planCredits))}</b>`]);
+  if (laneCost.pricingSources.length) figs.push(["Pricing", `<span class="dim">${escapeHTML(costSourceText(laneCost))}</span>`]);
   if (ineff != null) figs.push(["Operator idle", `${Math.round(ineff * 100)}% <span class="dim">idle / waiting</span>`]);
   if (tokens) {
     figs.push(["Tokens", `<b>${fmtTokens(tokens.output)}</b> out · <b>${fmtTokens(tokens.billedInput)}</b> in`]);
@@ -3627,8 +3672,13 @@ function sessionPopoutHTML(lane) {
 
   const idBits = [];
   const dataProvider = laneProvider(lane);
-  if (dataProvider) idBits.push(providerLabel(dataProvider));
+  const billingProvider = billingProviderLabel(lane);
+  if (billingProvider) idBits.push(billingProvider);
   if (lane.agent && lane.agent !== dataProvider) idBits.push(lane.agent);
+  if (lane.billing_route) idBits.push(lane.billing_route.replaceAll("_", " "));
+  if (lane.model) idBits.push(lane.model);
+  if (lane.service_tier) idBits.push(lane.service_tier + " tier");
+  if (lane.speed) idBits.push(lane.speed + " speed");
   if (lane.pid != null) idBits.push("pid " + lane.pid);
 
   const body = summaryBodyHTML(sum);
@@ -3655,9 +3705,10 @@ function gutterTipHTML(lane, name) {
   const sum = sessionSummary(lane);
   const startMs = Date.parse(lane.start), endMs = Date.parse(lane.end);
   const tokens = tokenTotals(sum && sum.tokens);
+  const laneCost = normalizedCost(lane);
 
   const cells = [];
-  if (lane.cost_usd != null) cells.push(["cost", fmtUSD(lane.cost_usd)]);
+  if (laneCost.apiEquivalentUsd != null) cells.push(["API eq.", fmtUSD(laneCost.apiEquivalentUsd)]);
   if (tokens) cells.push(["tokens out", fmtTokens(tokens.output)]);
 
   let html = `<div class="t-name">${escapeHTML(name)}</div>`
@@ -4250,6 +4301,8 @@ function pctColor(pct) {
 function renderCostCard(data, plan) {
   const totals = data.totals || {};
   const pw = data.plan_window || null;
+  const totalCost = normalizedCost(totals);
+  const planCost = normalizedCost(pw);
 
   // tip() → escaped formula-descriptor HTML for a data-tip attribute.
   const tip = (obj) => escapeHTML(formulaTipHTML(obj));
@@ -4264,32 +4317,52 @@ function renderCostCard(data, plan) {
     ? `<span class="dim">Official % unavailable</span>`
     : `<span class="${stale ? "stale" : "dim"}">Official % · updated ${agoString(Date.parse(plan.mtime))}${stale ? " (stale)" : ""}</span>`;
 
-  const windowDollars = pw && pw.cost_usd != null ? pw.cost_usd : null;
+  const apiEquivalent = totalCost.apiEquivalentUsd;
+  const windowDollars = planCost.apiEquivalentUsd;
+  const statusText = costStatusText(totalCost);
+  const coverageRows = [];
+  if (totalCost.estimatedBilledUsd != null) {
+    coverageRows.push(`<div class="kv"><span>Estimated billed</span><b>${fmtUSD(totalCost.estimatedBilledUsd)}</b></div>`);
+  } else if (totalCost.status === "included") {
+    coverageRows.push(`<div class="kv"><span>Billing route</span><b>Included</b></div>`);
+  }
+  if (totalCost.vendorEstimatedUsd != null && totalCost.vendorEstimatedUsd !== totalCost.estimatedBilledUsd) {
+    coverageRows.push(`<div class="kv"><span>Vendor estimate</span><b>${fmtUSD(totalCost.vendorEstimatedUsd)}</b></div>`);
+  }
+  if (totalCost.planCredits != null) {
+    coverageRows.push(`<div class="kv"><span>Plan usage</span><b>${escapeHTML(fmtCredits(totalCost.planCredits))}</b></div>`);
+  }
+  coverageRows.push(`<div class="kv"><span>Estimate status</span><b>${escapeHTML(statusText)}</b></div>`);
+  coverageRows.push(`<div class="kv muted-note">${escapeHTML(costSourceText(totalCost))}</div>`);
 
   el.cardCost.innerHTML = `
     <div class="card-label">cost</div>
     <div class="headline-row">
       <div class="headline has-tip" data-tip="${tip({
-        title: "Window total",
-        formula: "Σ tokens × model price (recomputed)",
-        result: fmtUSD(totals.cost_usd),
-        why: "Total spend for this window, recomputed from token counts and current model prices.",
+        title: "API-equivalent cost",
+        formula: "Σ per-turn billable usage × sourced on-demand rate",
+        result: fmtUSD(apiEquivalent),
+        why: totalCost.legacy
+          ? "Legacy provider estimate. It has no structured billing-route or price-source provenance, so it may be incomplete."
+          : "Comparable on-demand API value for this window. Subscription inclusion, vendor credits, and estimated billed dollars are shown separately.",
       })}">
-        <div class="hv">${fmtUSD(totals.cost_usd)}</div>
-        <div class="hk">Window total · recomputed</div>
+        <div class="hv">${fmtUSD(apiEquivalent)}</div>
+        <div class="hk">API equivalent · ${escapeHTML(statusText)}</div>
       </div>
     </div>
+
+    ${coverageRows.join("")}
 
     <div class="gauge-block">
       <div class="gauge-head">
         <span>5h plan window</span>
         <span class="gauge-figs">
           ${windowDollars != null ? `<span class="has-tip" data-tip="${tip({
-            title: "5h window — ours",
-            formula: "our $ spent this 5h plan window",
+            title: "5h window — API equivalent",
+            formula: "per-turn usage × sourced on-demand rate",
             result: fmtUSD(windowDollars),
-            why: "Cost we recomputed for sessions in the current 5-hour plan window.",
-          })}"><b>${fmtUSD(windowDollars)}</b> <span class="dim">ours</span></span>` : ""}
+            why: "Comparable API value for sessions in this plan window, not necessarily an incremental subscription charge.",
+          })}"><b>${fmtUSD(windowDollars)}</b> <span class="dim">API eq.</span></span>` : ""}
           ${fhPct != null ? `<b class="has-tip" style="color:${pctColor(fhPct)}" data-tip="${tip({
             title: "5h plan usage — official",
             formula: "from the read-only plan-usage cache",
@@ -4326,7 +4399,8 @@ function renderCostCard(data, plan) {
 // ---------------------------------------------------------------------------
 // the token card
 //
-// The dollars above are DERIVED (tokens × model price); this is what they were
+// The API-equivalent dollars above are DERIVED from metered usage and a sourced
+// price catalog; this is what they were
 // derived from, which is why it sits directly under them — its own card in the
 // same column, not a ruled-off tail of the cost card, so the two read as two
 // facts rather than one long one.
