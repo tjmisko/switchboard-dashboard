@@ -327,8 +327,8 @@ func TestServer_servesEmbeddedFieldGuide(t *testing.T) {
 // --- multi-provider merge ---
 
 func TestHandleTimeline_mergesMultipleProvidersAndNamespacesLanes(t *testing.T) {
-	claudeEnv := `{"window":"2026-06-26","lanes":[{"session_id":"c1","agent":"claude","project":"sb","start":"2026-06-26T10:00:00Z","end":"2026-06-26T10:30:00Z","intervals":[{"status":"working","start":"2026-06-26T10:00:00Z","end":"2026-06-26T10:30:00Z"}]}],"summary":{"from":"2026-06-26T10:00:00Z","to":"2026-06-26T10:30:00Z","sessions":1,"by_status":{"working":1800000000000},"attention_union":1800000000000,"attention_per_session":1800000000000,"attention_fanout":1800000000000},"totals":{"cost_usd":1.0}}`
-	arachneEnv := `{"window":"2026-06-26","lanes":[{"session_id":"feat-f71","agent":"opus","project":"Arachne","start":"2026-06-26T10:10:00Z","end":"2026-06-26T10:50:00Z","intervals":[{"status":"working","start":"2026-06-26T10:10:00Z","end":"2026-06-26T10:50:00Z"}]}],"summary":{"from":"2026-06-26T10:10:00Z","to":"2026-06-26T10:50:00Z","sessions":1,"by_status":{"working":2400000000000},"attention_union":2400000000000,"attention_per_session":2400000000000,"attention_fanout":2400000000000},"totals":{"cost_usd":2.0}}`
+	claudeEnv := `{"window":"2026-06-26","lanes":[{"session_id":"c1","agent":"claude","project":"sb","start":"2026-06-26T10:00:00Z","end":"2026-06-26T10:30:00Z","intervals":[{"status":"working","start":"2026-06-26T10:00:00Z","end":"2026-06-26T10:30:00Z"}]}],"summary":{"from":"2026-06-26T10:00:00Z","to":"2026-06-26T10:30:00Z","sessions":1,"by_status":{"working":1800000000000},"attention_union":1800000000000,"attention_per_session":1800000000000,"attention_fanout":1800000000000},"totals":{"cost_usd":1.0,"cost":{"api_equivalent_usd":1.0,"status":"estimated"}}}`
+	arachneEnv := `{"window":"2026-06-26","lanes":[{"session_id":"feat-f71","agent":"opus","project":"Arachne","start":"2026-06-26T10:10:00Z","end":"2026-06-26T10:50:00Z","intervals":[{"status":"working","start":"2026-06-26T10:10:00Z","end":"2026-06-26T10:50:00Z"}]}],"summary":{"from":"2026-06-26T10:10:00Z","to":"2026-06-26T10:50:00Z","sessions":1,"by_status":{"working":2400000000000},"attention_union":2400000000000,"attention_per_session":2400000000000,"attention_fanout":2400000000000},"totals":{"cost_usd":2.0,"cost":{"api_equivalent_usd":2.0,"status":"estimated"}}}`
 	claudeStub := writeStub(t, "#!/bin/sh\ncat <<'JSONEOF'\n"+claudeEnv+"\nJSONEOF\n")
 	arachneStub := writeStub(t, "#!/bin/sh\ncat <<'JSONEOF'\n"+arachneEnv+"\nJSONEOF\n")
 	srv := &Server{Providers: []provider.Provider{
@@ -367,6 +367,52 @@ func TestHandleTimeline_mergesMultipleProvidersAndNamespacesLanes(t *testing.T) 
 	}
 	if body.Totals.CostUSD != 3.0 {
 		t.Fatalf("merged cost = %v, want 3.0", body.Totals.CostUSD)
+	}
+}
+
+func TestHandleTimeline_mergeDropsLegacyOnlyCostEstimates(t *testing.T) {
+	legacyEnv := `{"window":"2026-06-26","lanes":[{"session_id":"old","start":"2026-06-26T10:00:00Z","end":"2026-06-26T10:01:00Z","tok_in":10,"cost_usd":7,"intervals":[]}],"summary":{"from":"2026-06-26T10:00:00Z","to":"2026-06-26T10:01:00Z","sessions":1,"by_status":{}},"totals":{"tok_in":10,"cost_usd":7}}`
+	emptyEnv := `{"window":"2026-06-26","lanes":[],"summary":{"from":"","to":"","sessions":0,"by_status":{}},"totals":{}}`
+	legacyStub := writeStub(t, "#!/bin/sh\ncat <<'JSONEOF'\n"+legacyEnv+"\nJSONEOF\n")
+	emptyStub := writeStub(t, "#!/bin/sh\ncat <<'JSONEOF'\n"+emptyEnv+"\nJSONEOF\n")
+	srv := &Server{Providers: []provider.Provider{
+		provider.NewSubprocessProvider("legacy", "Legacy", []string{legacyStub}, "", provider.Capabilities{}),
+		provider.NewSubprocessProvider("empty", "Empty", []string{emptyStub}, "", provider.Capabilities{}),
+	}}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/timeline?day=2026-06-26", nil)
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %q)", rec.Result().StatusCode, rec.Body.String())
+	}
+	var body struct {
+		Lanes []struct {
+			CostUSD *float64 `json:"cost_usd"`
+			Cost    *struct {
+				APIEquivalentUSD *float64 `json:"api_equivalent_usd"`
+				Status           string   `json:"status"`
+			} `json:"cost"`
+		} `json:"lanes"`
+		Totals struct {
+			CostUSD *float64 `json:"cost_usd"`
+			Cost    *struct {
+				APIEquivalentUSD *float64 `json:"api_equivalent_usd"`
+				Status           string   `json:"status"`
+			} `json:"cost"`
+		} `json:"totals"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body not json: %v (%q)", err, rec.Body.String())
+	}
+	if len(body.Lanes) != 1 || body.Lanes[0].CostUSD != nil || body.Lanes[0].Cost == nil ||
+		body.Lanes[0].Cost.APIEquivalentUSD != nil || body.Lanes[0].Cost.Status != "unknown" {
+		t.Fatalf("legacy lane cost survived merge: %+v", body.Lanes)
+	}
+	if body.Totals.CostUSD != nil || body.Totals.Cost == nil ||
+		body.Totals.Cost.APIEquivalentUSD != nil || body.Totals.Cost.Status != "unknown" {
+		t.Fatalf("legacy total cost survived merge: %+v", body.Totals)
 	}
 }
 

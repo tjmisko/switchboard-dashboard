@@ -63,7 +63,7 @@ func Merge(inputs []Sourced, opts MergeOptions) *Timeline {
 			if lane.Provider == "" {
 				lane.Provider = in.Provider
 			}
-			lane.Cost = mergeCostEstimates(nil, lane.Cost, lane.CostUSD, laneHasUsage(lane))
+			lane.Cost = mergeCostEstimates(nil, lane.Cost, laneHasUsage(lane))
 			lane.CostUSD = apiEquivalentAlias(lane.Cost)
 			lane.SessionID = namespaceID(in.Provider, lane.SessionID, lane.PID, i)
 			out.Lanes = append(out.Lanes, lane)
@@ -106,13 +106,15 @@ func Merge(inputs []Sourced, opts MergeOptions) *Timeline {
 		out.Totals.Cost = mergeCostEstimates(
 			out.Totals.Cost,
 			t.Totals.Cost,
-			t.Totals.CostUSD,
 			totalsHaveUsage(t.Totals),
 		)
 		out.Totals.CostUSD = apiEquivalentAlias(out.Totals.Cost)
 
 		if out.PlanWindow == nil && t.PlanWindow != nil {
-			out.PlanWindow = t.PlanWindow
+			plan := *t.PlanWindow
+			plan.Cost = mergeCostEstimates(nil, t.PlanWindow.Cost, planWindowHasUsage(plan))
+			plan.CostUSD = apiEquivalentAlias(plan.Cost)
+			out.PlanWindow = &plan
 		}
 		mergeAgentTimeline(out, in)
 		out.ProviderErrors = append(out.ProviderErrors, t.ProviderErrors...)
@@ -154,12 +156,12 @@ func Merge(inputs []Sourced, opts MergeOptions) *Timeline {
 	return out
 }
 
-// mergeCostEstimates combines like-for-like amounts while preserving absence.
-// A legacy cost_usd is accepted as an API-equivalent amount, but marked partial
-// because it carries neither billing semantics nor pricing provenance. Usage
-// with no estimate creates an explicit unknown component instead of adding zero.
-func mergeCostEstimates(dst, incoming *CostEstimate, legacy *float64, hasUsage bool) *CostEstimate {
-	src := normalizeCostEstimate(incoming, legacy, hasUsage)
+// mergeCostEstimates combines like-for-like structured amounts while preserving
+// absence. Legacy-only estimates are deliberately ignored: cost_usd carries no
+// billing semantics or pricing provenance. Usage with no supported structured
+// estimate creates an explicit unknown component instead of adding zero.
+func mergeCostEstimates(dst, incoming *CostEstimate, hasUsage bool) *CostEstimate {
+	src := normalizeCostEstimate(incoming, hasUsage)
 	if src == nil {
 		return dst
 	}
@@ -223,21 +225,11 @@ func mergeCostEstimates(dst, incoming *CostEstimate, legacy *float64, hasUsage b
 	return dst
 }
 
-func normalizeCostEstimate(in *CostEstimate, legacy *float64, hasUsage bool) *CostEstimate {
+func normalizeCostEstimate(in *CostEstimate, hasUsage bool) *CostEstimate {
+	if in != nil && in.Legacy {
+		in = nil
+	}
 	if in == nil {
-		if legacy != nil {
-			c := &CostEstimate{
-				APIEquivalentUSD: cloneFloat(legacy),
-				Status:           "partial",
-				Legacy:           true,
-			}
-			if hasUsage {
-				c.PricedUsageEvents = 1
-				one := 1.0
-				c.Coverage = &one
-			}
-			return c
-		}
 		if !hasUsage {
 			return nil
 		}
@@ -262,9 +254,6 @@ func normalizeCostEstimate(in *CostEstimate, legacy *float64, hasUsage bool) *Co
 		c.PricingEffectiveAt = c.PricingAsOf
 	}
 	c.PricingAsOf = ""
-	if c.APIEquivalentUSD == nil && legacy != nil {
-		c.APIEquivalentUSD = cloneFloat(legacy)
-	}
 	if c.Status == "" {
 		if costHasAmount(&c) {
 			c.Status = "estimated"
@@ -370,11 +359,16 @@ func mergeVendorUsage(dst, src *VendorUsageAggregate) *VendorUsageAggregate {
 	if dst == nil {
 		copy := *src
 		copy.Snapshots = append([]ScopedVendorUsage(nil), src.Snapshots...)
-		copy.Cost = *normalizeCostEstimate(&src.Cost, nil, false)
+		cost := normalizeCostEstimate(&src.Cost, false)
+		if cost != nil {
+			copy.Cost = *cost
+		} else {
+			copy.Cost = CostEstimate{Status: "unknown"}
+		}
 		return &copy
 	}
 	dst.Snapshots = append(dst.Snapshots, src.Snapshots...)
-	dst.Cost = *mergeCostEstimates(&dst.Cost, &src.Cost, nil, false)
+	dst.Cost = *mergeCostEstimates(&dst.Cost, &src.Cost, false)
 	if dst.Scope != src.Scope {
 		dst.Scope = "mixed_cumulative_snapshots"
 	}
@@ -436,6 +430,11 @@ func laneHasUsage(lane Lane) bool {
 func totalsHaveUsage(t Totals) bool {
 	return t.TokIn != 0 || t.TokOut != 0 || t.TokCacheRead != 0 ||
 		t.TokCacheCreate != 0 || usageHasValues(t.Usage)
+}
+
+func planWindowHasUsage(p PlanWindow) bool {
+	return p.TokIn != 0 || p.TokOut != 0 || p.TokCacheRead != 0 ||
+		p.TokCacheCreate != 0 || usageHasValues(p.Usage)
 }
 
 func usageHasValues(u *UsageBreakdown) bool {

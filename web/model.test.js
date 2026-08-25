@@ -705,8 +705,8 @@ test("projectHoursMs parts with unparseable lane starts sort last with null star
 
 test("projectHoursMs sums cost over the lanes that contributed the time", () => {
   const lanes = [
-    { project: "sb", start: at(0), cost_usd: 4.5, intervals: [interval("working", ms(0), ms(10))] },
-    { project: "sb", start: at(20), cost_usd: 1.25, intervals: [interval("working", ms(20), ms(30))] },
+    { project: "sb", start: at(0), cost: { api_equivalent_usd: 4.5, status: "estimated" }, intervals: [interval("working", ms(0), ms(10))] },
+    { project: "sb", start: at(20), cost: { api_equivalent_usd: 1.25, status: "estimated" }, intervals: [interval("working", ms(20), ms(30))] },
   ];
   const row = projectHoursMs(lanes)[0];
   assert.equal(row.costUsd, 5.75);
@@ -734,8 +734,8 @@ test("projectHoursMs cost counts only lanes that contributed work", () => {
   // a part of the stack, so its spend is not in the row's total either — the
   // total always equals the sum of the parts drawn under it.
   const lanes = [
-    { project: "sb", start: at(0), cost_usd: 2, intervals: [interval("working", ms(0), ms(10))] },
-    { project: "sb", start: at(20), cost_usd: 99, intervals: [interval("idle", ms(20), ms(30))] },
+    { project: "sb", start: at(0), cost: { api_equivalent_usd: 2, status: "estimated" }, intervals: [interval("working", ms(0), ms(10))] },
+    { project: "sb", start: at(20), cost: { api_equivalent_usd: 99, status: "estimated" }, intervals: [interval("idle", ms(20), ms(30))] },
   ];
   const row = projectHoursMs(lanes)[0];
   assert.equal(row.costUsd, 2);
@@ -746,7 +746,7 @@ test("projectHoursMs keeps a suspect lane's full cost while clipping its time", 
   // the evidence bound is a claim about observed TIME; the tokens were bought
   // either way, so the dollars are not clipped with the tail.
   const lanes = [{
-    project: "sb", start: at(0), cost_usd: 3,
+    project: "sb", start: at(0), cost: { api_equivalent_usd: 3, status: "estimated" },
     suspect: true, suspect_since: at(10),
     intervals: [interval("working", ms(0), ms(60))],
   }];
@@ -1024,7 +1024,6 @@ test("normalizedCost should preserve canonical billing concepts and explicit zer
     estimatedBilledUsd: 0,
     status: "included",
     coverage: 1,
-    legacy: false,
     priceKind: null,
     pricingProvider: null,
     pricingRetrievedAt: null,
@@ -1090,12 +1089,23 @@ test("normalizedCost should accept canonical pricing provenance and coverage fie
   assert.deepEqual(cost.unpricedReasons, ["model is unknown"]);
 });
 
-test("normalizedCost should keep missing, legacy zero, and unknown distinct", () => {
+test("normalizedCost should ignore legacy estimates and preserve structured zero", () => {
   assert.equal(apiEquivalentCost({}), null);
   assert.equal(normalizedCost({}).status, "unknown");
-  assert.equal(normalizedCost({}).legacy, false);
-  assert.equal(apiEquivalentCost({ cost_usd: 0 }), 0);
-  assert.equal(normalizedCost({ cost_usd: 0 }).status, "legacy");
+  assert.equal(apiEquivalentCost({ cost_usd: 0 }), null);
+  assert.equal(normalizedCost({ cost_usd: 0 }).status, "unknown");
+  assert.equal(apiEquivalentCost({ cost: { api_equivalent_usd: 99, status: "partial", legacy: true } }), null);
+  assert.equal(normalizedCost({ cost: { api_equivalent_usd: 99, status: "partial", legacy: true } }).status, "unknown");
+  assert.equal(apiEquivalentCost({
+    cost: { api_equivalent_usd: 99, status: "partial", legacy: true },
+    cost_estimate: { api_equivalent_usd: 2, status: "estimated" },
+  }), 2);
+  const legacyVendor = normalizedCost({ vendor_usage: { scope: "legacy", cost: {
+    vendor_estimated_usd: 99, status: "partial", legacy: true,
+  } } });
+  assert.equal(legacyVendor.vendorEstimatedUsd, null);
+  assert.equal(legacyVendor.vendorStatus, null);
+  assert.equal(apiEquivalentCost({ cost: { api_equivalent_usd: 0, status: "estimated" } }), 0);
   assert.equal(normalizedCost({ cost: { status: "unknown" } }).apiEquivalentUsd, null);
 });
 
