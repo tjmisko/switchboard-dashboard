@@ -172,7 +172,12 @@ func mergeCostEstimates(dst, incoming *CostEstimate, legacy *float64, hasUsage b
 	dst.Legacy = dst.Legacy || src.Legacy
 	dst.PricedUsageEvents += src.PricedUsageEvents
 	dst.UnpricedUsageEvents += src.UnpricedUsageEvents
+	dst.PricedTokens += src.PricedTokens
 	dst.UnpricedTokens += src.UnpricedTokens
+	dst.PricedToolUnits += src.PricedToolUnits
+	dst.UnpricedToolUnits += src.UnpricedToolUnits
+	dst.UnpricedEvents += src.UnpricedEvents
+	dst.UnpricedReasons = mergeStrings(dst.UnpricedReasons, src.UnpricedReasons)
 
 	if dst.Coverage != nil && src.Coverage != nil {
 		// Event counts, when supplied, are the exact aggregate. Otherwise retain
@@ -183,7 +188,10 @@ func mergeCostEstimates(dst, incoming *CostEstimate, legacy *float64, hasUsage b
 	} else if dst.Coverage == nil && src.Coverage != nil {
 		dst.Coverage = cloneFloat(src.Coverage)
 	}
-	if total := dst.PricedUsageEvents + dst.UnpricedUsageEvents; total > 0 {
+	if total := dst.PricedTokens + dst.UnpricedTokens + dst.PricedToolUnits + dst.UnpricedToolUnits; total > 0 {
+		v := float64(dst.PricedTokens+dst.PricedToolUnits) / float64(total)
+		dst.Coverage = &v
+	} else if total := dst.PricedUsageEvents + dst.UnpricedUsageEvents; total > 0 {
 		v := float64(dst.PricedUsageEvents) / float64(total)
 		dst.Coverage = &v
 	}
@@ -195,9 +203,14 @@ func mergeCostEstimates(dst, incoming *CostEstimate, legacy *float64, hasUsage b
 		dst.PricingSource = ""
 	}
 	dst.PricingRetrievedAt = earlierTimestamp(dst.PricingRetrievedAt, src.PricingRetrievedAt)
-	dst.PricingAsOf = mergedIdentity(dst.PricingAsOf, src.PricingAsOf)
-	dst.PricingVersion = mergedIdentity(dst.PricingVersion, src.PricingVersion)
-	dst.PriceKind = mergedIdentity(dst.PriceKind, src.PriceKind)
+	dst.PricingEffectiveAt = earlierTimestamp(dst.PricingEffectiveAt, src.PricingEffectiveAt)
+	dst.PricingProvider = mergedIdentity(dst.PricingProvider, src.PricingProvider)
+	version := mergedIdentity(dst.PricingVersion, src.PricingVersion)
+	kind := mergedIdentity(dst.PricingKind, src.PricingKind)
+	dst.MixedPricingVersions = dst.MixedPricingVersions || src.MixedPricingVersions ||
+		version == "mixed" || kind == "mixed" || dst.PricingProvider == "mixed"
+	dst.PricingVersion = version
+	dst.PricingKind = kind
 	return dst
 }
 
@@ -230,6 +243,15 @@ func normalizeCostEstimate(in *CostEstimate, legacy *float64, hasUsage bool) *Co
 	c.EstimatedBilledUSD = cloneFloat(in.EstimatedBilledUSD)
 	c.Coverage = cloneFloat(in.Coverage)
 	c.PricingSources = append([]string(nil), in.PricingSources...)
+	c.UnpricedReasons = append([]string(nil), in.UnpricedReasons...)
+	if c.PricingKind == "" {
+		c.PricingKind = c.PriceKind
+	}
+	c.PriceKind = ""
+	if c.PricingEffectiveAt == "" {
+		c.PricingEffectiveAt = c.PricingAsOf
+	}
+	c.PricingAsOf = ""
 	if c.APIEquivalentUSD == nil && legacy != nil {
 		c.APIEquivalentUSD = cloneFloat(legacy)
 	}
@@ -240,7 +262,7 @@ func normalizeCostEstimate(in *CostEstimate, legacy *float64, hasUsage bool) *Co
 			c.Status = "unknown"
 		}
 	}
-	if hasUsage && c.PricedUsageEvents == 0 && c.UnpricedUsageEvents == 0 {
+	if hasUsage && c.PricedUsageEvents == 0 && c.UnpricedUsageEvents == 0 && c.UnpricedEvents == 0 {
 		if costHasAmount(&c) {
 			c.PricedUsageEvents = 1
 		} else {
