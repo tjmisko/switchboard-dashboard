@@ -10,7 +10,7 @@
 //   - token fields are RAW COUNTS; cost amounts are nullable FLOAT DOLLARS.
 //   - timestamps are RFC3339 (variable fractional secs / offset); Date.parse OK.
 //   - lanes may be null OR []. Every v2 field is additive + optional → degrade.
-//   - v2 lane fields: labels[], subagents[], focus[], cost_usd, tok_*.
+//   - v2 lane fields: labels[], subagents[], focus[], cost, tok_*.
 //   - v2 summary fields: prompt_active, attended_active, delegated_active,
 //     delegation_effectiveness. v2 top-level: plan_window, activity[], and the
 //     provider-neutral agent_timeline descendant graph (all optional).
@@ -186,7 +186,6 @@ function fmtCredits(v) {
 
 function costStatusText(cost) {
   if (!cost) return "Unknown";
-  if (cost.legacy) return "Legacy estimate";
   if (cost.status === "included") return "Included plan";
   if (cost.status === "partial") {
     if (cost.unpricedUsageEvents > 0 && cost.unpricedTokens + cost.unpricedToolUnits === 0) {
@@ -4355,9 +4354,7 @@ function renderCostCard(data, plan) {
         title: "API-equivalent cost",
         formula: "Σ per-turn billable usage × sourced on-demand rate",
         result: fmtUSD(apiEquivalent),
-        why: totalCost.legacy
-          ? "Legacy provider estimate. It has no structured billing-route or price-source provenance, so it may be incomplete."
-          : "Comparable on-demand API value for this window. Subscription inclusion, vendor credits, and estimated billed dollars are shown separately.",
+        why: "Comparable on-demand API value for this window. Subscription inclusion, vendor credits, and estimated billed dollars are shown separately.",
       })}">
         <div class="hv">${fmtUSD(apiEquivalent)}</div>
         <div class="hk">API equivalent · ${escapeHTML(statusText)}</div>

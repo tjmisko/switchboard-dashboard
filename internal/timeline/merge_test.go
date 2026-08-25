@@ -19,6 +19,7 @@ func twoProviders() []Sourced {
 			End:       "2026-06-26T10:30:00Z",
 			Intervals: []Interval{{Status: "working", Start: "2026-06-26T10:00:00Z", End: "2026-06-26T10:30:00Z"}},
 			CostUSD:   ptrF64(2.0),
+			Cost:      &CostEstimate{APIEquivalentUSD: ptrF64(2.0), Status: "estimated"},
 			TokIn:     100,
 		}},
 		Summary: Summary{
@@ -27,8 +28,10 @@ func twoProviders() []Sourced {
 			AttentionPerSession: 1800000000000, AttentionFanout: 1800000000000,
 			AttendedActive: ptrI64(100000000000), DelegatedActive: ptrI64(300000000000),
 		},
-		Totals:     Totals{TokIn: 100, CostUSD: ptrF64(2.0), Subagents: 0},
-		PlanWindow: &PlanWindow{Hours: 5, CostUSD: ptrF64(5.0)},
+		Totals: Totals{TokIn: 100, CostUSD: ptrF64(2.0),
+			Cost: &CostEstimate{APIEquivalentUSD: ptrF64(2.0), Status: "estimated"}},
+		PlanWindow: &PlanWindow{Hours: 5, CostUSD: ptrF64(5.0),
+			Cost: &CostEstimate{APIEquivalentUSD: ptrF64(5.0), Status: "estimated"}},
 	}
 	b := &Timeline{
 		Window: "2026-06-26",
@@ -40,6 +43,7 @@ func twoProviders() []Sourced {
 			End:       "2026-06-26T10:45:00Z",
 			Intervals: []Interval{{Status: "working", Start: "2026-06-26T10:15:00Z", End: "2026-06-26T10:45:00Z"}},
 			CostUSD:   ptrF64(1.0),
+			Cost:      &CostEstimate{APIEquivalentUSD: ptrF64(1.0), Status: "estimated"},
 			TokIn:     50,
 		}},
 		Summary: Summary{
@@ -47,8 +51,10 @@ func twoProviders() []Sourced {
 			Sessions: 1, ByStatus: map[string]int64{"working": 1800000000000},
 			AttentionPerSession: 1800000000000, AttentionFanout: 1800000000000,
 		},
-		Totals:     Totals{TokIn: 50, CostUSD: ptrF64(1.0), Subagents: 2},
-		PlanWindow: &PlanWindow{Hours: 5, CostUSD: ptrF64(9.0)},
+		Totals: Totals{TokIn: 50, CostUSD: ptrF64(1.0), Subagents: 2,
+			Cost: &CostEstimate{APIEquivalentUSD: ptrF64(1.0), Status: "estimated"}},
+		PlanWindow: &PlanWindow{Hours: 5, CostUSD: ptrF64(9.0),
+			Cost: &CostEstimate{APIEquivalentUSD: ptrF64(9.0), Status: "estimated"}},
 	}
 	return []Sourced{{Provider: "claude", Timeline: a}, {Provider: "arachne", Timeline: b}}
 }
@@ -124,6 +130,46 @@ func TestMerge_shouldTakePlanWindowFromFirstProviderThatSuppliesOne(t *testing.T
 	out := Merge(twoProviders(), MergeOptions{})
 	if out.PlanWindow == nil || out.PlanWindow.CostUSD == nil || *out.PlanWindow.CostUSD != 5.0 {
 		t.Fatalf("plan_window = %+v, want first provider's (cost 5.0)", out.PlanWindow)
+	}
+}
+
+func TestMerge_shouldIgnoreLegacyOnlyCostEstimates(t *testing.T) {
+	legacy := &Timeline{
+		Lanes: []Lane{{
+			SessionID: "old", TokIn: 10, CostUSD: ptrF64(7),
+			Start: "2026-06-26T10:00:00Z", End: "2026-06-26T10:01:00Z",
+		}},
+		Totals:     Totals{TokIn: 10, CostUSD: ptrF64(7)},
+		PlanWindow: &PlanWindow{Hours: 5, TokIn: 10, CostUSD: ptrF64(3)},
+	}
+
+	out := Merge([]Sourced{{Provider: "old", Timeline: legacy}}, MergeOptions{})
+	if len(out.Lanes) != 1 || out.Lanes[0].Cost == nil || out.Lanes[0].Cost.Status != "unknown" ||
+		out.Lanes[0].Cost.APIEquivalentUSD != nil || out.Lanes[0].CostUSD != nil {
+		t.Fatalf("legacy lane cost survived: %+v", out.Lanes)
+	}
+	if out.Totals.Cost == nil || out.Totals.Cost.Status != "unknown" ||
+		out.Totals.Cost.APIEquivalentUSD != nil || out.Totals.CostUSD != nil {
+		t.Fatalf("legacy total cost survived: %+v", out.Totals)
+	}
+	if out.PlanWindow == nil || out.PlanWindow.Cost == nil || out.PlanWindow.Cost.Status != "unknown" ||
+		out.PlanWindow.Cost.APIEquivalentUSD != nil || out.PlanWindow.CostUSD != nil {
+		t.Fatalf("legacy plan cost survived: %+v", out.PlanWindow)
+	}
+}
+
+func TestMerge_shouldExcludeStructuredEstimatesMarkedLegacy(t *testing.T) {
+	legacy := &Timeline{Totals: Totals{TokIn: 10, Cost: &CostEstimate{
+		APIEquivalentUSD: ptrF64(99), Status: "partial", Legacy: true,
+	}}}
+	current := &Timeline{Totals: Totals{TokIn: 20, Cost: &CostEstimate{
+		APIEquivalentUSD: ptrF64(2.5), Status: "estimated", Coverage: ptrF64(1),
+	}}}
+
+	out := Merge([]Sourced{{Provider: "old", Timeline: legacy}, {Provider: "new", Timeline: current}}, MergeOptions{})
+	if out.Totals.Cost == nil || out.Totals.Cost.APIEquivalentUSD == nil ||
+		*out.Totals.Cost.APIEquivalentUSD != 2.5 || out.Totals.Cost.Legacy || out.Totals.Cost.Status != "partial" {
+		t.Fatalf("structured legacy estimate was not excluded: %+v", out.Totals.Cost)
 	}
 }
 
@@ -230,6 +276,13 @@ func TestMerge_shouldPreservePricingGroupsAndScopedVendorSnapshots(t *testing.T)
 				Cost:      CostEstimate{VendorEstimatedUSD: ptrF64(2.75), PlanCredits: ptrF64(7), Status: "stale"},
 			},
 		}}},
+		{Provider: "legacy", Timeline: &Timeline{Totals: Totals{
+			VendorUsage: &VendorUsageAggregate{
+				Scope:     "latest_cumulative_thread_snapshot",
+				Snapshots: []ScopedVendorUsage{{SessionID: "s3", ThreadID: "t3"}},
+				Cost:      CostEstimate{VendorEstimatedUSD: ptrF64(99), Status: "partial", Legacy: true},
+			},
+		}}},
 	}
 
 	out := Merge(inputs, MergeOptions{})
@@ -241,7 +294,7 @@ func TestMerge_shouldPreservePricingGroupsAndScopedVendorSnapshots(t *testing.T)
 		t.Fatalf("usage coverage = %q, want mixed", out.Totals.UsageCoverage)
 	}
 	vendor := out.Totals.VendorUsage
-	if vendor == nil || len(vendor.Snapshots) != 2 || vendor.Cost.VendorEstimatedUSD == nil ||
+	if vendor == nil || len(vendor.Snapshots) != 3 || vendor.Cost.VendorEstimatedUSD == nil ||
 		*vendor.Cost.VendorEstimatedUSD != 4 || vendor.Cost.PlanCredits == nil || *vendor.Cost.PlanCredits != 10 ||
 		vendor.Cost.Status != "stale" {
 		t.Fatalf("vendor snapshots = %+v, want separately merged cumulative estimate", vendor)

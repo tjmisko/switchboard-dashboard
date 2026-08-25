@@ -1,6 +1,6 @@
 # Claude and Codex cost computation: audit and implementation handoff
 
-Status: implemented on review branches; not deployed
+Status: live pricing release deployed; post-activation legacy-display correction in progress
 Audit date: 2026-08-25  
 Repositories:
 
@@ -396,7 +396,8 @@ Presentation requirements:
 - For subscription-included Codex usage, use wording such as `Included · $X API equivalent`; do not claim `$0 billed` unless that fact is supported.
 - Identify `Claude via Anthropic`, `Claude via Bedrock`, `Codex via OpenAI`, or the resolved equivalent when available.
 - Multi-provider merge must preserve nullability, statuses, unpriced counts, and mixed-source metadata.
-- Keep a compatibility path for older provider payloads, but label legacy numeric-only cost as `legacy estimate`.
+- Keep deprecated numeric aliases parseable at the wire boundary, but never
+  display or aggregate them as estimates without supported structured cost.
 
 ## Migration and backfill
 
@@ -891,3 +892,37 @@ Deployment acceptance is complete. The live pricing sources, service
 activation, Codex durable usage ingestion, provider/model identity, nullable
 billing semantics, and conservative Claude repricing behavior have all been
 observed on the installed release.
+
+### Post-activation correction: remove legacy dashboard estimates
+
+Observed: 2026-08-25 after activation
+
+The deployed dashboard still rendered `$0.00` with `Legacy estimate` and `Price
+source unavailable`. The pricing catalogs were healthy; the dashboard's active
+provider registry was the problem. `%h/.config/switchboard/providers.json`
+overrode the service's new default CLI and still executed
+`%h/go/bin/switchboard-ctl`, the pre-pricing binary. That older CLI emitted only
+the ambiguous numeric `cost_usd` field, so the compatibility fallback hid the
+misconfiguration behind a believable zero.
+
+The correction deliberately closes both failure paths:
+
+- the active `claude` provider command now resolves to
+  `%h/.config/switchboard/bin/switchboard-ctl`, the pricing-aware release;
+- the browser ignores `cost_usd` and structured cost objects marked
+  `legacy: true`;
+- the multi-provider Go merge drops the same unsupported inputs for lanes,
+  totals, and plan windows, emitting an explicit `unknown` cost when usage
+  exists instead of synthesizing a dollar amount;
+- the dashboard no longer contains the `Legacy estimate` status or tooltip;
+  and
+- an explicit zero remains valid only when it arrives in a supported structured
+  cost object.
+
+Regression coverage now exercises the browser compatibility boundary, direct
+merge behavior, plan-window normalization, mixed current/legacy providers, and
+the HTTP multi-provider handler. The release gate includes the complete Go and
+JavaScript suites, targeted race tests, `go vet`, JavaScript syntax checks, and
+an exact release build. The service must be restarted after installing the new
+dashboard binary so its embedded assets and ten-minute timeline cache are both
+replaced; a browser hard refresh then evicts any previously cached JavaScript.

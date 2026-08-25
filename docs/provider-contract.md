@@ -123,7 +123,7 @@ lane's `agent`, not that legacy namespace.
 | Timestamps   | RFC3339 strings, fractional seconds allowed (`2026-06-26T13:00:00Z`). UTC is the safe choice. |
 | Durations    | **integer nanoseconds** (`by_status.*`, `attention_*`, `*_active`, `suspect_duration`). |
 | Tokens       | raw counts, integers.                                             |
-| Cost         | nullable dollar floats under `cost`; legacy `cost_usd` is a nullable API-equivalent alias. |
+| Cost         | nullable dollar floats under structured `cost`; deprecated `cost_usd` may be present on the wire but is ignored without a supported `cost` object. |
 
 Every field is **additive and optional** except where noted: omit what your
 source can't observe and the UI degrades gracefully rather than breaking. A
@@ -152,7 +152,7 @@ consumer, so never emit zero-length or inverted spans.
   "names":   [ {"label","start","end"} ],  // optional name-span history, in order
   "subagents": [ … ],               // optional delegated sub-bars
   "focus":   [ {"start","end"} ],   // optional: when this session had operator focus
-  "cost_usd": 3.41,                  // compatibility alias; omit when unknown
+  "cost_usd": 3.41,                  // deprecated wire alias; never sufficient alone
   "cost": {
     "api_equivalent_usd": 3.41,
     "vendor_estimated_usd": null,
@@ -200,8 +200,10 @@ Identity rules that matter:
 
 ### Cost and usage — explicit semantics
 
-`cost_usd` remains readable for compatibility, but new providers must emit the
-structured `cost` object. Its dollar fields are deliberately not interchangeable:
+`cost_usd` remains parseable for wire compatibility, but the dashboard never
+uses it as an estimate on its own. Providers must emit the structured `cost`
+object. A structured object marked `legacy: true` is also ignored. Its dollar
+fields are deliberately not interchangeable:
 
 | Field | Meaning |
 | --- | --- |
@@ -398,8 +400,9 @@ conflated:
 `totals.cost` uses the same semantics as a lane. It must carry partial/unknown
 coverage forward rather than summing a missing estimate as zero.
 
-`plan_window` is the rolling plan-usage total (`hours`, `from`, `to`, `cost`,
-the legacy `cost_usd`, and token fields). Providers without a plan concept omit
+`plan_window` is the rolling plan-usage total (`hours`, `from`, `to`, structured
+`cost`, and token fields). A deprecated `cost_usd` alias may remain on the wire
+but is ignored without structured cost. Providers without a plan concept omit
 it, and in a merged view the first provider that supplies one wins.
 
 ## 4. The minimum viable provider
@@ -438,7 +441,7 @@ Everything beyond that is opt-in, and each field buys one specific thing:
 
 | Add                                   | Get                                                      |
 | ------------------------------------- | -------------------------------------------------------- |
-| `tok_*`, `cost_usd` (lane + totals)   | cost card, per-session cost breakdown, in-bar `$` figure |
+| `tok_*`, structured `cost` (lane + totals) | cost card, per-session cost breakdown, in-bar `$` figure |
 | `subagents[]`                         | sub-bars, hover/pin cards, meaningful `attention_fanout`, agents-aloft chart |
 | `agent_timeline`                      | Codex child bars, nested identity/lifecycle, per-child approval/input waits |
 | `name` + `names[]`                    | name-span labels along the bar instead of a bare project name |

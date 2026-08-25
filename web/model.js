@@ -130,25 +130,22 @@
     return `${client} via ${execution}`;
   }
 
-  // normalizedCost is the only compatibility seam for cost data. New providers
-  // emit a structured cost object; older providers expose cost_usd only. Missing
-  // remains null, and an explicit numeric zero remains zero.
+  // normalizedCost accepts only structured cost data. Legacy cost_usd aliases
+  // and estimates explicitly marked legacy lack billing semantics and pricing
+  // provenance, so the dashboard treats them as unknown. Missing remains null,
+  // while an explicit zero in a supported structured estimate remains zero.
   function normalizedCost(record) {
     const obj = record || {};
-    const raw = obj.cost && typeof obj.cost === "object"
-      ? obj.cost
-      : (obj.cost_estimate && typeof obj.cost_estimate === "object" ? obj.cost_estimate : null);
-    const vendor = obj.vendor_usage && obj.vendor_usage.cost && typeof obj.vendor_usage.cost === "object"
+    const raw = [obj.cost, obj.cost_estimate]
+      .find((candidate) => candidate && typeof candidate === "object" && candidate.legacy !== true) || null;
+    const vendorCandidate = obj.vendor_usage && obj.vendor_usage.cost && typeof obj.vendor_usage.cost === "object"
       ? obj.vendor_usage.cost
       : null;
+    const vendor = vendorCandidate && vendorCandidate.legacy !== true ? vendorCandidate : null;
     const finite = (v) => Number.isFinite(v) ? v : null;
-    const legacy = finite(obj.cost_usd);
-    const apiEquivalentUsd = raw && finite(raw.api_equivalent_usd) != null
-      ? finite(raw.api_equivalent_usd)
-      : legacy;
+    const apiEquivalentUsd = raw ? finite(raw.api_equivalent_usd) : null;
     const status = String(
-      (raw && (raw.status || raw.cost_status)) || obj.cost_status ||
-      (legacy != null ? "legacy" : "unknown")
+      (raw && (raw.status || raw.cost_status)) || "unknown"
     ).toLowerCase();
     const sources = raw && Array.isArray(raw.pricing_sources)
       ? raw.pricing_sources.filter((v) => typeof v === "string" && v)
@@ -175,7 +172,6 @@
         : (vendor ? finite(vendor.estimated_billed_usd) : null),
       status,
       coverage: raw ? finite(raw.coverage) : null,
-      legacy: raw ? raw.legacy === true : legacy != null,
       priceKind: raw && (raw.pricing_kind || raw.price_kind)
         ? String(raw.pricing_kind || raw.price_kind)
         : null,
@@ -812,9 +808,10 @@
   // can hang "what this session actually did" off a bar segment without being
   // handed the lane.
   //
-  // costUsd is the project's dollar spend: Σ lane.cost_usd over the SAME lanes
-  // that contributed the time, so the row's total always equals the sum of its
-  // parts. Null (not 0) when no contributing lane reported a cost at all —
+  // costUsd is the project's API-equivalent subtotal from structured lane.cost
+  // objects over the SAME lanes that contributed the time, so the row's total
+  // always equals the sum of its parts. Legacy cost_usd aliases are ignored.
+  // Null (not 0) when no contributing lane reported a supported cost at all —
   // "not recorded" and "free" are different claims, and a provider that omits
   // cost must not be shown spending nothing. Unlike the time it sits next to,
   // cost is NOT clipped at a suspect lane's evidence bound: the tokens were

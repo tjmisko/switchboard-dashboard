@@ -8,7 +8,7 @@
 // Units are load-bearing and identical across providers:
 //   - durations are NANOSECONDS (by_status, attention_*),
 //   - token fields are RAW COUNTS,
-//   - legacy cost_usd and every field under cost are dollar FLOATS,
+//   - deprecated cost_usd and every field under cost are dollar FLOATS,
 //   - all timestamps are RFC3339 strings.
 //
 // The struct set below models every field the dashboard currently reads. The
@@ -52,9 +52,10 @@ type Lane struct {
 	Names       []Span     `json:"names,omitempty"`
 	Subagents   []Subagent `json:"subagents,omitempty"`
 	Focus       []TimeSpan `json:"focus,omitempty"`
-	// CostUSD is the nullable legacy alias for Cost.APIEquivalentUSD. A pointer is
-	// intentional: an omitted estimate is unknown, while an explicit zero is a
-	// real, fully representable observation.
+	// CostUSD is the nullable deprecated wire alias for Cost.APIEquivalentUSD. It
+	// is retained for schema compatibility but never accepted as the source of a
+	// dashboard estimate. A supported structured Cost distinguishes unknown from
+	// an explicit zero.
 	CostUSD *float64      `json:"cost_usd,omitempty"`
 	Cost    *CostEstimate `json:"cost,omitempty"`
 	// PricingGroups retain the exact provider/model/route dimensions used to
