@@ -189,6 +189,9 @@ function costStatusText(cost) {
   if (cost.legacy) return "Legacy estimate";
   if (cost.status === "included") return "Included plan";
   if (cost.status === "partial") {
+    if (cost.unpricedUsageEvents > 0 && cost.unpricedTokens + cost.unpricedToolUnits === 0) {
+      return "Partial · unresolved gap";
+    }
     return cost.coverage != null ? `Partial · ${Math.round(cost.coverage * 100)}% covered` : "Partial coverage";
   }
   if (cost.status === "stale") return "Stale prices";
@@ -3646,6 +3649,7 @@ function sessionPopoutHTML(lane) {
   }
   if (laneCost.planCredits != null) figs.push(["Plan usage", `<b>${escapeHTML(fmtCredits(laneCost.planCredits))}</b>`]);
   if (laneCost.pricingSources.length) figs.push(["Pricing", `<span class="dim">${escapeHTML(costSourceText(laneCost))}</span>`]);
+  if (laneCost.unpricedReasons.length) figs.push(["Estimate gap", `<span class="dim">${escapeHTML(laneCost.unpricedReasons.join(" · "))}</span>`]);
   if (ineff != null) figs.push(["Operator idle", `${Math.round(ineff * 100)}% <span class="dim">idle / waiting</span>`]);
   if (tokens) {
     figs.push(["Tokens", `<b>${fmtTokens(tokens.output)}</b> out · <b>${fmtTokens(tokens.billedInput)}</b> in`]);
@@ -4339,6 +4343,9 @@ function renderCostCard(data, plan) {
     coverageRows.push(`<div class="kv"><span>Plan usage</span><b>${escapeHTML(fmtCredits(totalCost.planCredits))}</b></div>`);
   }
   coverageRows.push(`<div class="kv"><span>Estimate status</span><b>${escapeHTML(statusText)}</b></div>`);
+  if (totalCost.unpricedReasons.length) {
+    coverageRows.push(`<div class="kv muted-note">${escapeHTML(totalCost.unpricedReasons.join(" · "))}</div>`);
+  }
   coverageRows.push(`<div class="kv muted-note">${escapeHTML(costSourceText(totalCost))}</div>`);
 
   el.cardCost.innerHTML = `
