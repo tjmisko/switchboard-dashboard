@@ -1,6 +1,6 @@
 # Claude and Codex cost computation: audit and implementation handoff
 
-Status: implementation handoff  
+Status: implemented on review branches; not deployed
 Audit date: 2026-08-25  
 Repositories:
 
@@ -504,3 +504,195 @@ OpenAI/Codex:
 - Use provider schemas and synthetic fixtures for tests; do not copy private transcript content into the repository.
 - Fail closed when a source cannot be parsed or identity cannot be resolved.
 - Report the commit SHA, changed files, tests run, remaining limitations, and any integration assumptions.
+
+## Implementation completion record
+
+Completed: 2026-08-25
+
+Review branches:
+
+- `switchboard`: <https://github.com/tjmisko/switchboard/tree/cost-audit-integration-20260825>
+- `switchboard-dashboard`: <https://github.com/tjmisko/switchboard-dashboard/tree/cost-audit-dashboard-20260825>
+
+The upstream integration head is `9a88123a53fbd71e1e3eb79aaeae765fa961e72d`.
+No service was restarted and neither branch was merged to `main`; deployment remains a reviewer/operator action.
+
+### Delivered behavior
+
+The implementation replaces the ambiguous scalar cost with four independent,
+nullable concepts: public API-equivalent USD, vendor-estimated USD, plan credits,
+and supported estimated billed USD. Cost status, priced/unpriced units, reasons,
+catalog age, official source URLs, semantic catalog hash, and mixed-version
+provenance survive history folding, multi-provider merge, and browser rendering.
+An unknown amount renders as an em dash; it is never coerced to `$0.00`.
+
+The daemon now refreshes credential-free pricing publications immediately at
+startup and every six hours. The refresh uses a bounded HTTP client,
+conditional requests, schema/semantic validation, an atomic last-known-good
+cache, a 24-hour stale threshold, and a seven-day fail-closed cutoff. Operators
+can inspect or force it with `switchboard-ctl pricing status|refresh`.
+
+Neither vendor exposes price fields from its Models API. "Live API spot rates"
+therefore means the vendors' current first-party public API pricing
+publications, not a model-list call. The adapters fetch:
+
+- <https://platform.claude.com/docs/en/about-claude/pricing>
+- <https://developers.openai.com/api/docs/pricing>
+- the exact OpenAI model pages for `gpt-5.6-sol`, `gpt-5.6-terra`, and
+  `gpt-5.6-luna`
+
+The parsers validate the currently material billing semantics as well as the
+numbers: exact model rows, cache-write rules, context thresholds, fast mode,
+regional/data-residency uplift, Anthropic cache TTL multipliers, the full-context
+standard-rate statement, web-search pricing, and code-execution-with-web
+behavior. A missing or changed marker rejects the refresh and retains the last
+known good catalog.
+
+Claude collection now:
+
+- reads the root and exact child transcript set;
+- collapses streamed revisions by provider message identity;
+- emits full authoritative snapshots with restart-safe stable IDs and monotonic
+  revisions;
+- fsyncs idempotent history before advancing its content-free cursor;
+- preserves exact model, provider timestamp, service tier, speed, inference
+  geography, cache reads, 5-minute and 1-hour cache writes, web search/fetch,
+  code execution, and future unrecognized server-tool counters; and
+- emits a durable partial-coverage cutover instead of pretending pre-upgrade
+  transcript usage was observed.
+
+A Claude Code transcript proves the client and exact model but not whether the
+request used Anthropic, Bedrock, Vertex, Foundry, or another configured backend.
+Execution provider and billing route therefore remain unknown unless future
+trusted metadata proves them. An exact model can still select the unique
+Anthropic public catalog for an explicitly partial API-equivalent comparison;
+it never becomes an estimated invoice. Priority capacity is treated as contract
+pricing: public standard/fast rates remain a comparator, while estimated billed
+USD stays null. Server-side code execution without enough duration/allowance
+evidence and unknown future server-tool counters are unpriced components.
+
+Codex collection now:
+
+- retains app-server model provider, exact model, tier/speed, effort, auth mode,
+  coarse account kind, and vendor thread-usage estimates;
+- binds every exact root/child rollout path supplied by trusted hooks without
+  guessing paths or scanning private content;
+- uses a bounded whitelist-only JSONL decoder and never logs or persists prompt,
+  response, path, credential, or account-identifier content;
+- reconciles cumulative and last-token snapshots, equal-total metadata
+  revisions, reroutes, counter regressions, restarts, file replacement, and
+  replay ambiguity;
+- persists canonical history synchronously and idempotently before advancing a
+  hashed durable cursor; and
+- invalidates account-derived enrichment on every app-server reconnect so an
+  account switch cannot inherit an old API/cloud route.
+
+App-server token notifications remain an advisory graph signal; rollout history
+is the canonical accounting source so the same turn is not persisted twice.
+Because Codex rollout counters do not expose potentially billable provider tool
+units, every public API-equivalent token calculation is labeled `tokens_only`
+and therefore partial, regardless of whether authentication uses an API key,
+ChatGPT, credits, or an unknown route. `account/usage/read` cumulative credits
+and optional USD remain a separate provider-native snapshot and are never added
+to the token subtotal.
+
+History's durable sink now has restart-idempotent latest-revision indexing,
+short-write rollback, file and directory fsync acknowledgement, safe concurrent
+close behavior, and a batch compatibility path for Claude. Cumulative vendor
+snapshots are latest-wins per provider/root/thread scope rather than additive.
+They are intentionally omitted from bounded plan-window totals when no
+defensible baseline exists.
+
+### Commit inventory
+
+`switchboard` integration commits, oldest first:
+
+- `d9ebe27` — capture Codex provider usage and billing metadata
+- `93b8d17` — provider-aware live pricing foundation
+- `82464ca` — latest-wins cumulative vendor usage folding
+- `7748a66` — explicit collector coverage gaps
+- `ca4bae0` — restart-safe Claude transcript accounting
+- `0ff569e` — durable usage snapshot upserts
+- `fecef8d` — safe durable sink close lifecycle
+- `ca6ebfa` — durable Claude transcript integration
+- `68c35c5` — monotonic Claude revisions across eviction
+- `9eedb6d` — canonical Claude billable usage
+- `4621d1e` — preserve uncertain execution/billing routes
+- `ebcb464` — fail closed on changed Claude context pricing
+- `39e03d2` — separate Anthropic Priority contract billing
+- `d48ffa1` — durable Codex rollout ingestion and sink integration
+- `ff21f4d` — fail closed on server-tool charges
+- `9a88123` — mark every Codex rollout API-equivalent as token-only
+
+`switchboard-dashboard` source-worktree commits:
+
+- `2f3d060` — initial audit and agent handoff
+- `fd0a19f` — nullable provider cost semantics and UI labels
+- `1caf687` — canonical cost-schema alignment
+- `e5c728c` — pricing-group and vendor-usage preservation
+- `6640c6c` — honest unquantified-gap labels
+- `03ea896` — collector coverage provenance
+- `ecb1acd` — server-tool coverage preservation
+
+The dashboard review branch cherry-picks only these cost-audit commits onto
+`origin/main`; unrelated local work is not part of the review branch.
+
+### Verification record
+
+Passing upstream checks:
+
+```text
+go test ./internal/pricing ./internal/transcript ./internal/history ./internal/provider/codex ./internal/state
+go test ./cmd/switchboard -run '^(TestObserveUsage|TestProductionCodexConfig|TestCodexRootAndChildHooksBind|TestRollout)'
+go test -race ./internal/pricing ./internal/transcript ./internal/history ./internal/provider/codex ./internal/state
+go test -race ./cmd/switchboard -run '^(TestObserveUsage|TestProductionCodexConfig|TestCodexRootAndChildHooksBind|TestRollout)'
+go vet ./internal/pricing ./internal/transcript ./internal/history ./internal/provider/codex ./internal/state ./cmd/switchboard
+git diff --check
+```
+
+Passing dashboard checks:
+
+```text
+go test ./...
+node --test --test-reporter=dot web/model.test.js
+node --check web/model.js
+node --check web/app.js
+git diff --check
+```
+
+The complete upstream `go test ./...` was also attempted. Its new/touched cost
+packages pass, but the repository-wide command cannot be green in this managed
+environment: existing Unix-socket tests fail with `socket: operation not
+permitted`, and the existing no-repository project-root test resolves the
+surrounding `/tmp` worktree. These failures are outside the changed cost path.
+
+The current official HTML publications were inspected on 2026-08-25 and agree
+with the fixtures and bootstrap catalog. A real `pricing refresh` invocation
+could not reach the vendor domains from the command sandbox's network allowlist,
+so live HTTP execution must be exercised after checkout in the normal daemon
+environment. Refresh/parser failure is non-destructive and visibly falls back
+to stale or unusable LKG state.
+
+### Remaining limitations and review decisions
+
+- Estimates reprice historical usage at the catalog identified as a current
+  `spot_estimate`; this is not an invoice and no historical price archive was
+  invented.
+- Cloud/custom routes have no adapter yet. Bedrock, Vertex, Foundry/Azure,
+  custom OpenAI-compatible providers, unsupported models, OpenAI `ultrafast`,
+  and unimplemented batch routes remain explicitly unknown.
+- Claude actual execution provider, billing route, negotiated discounts,
+  organization code-execution allowance, and invoice reconciliation cannot be
+  proven from the local transcript alone.
+- Codex ChatGPT authentication does not prove subscription inclusion or zero
+  incremental billing. Native credits/USD are shown when returned; otherwise
+  billed USD remains null.
+- Codex tool-unit API equivalence remains partial until a trusted source exposes
+  those units. A distinct child rollout is collected only after its trusted hook
+  supplies the exact path.
+- Provider-ID-less Claude rows cannot be deduplicated across distinct files;
+  same-size middle-only rewrites can evade the transcript anchor. Both cases
+  fail conservatively where observable rather than using content heuristics.
+- Pre-cutover history is retained and explicitly partial. No existing history
+  was rewritten or deleted, and no private transcript, prompt, response,
+  credential, environment file, or personal account identifier was inspected.
