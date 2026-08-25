@@ -64,9 +64,233 @@ const LANES = [
 const PIPELINE = [
   ["OS discovery", "creates interactive roots; owns process identity, liveness, suspension, and navigation"],
   ["exact hook binding", "joins a provider session ID to (pid, started_at); never cwd/time/title"],
-  ["provider observer", "builds a bounded root/child Observation outside the state lock"],
+  ["provider machines", "apply hook edges, timers, and level reconciliation to provider-owned state"],
   ["agent graph", "normalizes explicit parentage and reduces three independent axes"],
-  ["state + history", "publishes one root chip, nested detail, and canonical transitions"],
+  ["pure projections", "reduces one root chip and separately diffs node axes into history edges"],
+];
+
+// The daemon does not have one provider-neutral transition table. These are the
+// finite control regions that actually carry memory on main. A region is shown
+// independently because the complete provider state is their product, plus
+// maps keyed by writer, node, request, and hook edge.
+//
+// Transition tuples are [from, event, to, evidence kind, qualification].
+// `from` may be "*" or a list; `to = "="` means this region holds while another
+// region changes. Level transitions are reconciliation assignments, not hook
+// edges. The charts deliberately do not pretend either provider has a total
+// Apply(State, Evidence) table.
+const PROVIDER_MACHINES = [
+  {
+    id: "claude",
+    label: "Claude",
+    implementation: "internal/provider/claude.Observer · rootState",
+    summary: "Hook edges mutate root runtime and one pending-prompt latch per writer; transcript and fanout scans reconcile those beliefs.",
+    shape: "rootState = runtime × pending[writer] × overlays[child] × fanout × known/retained × priorSummary",
+    regions: [
+      {
+        id: "root-runtime",
+        label: "root runtime",
+        initial: "unknown",
+        note: "Only the main writer changes this region. Child activity is projected on child nodes.",
+        states: [
+          ["unknown", "No root runtime edge has been established.", "gray"],
+          ["idle", "The root is loaded and not processing a turn.", "orange"],
+          ["active", "The root is processing a turn.", "green"],
+        ],
+        transitions: [
+          ["*", "exact session ID changes", "unknown", "reset", "A new rootState replaces the old session."],
+          ["*", "SessionStart", "idle", "hook", "Root hook."],
+          ["*", "root UserPromptSubmit", "active", "hook", "Also starts a new terminal-child cohort."],
+          ["*", "root PostToolUse", "active", "hook", "Runtime advances even when attention cannot yet clear."],
+          ["*", "root Stop", "idle", "hook", "Stop does not itself clear a pending prompt."],
+          ["idle", "new transcript activity after runtimeAt", "active", "level", "Re-readable tail correction."],
+          ["active", "new transcript interrupt after runtimeAt", "idle", "level", "Re-readable tail correction."],
+          ["*", "root pending transcript resolves resumed", "active", "level", "Clears the root writer's prompt latch."],
+          ["*", "root pending resolves interrupted or stale", "idle", "level", "Interrupt, unreadable-main TTL, or quiescent-writer cap."],
+          ["*", "PermissionRequest or child-only hook", "=", "hook", "Mutates attention or a child overlay, not root runtime."],
+        ],
+      },
+      {
+        id: "writer-attention",
+        label: "per-writer attention",
+        initial: "none",
+        note: "This is map[writer]PendingPrompt. The writer key is empty for the root and an exact child ID otherwise.",
+        states: [
+          ["none", "No pending human-owned prompt for this writer.", "gray"],
+          ["approval", "PermissionRequest for any non-question tool.", "red"],
+          ["user_input", "PermissionRequest for AskUserQuestion.", "red"],
+        ],
+        transitions: [
+          ["*", "PermissionRequest · other tool", "approval", "hook", "Creates or replaces only this writer's latch."],
+          ["*", "PermissionRequest · AskUserQuestion", "user_input", "hook", "Creates or replaces only this writer's latch."],
+          [["approval", "user_input"], "owned matching PostToolUse", "none", "hook", "Held for the root while fanout still reports in-flight work."],
+          [["approval", "user_input"], "writer transcript resumes", "none", "level", "ResolutionResumed."],
+          [["approval", "user_input"], "writer transcript interrupts", "none", "level", "ResolutionInterrupted."],
+          [["approval", "user_input"], "child becomes terminal", "none", "level", "The fanout snapshot closes only that child's prompt."],
+          [["approval", "user_input"], "unreadable main past PermissionDecayTTL", "none", "timer", "Configured bounded backstop."],
+          [["approval", "user_input"], "quiescent writer past PendingWriterStaleCap", "none", "timer", "Only when its tail does not still prove an unanswered tool."],
+          [["approval", "user_input"], "mismatched result, Stop, or unresolved tail", "=", "hold", "None proves that this exact prompt resolved."],
+          ["*", "exact session ID changes", "none", "reset", "The old session's writer map is retired."],
+        ],
+      },
+      {
+        id: "child-lifecycle",
+        label: "child lifecycle",
+        initial: "not_projected",
+        note: "Fanout artifacts own identity and lifecycle. Subagent hooks only invalidate the scan; activity hooks may overlay runtime after identity exists.",
+        states: [
+          ["not_projected", "No retained node in the current graph cohort.", "gray"],
+          ["pending", "Child artifact exists; transcript is not loaded yet.", "blue"],
+          ["running", "Transcript/workflow evidence says the child is live.", "green"],
+          ["completed", "Result or done evidence closed the child.", "gray"],
+          ["interrupted", "Quiescence force-closed the child.", "purple"],
+        ],
+        transitions: [
+          ["*", "artifact exists; transcript absent", "pending", "level", "fanout.Snapshot classification."],
+          ["*", "live transcript or workflow", "running", "level", "fanout.Snapshot classification."],
+          ["not_projected", "child PermissionRequest before artifact", "running", "hook", "A writer-owned prompt creates a bounded placeholder node."],
+          ["*", "result or done evidence", "completed", "level", "Terminal lifecycle suppresses stale runtime and attention."],
+          ["*", "child transcript stale past cap", "interrupted", "timer", "Conservative force-close."],
+          [["completed", "interrupted"], "next root UserPromptSubmit", "not_projected", "reset", "Clears the retained prior-turn terminal cohort."],
+          ["*", "SubagentStart or SubagentStop", "=", "hook", "Requests a rescan; never creates or closes topology directly."],
+          ["*", "known-child activity hook", "=", "hook", "Changes only the child's runtime overlay."],
+        ],
+      },
+    ],
+  },
+  {
+    id: "codex",
+    label: "Codex",
+    implementation: "internal/provider/codex graphState + codexHookRootState",
+    summary: "A read-only app-server owns topology and base node fields; exact hooks add bounded root latches, approval timers, and child overlays where that feed is insufficient.",
+    shape: "state = graphState(nodes[id]{baseRuntime,lifecycle,wait}) × hookRootState{session,retired,pending,approvals,overlays,queue}",
+    regions: [
+      {
+        id: "node-runtime",
+        label: "node runtime",
+        initial: "unknown",
+        note: "A newer hook can publish an immediate root edge. On later app-server samples, remembered hook fields fill only unknown/not_loaded roots and never outlive their original deadline.",
+        states: [
+          ["unknown", "No usable runtime, or an unclassified mechanical wait.", "gray"],
+          ["not_loaded", "Thread exists but this app-server has not loaded it.", "blue"],
+          ["idle", "Loaded, no active turn.", "orange"],
+          ["active", "Turn or hook activity is in flight.", "green"],
+          ["system_error", "Codex reported a runtime failure.", "purple"],
+        ],
+        transitions: [
+          ["*", "thread status · notLoaded", "not_loaded", "level", "Direct enum mapping."],
+          ["*", "thread status · idle", "idle", "level", "Direct enum mapping."],
+          ["*", "thread status · active or turn/started", "active", "level", "Direct enum mapping."],
+          ["*", "thread status · systemError", "system_error", "level", "Direct enum mapping."],
+          ["*", "unclassified waiting flag", "unknown", "level", "Raw waiting is neither green nor red without ownership evidence."],
+          ["*", "SessionStart · compact", "active", "hook", "Partial root projection."],
+          ["*", "SessionStart · non-compact", "idle", "hook", "startup/resume/clear settle for 250 ms before publication."],
+          ["*", "UserPromptSubmit, ordinary PreToolUse, or any PostToolUse", "active", "hook", "Partial root projection."],
+          ["*", "Stop", "idle", "hook", "Partial root projection."],
+          ["*", "request_user_input PreToolUse", "idle", "hook", "The question latch also sets attention=user_input."],
+          ["*", "generic PermissionRequest during grace", "active", "hook", "Ownership is unresolved; no red yet."],
+          ["*", "human-input PermissionRequest or approval timeout", "idle", "hook", "Attention carries the reason."],
+          ["*", "turn/completed", "=", "protocol", "Clears waits; a status update owns runtime."],
+        ],
+      },
+      {
+        id: "request-owner",
+        label: "per-request ownership",
+        initial: "resolved",
+        note: "This is requestEvidence.owner. Only human projects attention; automatic and ignored requests remain visible only as provider state/diagnostics.",
+        states: [
+          ["resolved", "No retained request with this request ID.", "gray"],
+          ["pending", "Request exists; human versus automatic owner is unknown.", "orange"],
+          ["human", "Confirmed human approval or blocking input.", "red"],
+          ["automatic", "Reviewer, guardian, or auto-review owns it.", "blue"],
+          ["ignored", "Input is nonblocking or auto-resolving.", "gray"],
+        ],
+        transitions: [
+          ["resolved", "approval request · unknown reviewer", "pending", "protocol", "Starts the 30 s classifier."],
+          ["resolved", "approval request · known user reviewer", "human", "protocol", "Publishes approval immediately."],
+          ["resolved", "approval request · auto/guardian evidence", "automatic", "protocol", "Suppresses human attention."],
+          ["resolved", "blocking requestUserInput or MCP elicitation", "human", "protocol", "Publishes user_input immediately."],
+          ["resolved", "nonblocking or auto-resolving input", "ignored", "protocol", "Never asks the operator."],
+          ["pending", "reviewer=user", "human", "protocol", "Explicit ownership evidence."],
+          ["pending", "reviewer=auto, guardian, or auto-review", "automatic", "protocol", "Explicit automatic ownership evidence."],
+          ["pending", "classification timeout", "human", "timer", "Request-backed ambiguity falls back to human."],
+          ["human", "late auto-review evidence after timeout", "automatic", "protocol", "Clears a fallback red."],
+          [["pending", "human", "automatic", "ignored"], "serverRequest/resolved or thread wait closes", "resolved", "protocol", "Also cleared by turn completion and thread removal."],
+        ],
+      },
+      {
+        id: "question-latch",
+        label: "hook question latch",
+        initial: "closed",
+        note: "This latch exists because the standard interactive CLI's question is not reconstructible from the disposable app-server.",
+        states: [
+          ["closed", "No exact request_user_input hook is outstanding.", "gray"],
+          ["open", "At least one exact request_user_input call is outstanding.", "red"],
+        ],
+        transitions: [
+          ["*", "request_user_input PreToolUse", "open", "hook", "Keyed by tool-use ID, otherwise writer/turn/tool/hash."],
+          ["open", "matching request_user_input PostToolUse", "closed", "hook", "Clears only matching entries; closes when the map is empty."],
+          ["open", "matching Stop", "closed", "hook", "Turn/writer-scoped; closes when the map is empty."],
+          ["open", "session rotation or root removal", "closed", "reset", "Retires the old session."],
+          ["open", "generic app-server snapshot", "=", "hold", "Cannot clear independently owned hook evidence."],
+          ["open", "daemon restart", "closed", "reset", "The latch is not reconstructed; status degrades to unknown."],
+        ],
+      },
+      {
+        id: "hook-approval",
+        label: "generic hook approval",
+        initial: "clear",
+        note: "A generic PermissionRequest cannot say whether the user or Auto-review owns the gate, so it receives a separate bounded grace machine.",
+        states: [
+          ["clear", "No generic hook gate is pending.", "gray"],
+          ["grace", "Gate observed; waiting for automatic progress or app-server evidence.", "orange"],
+          ["published", "Grace expired without contrary evidence; approval is red.", "red"],
+        ],
+        transitions: [
+          ["*", "generic PermissionRequest", "grace", "hook", "Starts or replaces a 30 s timer for the exact tool call."],
+          ["grace", "matching Pre/PostToolUse, Stop, or new turn", "clear", "hook", "Progress resolved the gate before red."],
+          ["grace", "newer app-server active with no attention", "clear", "level", "Structured evidence settles it as non-human."],
+          ["grace", "another proven human wait already exists", "clear", "level", "Avoids overwriting independently proven attention."],
+          ["grace", "30 s unresolved", "published", "timer", "Fallback publishes attention=approval."],
+          ["published", "matching progress, Stop, or new turn", "clear", "hook", "Owns the corresponding red-clear transition."],
+          [["grace", "published"], "session rotation or root removal", "clear", "reset", "Cancels the timer and retires the gate."],
+        ],
+      },
+      {
+        id: "child-hook",
+        label: "child hook overlay",
+        initial: "provider_owned",
+        note: "Hooks never create or reparent a Codex child. They are queued until a fresh app-server graph proves the exact non-root ID.",
+        states: [
+          ["provider_owned", "App-server fields are the current authority.", "blue"],
+          ["queued", "Exact child edge awaits topology proof.", "orange"],
+          ["active_overlay", "SubagentStart owns active/running fields temporarily.", "green"],
+          ["completed_overlay", "SubagentStop owns idle/completed fields until superseded.", "gray"],
+        ],
+        transitions: [
+          ["*", "SubagentStart or SubagentStop", "queued", "hook", "Root/session and agent ID must be exact; queue is bounded."],
+          ["queued", "fresh topology matches · SubagentStart", "active_overlay", "level", "Expires after at most 10 minutes."],
+          ["queued", "fresh topology matches · SubagentStop", "completed_overlay", "level", "Retains the completed child."],
+          ["queued", "no topology match for 10 minutes", "provider_owned", "timer", "The edge expires without inventing a node."],
+          ["active_overlay", "10 minute cap", "provider_owned", "timer", "Restores the last provider fields."],
+          [["active_overlay", "completed_overlay"], "provider field at least as new", "provider_owned", "level", "Supersedes only the fields the hook owned."],
+          [["active_overlay", "completed_overlay"], "complete snapshot omits child", "provider_owned", "level", "Drops the overlay with the omitted topology."],
+          ["completed_overlay", "later SubagentStart", "queued", "hook", "A proved later start can reopen the child."],
+        ],
+      },
+    ],
+  },
+];
+
+const OLD_MODEL_DIVERGENCES = [
+  ["Provenance", "The seven-state table described the running daemon.", "It was executable code in unmerged commit 2040a91; it is not an ancestor of main."],
+  ["State shape", "One flat state per writer.", "Provider state is a product of runtime, attention ownership, lifecycle, timers, and keyed maps."],
+  ["Blocked", "A writer enters one Blocked state.", "Human attention is orthogonal to runtime. Codex first classifies human versus automatic ownership."],
+  ["ToolInFlight", "A shared state distinguished machine waits from human waits.", "No such shared state exists on main. Tool progress remains provider evidence, usually projected as runtime=active."],
+  ["Evidence", "Thirteen provider-neutral evidence kinds feed one total table.", "Claude hooks/transcripts/artifacts and Codex hooks/app-server notifications have different authority and recovery rules."],
+  ["Fold", "Any active writer makes green; any Blocked writer makes red.", "Only live-node attention makes red. Root activity/error precedes descendant work; a child needs affirmative liveness."],
+  ["End / death", "Ended, Interrupted, and Dead are writer states.", "Root idle is runtime; child completion/interruption is lifecycle; root process death removes the session outside the graph."],
+  ["Restart", "Blocked must survive every daemon restart.", "Claude restores writer keys. Codex's hook-only question latch is deliberately not reconstructible and degrades to unknown."],
 ];
 
 const PROVIDER_ROWS = [
@@ -74,7 +298,7 @@ const PROVIDER_ROWS = [
   ["Root state", "Hooks provide edges; transcript reconciliation corrects them.", "Concrete app-server fields win; bounded exact hooks fill unavailable root fields."],
   ["Attention", "PermissionRequest is keyed per writer; matching hooks/transcripts resolve only that writer.", "request_user_input is an exact hook latch; matching PostToolUse/Stop clears it. Request IDs and reviewer evidence classify structured waits; generic permission gets 30 s to resolve automatically."],
   ["Children", "Artifacts own identity and lifecycle; SubagentStart/Stop only request a rescan.", "App-server must first prove exact topology. Matching start → active/running for ≤10 m; stop → retained idle/completed; a later start reopens. Hooks never create or reparent."],
-  ["Rotation / restart", "A new exact session replaces the root. Pending writer keys persist; correlators are re-earned.", "/clear advances the exact root and retires old IDs. Topology is resnapshotted; an in-memory question latch is not reconstructed."],
+  ["Rotation / restart", "A new exact session drops the old root state. On daemon restart of the same session, persisted pending writer keys restore; correlators are re-earned.", "/clear advances the exact root and retires old IDs. Topology is resnapshotted; an in-memory question latch is not reconstructed."],
   ["Bounds", "Observations are fresh for 15 s.", "App-server: 15 s fresh, 1 s active / 10 s idle polls. Hook fallback: active 10 m, attention 24 h, idle 7 d; startup settles for 250 ms."],
   ["Degraded mode", "I/O failure retains a partial bounded graph; expiry reduces to unknown.", "The process stays discoverable and exact hooks can color the root; unproved children receive zero liveness."],
 ];
@@ -242,5 +466,9 @@ function reduceGraph(graph, options) {
   return finish(verdict("fallback-unknown", "gray", "", summary));
 }
 
-return { AXES, TERMINAL, RULES, LANES, PIPELINE, PROVIDER_ROWS, SOURCES, LIMITS, canonicalNode, normalizeGraph, positivelyLive, isFresh, stampSince, reduceGraph };
+return {
+  AXES, TERMINAL, RULES, LANES, PIPELINE, PROVIDER_MACHINES,
+  OLD_MODEL_DIVERGENCES, PROVIDER_ROWS, SOURCES, LIMITS,
+  canonicalNode, normalizeGraph, positivelyLive, isFresh, stampSince, reduceGraph,
+};
 });

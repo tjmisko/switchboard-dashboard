@@ -42,6 +42,235 @@ function buildPipeline() {
     </article>`).join("");
 }
 
+const MACHINE_TONES = {
+  gray: "#7d8590", green: "#3fb950", orange: "#d29922",
+  red: "#f85149", blue: "#58a6ff", purple: "#a371f7",
+};
+const MACHINE_VIEWBOX = { width: 680, height: 410 };
+const MACHINE_NODE = { width: 178, height: 44 };
+let selectedMachine = PROVIDER_MACHINES[0]?.id || "";
+const selectedRegions = new Map(PROVIDER_MACHINES.map((machine) => [machine.id, machine.regions[0]?.id]));
+const selectedMachineStates = new Map();
+
+function machineById(id) {
+  return PROVIDER_MACHINES.find((machine) => machine.id === id);
+}
+
+function regionById(machine, id) {
+  return machine?.regions.find((region) => region.id === id);
+}
+
+function stateById(region, id) {
+  const state = region?.states.find(([stateId]) => stateId === id);
+  return state ? { id: state[0], detail: state[1], tone: state[2] } : null;
+}
+
+function transitionFrom(transition) {
+  return transition[0];
+}
+
+function transitionApplies(transition, state) {
+  const from = transitionFrom(transition);
+  return from === "*" || from === state || (Array.isArray(from) && from.includes(state));
+}
+
+function transitionSources(transition, states) {
+  const from = transitionFrom(transition);
+  if (from === "*") return states;
+  return Array.isArray(from) ? from : [from];
+}
+
+function machinePositions(count) {
+  const center = { x: MACHINE_VIEWBOX.width / 2, y: 190 };
+  if (count === 1) return [center];
+  if (count === 2) return [{ x: 205, y: 190 }, { x: 475, y: 190 }];
+  if (count === 3) return [
+    { x: center.x, y: 72 }, { x: 185, y: 290 }, { x: 495, y: 290 },
+  ];
+  return Array.from({ length: count }, (_, index) => {
+    const angle = (-90 + index * 360 / count) * Math.PI / 180;
+    return { x: center.x + 245 * Math.cos(angle), y: center.y + 137 * Math.sin(angle) };
+  });
+}
+
+function machineBoxExit(from, to) {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const scale = Math.min(
+    Math.abs(dx) > 0.01 ? (MACHINE_NODE.width / 2 + 4) / Math.abs(dx) : Infinity,
+    Math.abs(dy) > 0.01 ? (MACHINE_NODE.height / 2 + 4) / Math.abs(dy) : Infinity,
+  );
+  return { x: from.x + dx * scale, y: from.y + dy * scale };
+}
+
+function machineEdgeClass(kinds) {
+  if (kinds.has("hook") || kinds.has("protocol")) return "hook";
+  if (kinds.has("level")) return "level";
+  return "timer";
+}
+
+function drawMachine(region, selected) {
+  const svg = document.getElementById("machine-svg");
+  const stateIds = region.states.map(([id]) => id);
+  const layout = machinePositions(stateIds.length);
+  const positions = new Map(stateIds.map((id, index) => [id, layout[index]]));
+  const pairs = new Map();
+  for (const transition of region.transitions) {
+    const to = transition[2];
+    if (to === "=") continue;
+    for (const from of transitionSources(transition, stateIds)) {
+      if (from === to || !positions.has(from) || !positions.has(to)) continue;
+      const key = `${from}\u0000${to}`;
+      if (!pairs.has(key)) pairs.set(key, { from, to, kinds: new Set() });
+      pairs.get(key).kinds.add(transition[3]);
+    }
+  }
+
+  const touching = new Set([selected]);
+  for (const pair of pairs.values()) {
+    if (pair.from === selected || pair.to === selected) {
+      touching.add(pair.from);
+      touching.add(pair.to);
+    }
+  }
+
+  const parts = [`<ellipse class="mring" cx="340" cy="190" rx="245" ry="137" />`];
+  for (const pair of pairs.values()) {
+    const fromPos = positions.get(pair.from);
+    const toPos = positions.get(pair.to);
+    const start = machineBoxExit(fromPos, toPos);
+    const end = machineBoxExit(toPos, fromPos);
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const length = Math.hypot(dx, dy) || 1;
+    const curve = 0.1;
+    const control = {
+      x: (start.x + end.x) / 2 - (dy / length) * length * curve,
+      y: (start.y + end.y) / 2 + (dx / length) * length * curve,
+    };
+    const angle = Math.atan2(end.y - control.y, end.x - control.x);
+    const headBase = { x: end.x - Math.cos(angle) * 9, y: end.y - Math.sin(angle) * 9 };
+    const head = [
+      [end.x, end.y],
+      [headBase.x + Math.cos(angle + Math.PI / 2) * 4, headBase.y + Math.sin(angle + Math.PI / 2) * 4],
+      [headBase.x + Math.cos(angle - Math.PI / 2) * 4, headBase.y + Math.sin(angle - Math.PI / 2) * 4],
+    ].map((point) => point.map((value) => value.toFixed(1)).join(",")).join(" ");
+    const direction = pair.from === selected ? "out" : pair.to === selected ? "in" : "faded";
+    const tone = stateById(region, pair.from === selected ? pair.to : pair.from)?.tone || "gray";
+    const color = MACHINE_TONES[tone] || MACHINE_TONES.gray;
+    const kind = machineEdgeClass(pair.kinds);
+    parts.push(
+      `<path class="medge ${kind} ${direction}" style="--me-c:${color}" data-from="${esc(pair.from)}" data-to="${esc(pair.to)}" d="M${start.x.toFixed(1)},${start.y.toFixed(1)} Q${control.x.toFixed(1)},${control.y.toFixed(1)} ${end.x.toFixed(1)},${end.y.toFixed(1)}" />` +
+      `<polygon class="mhead ${kind} ${direction}" style="--me-c:${color}" points="${head}" />`,
+    );
+  }
+
+  for (const [id, detail, tone] of region.states) {
+    const position = positions.get(id);
+    const x = position.x - MACHINE_NODE.width / 2;
+    const y = position.y - MACHINE_NODE.height / 2;
+    const color = MACHINE_TONES[tone] || MACHINE_TONES.gray;
+    const classes = ["mnode", id === selected ? "sel" : "", touching.has(id) ? "" : "dim"].filter(Boolean).join(" ");
+    parts.push(
+      `<g class="${classes}" data-machine-state="${esc(id)}" style="--mn-c:${color}" tabindex="0" role="button" aria-label="${esc(id)}: ${esc(detail)}">` +
+      `<rect class="mn-box" x="${x}" y="${y}" width="${MACHINE_NODE.width}" height="${MACHINE_NODE.height}" rx="22" />` +
+      `<circle class="mn-dot" cx="${x + 18}" cy="${position.y}" r="5" />` +
+      `<text class="mn-label" x="${x + 31}" y="${position.y + 4.5}">${esc(id)}</text>` +
+      (id === region.initial ? `<text class="mn-start" x="${x + MACHINE_NODE.width - 13}" y="${position.y + 3.5}">◆</text>` : "") +
+      `</g>`,
+    );
+  }
+  svg.setAttribute("viewBox", `0 0 ${MACHINE_VIEWBOX.width} ${MACHINE_VIEWBOX.height}`);
+  svg.innerHTML = parts.join("");
+}
+
+function transitionKindLabel(kind) {
+  return { hook: "hook", protocol: "protocol", level: "reconcile", timer: "timer", reset: "reset", hold: "hold" }[kind] || kind;
+}
+
+function renderMachinePanel(region, selected) {
+  const state = stateById(region, selected);
+  const applicable = region.transitions.filter((transition) => transitionApplies(transition, selected));
+  const row = (transition) => {
+    const target = transition[2] === "=" ? selected : transition[2];
+    const holds = target === selected;
+    return `<div class="mp-row${holds ? " holds" : ""}">
+      <span class="mp-kind ${esc(transition[3])}">${esc(transitionKindLabel(transition[3]))}</span>
+      <code>${esc(transition[1])}</code>
+      <span class="mp-target">${holds ? "holds" : "→ " + esc(target)}</span>
+      <span class="mp-note">${esc(transition[4])}</span>
+    </div>`;
+  };
+  document.getElementById("machine-panel").innerHTML = `
+    <div class="mp-head"><span class="machine-state" style="--state-tone:${MACHINE_TONES[state.tone] || MACHINE_TONES.gray}">${esc(state.id)}</span><code>${esc(region.label)}</code></div>
+    <p class="mp-detail">${esc(state.detail)}</p>
+    <p class="mp-region-note">${esc(region.note)}</p>
+    <div class="mp-transitions">
+      <p class="cap">Applicable from this state</p>
+      ${applicable.map(row).join("") || `<p class="hint">No transition is defined from this control state.</p>`}
+    </div>`;
+}
+
+function renderMachine() {
+  const machine = machineById(selectedMachine) || PROVIDER_MACHINES[0];
+  selectedMachine = machine.id;
+  let region = regionById(machine, selectedRegions.get(machine.id));
+  if (!region) region = machine.regions[0];
+  selectedRegions.set(machine.id, region.id);
+  const selectionKey = `${machine.id}/${region.id}`;
+  let selected = selectedMachineStates.get(selectionKey) || region.initial;
+  if (!stateById(region, selected)) selected = region.initial;
+  selectedMachineStates.set(selectionKey, selected);
+
+  document.getElementById("machine-tabs").innerHTML = PROVIDER_MACHINES.map((candidate) => `
+    <button type="button" role="tab" data-machine="${esc(candidate.id)}" aria-selected="${candidate.id === machine.id}">${esc(candidate.label)}</button>`).join("");
+  document.getElementById("machine-intro").innerHTML = `
+    <div><p>${esc(machine.summary)}</p><code>${esc(machine.shape)}</code></div>
+    <code>${esc(machine.implementation)}</code>`;
+  document.getElementById("machine-regions").innerHTML = machine.regions.map((candidate) => `
+    <button type="button" role="tab" data-machine-region="${esc(candidate.id)}" aria-selected="${candidate.id === region.id}">${esc(candidate.label)}</button>`).join("");
+  drawMachine(region, selected);
+  renderMachinePanel(region, selected);
+}
+
+function buildMachines() {
+  document.getElementById("machine-tabs").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-machine]");
+    if (!button) return;
+    selectedMachine = button.dataset.machine;
+    renderMachine();
+  });
+  document.getElementById("machine-regions").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-machine-region]");
+    if (!button) return;
+    selectedRegions.set(selectedMachine, button.dataset.machineRegion);
+    renderMachine();
+  });
+  const svg = document.getElementById("machine-svg");
+  const selectNode = (target) => {
+    const node = target.closest("[data-machine-state]");
+    if (!node) return false;
+    const machine = machineById(selectedMachine);
+    const region = regionById(machine, selectedRegions.get(selectedMachine));
+    selectedMachineStates.set(`${machine.id}/${region.id}`, node.dataset.machineState);
+    renderMachine();
+    return true;
+  };
+  svg.addEventListener("click", (event) => selectNode(event.target));
+  svg.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    if (selectNode(event.target)) event.preventDefault();
+  });
+  renderMachine();
+}
+
+function buildMachineDrift() {
+  const rows = OLD_MODEL_DIVERGENCES.map(([topic, oldModel, current]) => `
+    <tr><th scope="row">${esc(topic)}</th><td>${esc(oldModel)}</td><td>${esc(current)}</td></tr>`).join("");
+  document.getElementById("machine-drift").innerHTML = `
+    <thead><tr><th></th><th>Old visual</th><th>Current main</th></tr></thead><tbody>${rows}</tbody>`;
+}
+
 function buildLadder() {
   document.getElementById("ladder").innerHTML = RULES.map(([id, condition, color, output], index) => `
     <li data-rule="${id}" data-color="${color}">
@@ -206,6 +435,8 @@ function bindTheme() {
 
 buildRail();
 buildPipeline();
+buildMachines();
+buildMachineDrift();
 buildLadder();
 buildAxes();
 buildProviderTable();

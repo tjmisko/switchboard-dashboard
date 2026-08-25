@@ -47,8 +47,9 @@
         <h2>A chip is a reduction of a fresh agent graph.</h2>
         <p class="lede">
           The switchable unit is an OS root process, identified by <code>(pid, started_at)</code>.
-          A trusted hook binds its exact Claude or Codex session ID. The provider builds a bounded
-          root/descendant graph; one shared reducer projects that graph to the chip.
+          A trusted hook binds its exact Claude or Codex session ID. Provider-specific state
+          machines fuse edges with re-readable evidence, then publish one bounded root/descendant
+          graph for the shared reducer.
         </p>
         <p class="lede-sub">
           The chip is intentionally lossy. Provider evidence and graph detail remain available
@@ -73,8 +74,9 @@
         <h3>Mental model</h3>
         <div class="pipeline" id="pipeline"></div>
         <div class="invariant">
-          <code>(pid, started_at)</code> → exact provider root ID → fresh <code>Observation</code>
-          → normalized tree → <code>Summary</code> → chip + history edges
+          <code>(pid, started_at)</code> → exact provider root ID → provider state
+          → fresh <code>Observation</code> → normalized tree
+          → { <code>Reduce</code> → chip; graph diff → history edges }
         </div>
         <ul class="tight">
           <li>Only discovered root processes are switchable. Descendants are provider identities with explicit parentage; no shared-process or shared-log assumption.</li>
@@ -84,7 +86,56 @@
         </ul>
       </section>
 
-      <section class="sec" id="reducer" data-num="02" data-rail="Reducer">
+      <section class="sec" id="machines" data-num="02" data-rail="State machines">
+        <h3>The actual state machines</h3>
+        <p>
+          There is no single shared flat per-writer FSM on <code>main</code>. Each provider runs an
+          extended state machine with parallel regions and keyed state. Hooks apply edges; files or
+          app-server snapshots reconcile levels. The graph is the immutable handoff, not the memory.
+        </p>
+        <div class="machine-equation">
+          <code>ProviderState = control regions × map[node] × map[request] × timers</code>
+          <span>then</span>
+          <code>Project(ProviderState) → Observation</code>
+          <span>then</span>
+          <code>Reduce(Observation) → Summary</code>
+        </div>
+        <p class="hint">
+          An outer OS machine remains separate: <code>running</code> / <code>suspended</code> /
+          <code>gone</code>. Suspension overlays the chip; process death removes the root.
+        </p>
+
+        <div class="machine-tabs" id="machine-tabs" role="tablist" aria-label="Provider state machine"></div>
+        <div class="machine-intro" id="machine-intro"></div>
+        <div class="machine-regions" id="machine-regions" role="tablist" aria-label="State-machine region"></div>
+        <div class="machine-wrap">
+          <div class="machine-diagram">
+            <svg id="machine-svg" role="img" aria-label="Provider state transition diagram"></svg>
+            <p class="machine-key">
+              <span><i class="mk-line hook"></i>edge / protocol event</span>
+              <span><i class="mk-line level"></i>level reconciliation</span>
+              <span><i class="mk-line timer"></i>timer / reset</span>
+              <span><i class="mk-start">◆</i>initial control state</span>
+              <span>node color is local state, not the chip verdict</span>
+            </p>
+          </div>
+          <div class="machine-panel" id="machine-panel"></div>
+        </div>
+        <p class="hint">
+          Select a provider, region, and state. The panel lists the transitions applicable from that
+          state. Holds are explicit because another parallel region may still change.
+        </p>
+
+        <h4>What the old ring got wrong</h4>
+        <p>
+          The seven-state visual was not invented: commit <code>2040a91</code> implemented it on
+          <code>docs/writer-state-model</code>. That commit was never merged into <code>main</code>.
+          The page presented a real design branch as the running architecture.
+        </p>
+        <div class="table-scroll"><table class="drift-table" id="machine-drift"></table></div>
+      </section>
+
+      <section class="sec" id="reducer" data-num="03" data-rail="Reducer">
         <h3>Reducer</h3>
         <p>First match wins. The two process rules sit above <code>agentgraph.Reduce</code>.</p>
         <ol class="ladder" id="ladder"></ol>
@@ -105,9 +156,12 @@
         </div>
       </section>
 
-      <section class="sec" id="graph" data-num="03" data-rail="Graph contract">
+      <section class="sec" id="graph" data-num="04" data-rail="Graph contract">
         <h3>Graph contract</h3>
-        <p>Every node has three independent axes. There is no per-writer state machine.</p>
+        <p>
+          Every projected node has three independent axes. This product state replaces the old
+          one-of-seven writer enum; provider machines decide how evidence reaches each axis.
+        </p>
         <div class="axes">
           <div class="axis-block"><h4><code>runtime</code></h4><div class="axis-cards" id="runtime-cards"></div></div>
           <div class="axis-block"><h4><code>attention</code></h4><div class="axis-cards" id="attention-cards"></div></div>
@@ -137,7 +191,7 @@
         </div>
       </section>
 
-      <section class="sec" id="providers" data-num="04" data-rail="Claude vs. Codex">
+      <section class="sec" id="providers" data-num="05" data-rail="Claude vs. Codex">
         <h3>Claude vs. Codex</h3>
         <p>They share the graph contract, not an evidence pipeline.</p>
         <div class="table-scroll"><table class="provider-table" id="provider-table"></table></div>
@@ -157,7 +211,7 @@
         </div>
       </section>
 
-      <section class="sec" id="authority" data-num="05" data-rail="Authority &amp; limits">
+      <section class="sec" id="authority" data-num="06" data-rail="Authority &amp; limits">
         <h3>Authority and degradation</h3>
         <p>
           Source is not a reducer confidence score. Codex orders exact event time first; otherwise the coordinator
@@ -168,7 +222,7 @@
         <div class="limits" id="limits"></div>
       </section>
 
-      <section class="sec" id="timeline" data-num="06" data-rail="Timeline vocabulary">
+      <section class="sec" id="timeline" data-num="07" data-rail="Timeline vocabulary">
         <h3>Timeline vocabulary</h3>
         <p>
           <code>delegating</code> is the live compact summary when a working descendant outranks the root.

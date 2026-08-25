@@ -5,7 +5,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const {
-  AXES, TERMINAL, RULES, LANES, PROVIDER_ROWS, SOURCES,
+  AXES, TERMINAL, RULES, LANES, PROVIDER_MACHINES, OLD_MODEL_DIVERGENCES,
+  PROVIDER_ROWS, SOURCES,
   canonicalNode, normalizeGraph, positivelyLive, isFresh, reduceGraph,
 } = require("./states-model.js");
 
@@ -35,6 +36,33 @@ test("exports the exact provider-neutral axis vocabulary", () => {
     "unknown", "pending", "running", "completed", "interrupted", "errored", "shutdown", "not_found",
   ]);
   assert.deepEqual([...TERMINAL], ["completed", "interrupted", "errored", "shutdown", "not_found"]);
+});
+
+test("documents the shipped provider machines as valid orthogonal regions", () => {
+  assert.deepEqual(PROVIDER_MACHINES.map((machine) => machine.id), ["claude", "codex"]);
+  for (const machine of PROVIDER_MACHINES) {
+    assert.ok(machine.regions.length >= 3, machine.id);
+    for (const region of machine.regions) {
+      const states = new Set(region.states.map(([id]) => id));
+      assert.ok(states.has(region.initial), `${machine.id}/${region.id}: initial`);
+      assert.equal(states.size, region.states.length, `${machine.id}/${region.id}: duplicate state`);
+      for (const [from, event, to, kind] of region.transitions) {
+        const sources = from === "*" ? [] : Array.isArray(from) ? from : [from];
+        for (const source of sources) assert.ok(states.has(source), `${machine.id}/${region.id}: ${event} from ${source}`);
+        assert.ok(to === "=" || states.has(to), `${machine.id}/${region.id}: ${event} to ${to}`);
+        assert.ok(["hook", "protocol", "level", "timer", "reset", "hold"].includes(kind), `${machine.id}/${region.id}: ${kind}`);
+      }
+    }
+  }
+
+  const region = (machine, id) => PROVIDER_MACHINES.find((item) => item.id === machine).regions.find((item) => item.id === id);
+  const has = (machine, id, event, to) => region(machine, id).transitions.some((transition) => transition[1] === event && transition[2] === to);
+  assert.ok(has("claude", "writer-attention", "PermissionRequest · AskUserQuestion", "user_input"));
+  assert.ok(has("claude", "child-lifecycle", "SubagentStart or SubagentStop", "="));
+  assert.ok(has("codex", "question-latch", "generic app-server snapshot", "="));
+  assert.ok(has("codex", "hook-approval", "30 s unresolved", "published"));
+  assert.ok(has("codex", "child-hook", "fresh topology matches · SubagentStart", "active_overlay"));
+  assert.ok(OLD_MODEL_DIVERGENCES.some(([topic]) => topic === "ToolInFlight"));
 });
 
 test("canonicalizes invalid and empty axis values", () => {
@@ -244,17 +272,20 @@ test("maps every timeline lane to a documented display color", () => {
   for (const [lane, color] of LANES) assert.ok(colors.has(color), `${lane}: ${color}`);
 });
 
-test("contains no obsolete writer-state architecture claims", () => {
+test("labels the old writer-state model as unmerged rather than current", () => {
   const root = path.join(__dirname, "..");
   const text = [
     "states.html", "states.js", "states.css", "states-model.js",
   ].map((file) => fs.readFileSync(path.join(__dirname, file), "utf8"))
     .concat(fs.readFileSync(path.join(root, "README.md"), "utf8"))
     .join("\n");
-  for (const obsolete of [
-    "internal/writerstate", "docs/writer-state-model.md", "ToolInFlight", "6 × 11", "66 cells",
-    "seven states", "thirteen kinds", "Two Divergent Cells", "Four Unimplemented Transitions",
-  ]) assert.equal(text.includes(obsolete), false, obsolete);
+  for (const current of [
+    "There is no single shared flat per-writer FSM", "commit <code>2040a91</code>",
+    "never merged into <code>main</code>", "ToolInFlight",
+  ]) assert.equal(text.includes(current), true, current);
+  for (const obsoleteClaim of [
+    "6 × 11", "66 cells, no defaults", "Two Divergent Cells", "Four Unimplemented Transitions",
+  ]) assert.equal(text.includes(obsoleteClaim), false, obsoleteClaim);
   for (const current of [
     "internal/agentgraph", "internal/provider/claude", "internal/provider/codex",
   ]) assert.equal(text.includes(current), true, current);
