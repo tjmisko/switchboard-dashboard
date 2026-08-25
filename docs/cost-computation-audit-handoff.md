@@ -826,8 +826,68 @@ systemctl --user show switchboard.service switchboard-dashboard.service \
 ```
 
 Acceptance requires both services to be `active/running`, both pricing
-diagnostics to report `fresh` with `used_fallback=false`, and a subsequent real
+diagnostics to report `current` with `used_fallback=false`, and a subsequent real
 timeline response to preserve provider identity, nullable cost semantics,
 catalog source/hash, pricing kind, and coverage/completeness fields. Codex rows
 must remain `tokens_only`/partial rather than implying provider-tool coverage;
 an unproved billing route or amount must remain null rather than `$0`.
+
+### Activation completion
+
+Completed: 2026-08-25 at 12:25:54 PDT
+
+The operator completed the host-only boundary. `systemctl --user daemon-reload`
+and the joint restart succeeded. The resulting service state was:
+
+```text
+switchboard.service           active/running  MainPID=1147450  Result=success
+switchboard-dashboard.service active/running  MainPID=1147451  Result=success
+ExecMainStartTimestamp=Tue 2026-08-25 12:25:54 PDT
+```
+
+The explicit live refresh then succeeded without fallback:
+
+```text
+anthropic  current  models=15  needs_refresh=false
+  retrieved_at=2026-08-25T19:25:54.369564354Z
+  hash=sha256:b6b33d568ff0a6af7d6adc8d123416d6b366a2c19751cb7f545045ff7a7785ac
+openai     current  models=3   needs_refresh=false
+  retrieved_at=2026-08-25T19:25:54.681204646Z
+  hash=sha256:559c7d3a98aada56f11062da45a2091a5d4400c55933d8dc2657d5369baee782
+```
+
+The installed OpenAI cache contains the exact live `gpt-5.6-sol`,
+`gpt-5.6-terra`, and `gpt-5.6-luna` base rates, cached-input rates, 1.25x cache
+writes, >272K context bands, fast/priority variants, regional multipliers, and
+web-search tool charges. The installed Anthropic cache contains 15 exact model
+records with separate input/output/cache-read/5-minute-write/1-hour-write rates,
+fast variants where published, US inference multipliers, and web tool charges.
+
+A real post-restart timeline query for 2026-08-25 verified the Codex path end to
+end. At the acceptance snapshot it contained 26 lanes, including 5 priced Codex
+lanes and `$297.354896` of aggregate public API-equivalent token cost. That
+number is time-varying while sessions continue. Every priced lane retained:
+
+- `agent_client=codex`, `execution_provider=openai`, and exact
+  `model=gpt-5.6-sol`;
+- `account_kind=chatgpt` and `auth_mode=chatgpt` without inferring subscription
+  inclusion or a zero incremental bill;
+- the current OpenAI source URL and semantic catalog hash above;
+- `status=partial` and `usage_coverage=tokens_only`;
+- an explicit unpriced tool-unit or collector-cutover reason; and
+- `estimated_billed_usd=null` rather than copying the API comparator into an
+  invoice estimate.
+
+There was no Claude lane on the activation day. A normalized historical query
+for 2026-08-20 nevertheless verified the Claude pricing fold against the current
+catalog: 23 of 50 Claude lanes produced API-equivalent comparisons, all marked
+`partial`, sourced from the current Anthropic hash above, and all retained
+`estimated_billed_usd=null`. Their identity correctly proved only
+`agent_client=claude` plus the exact model (`claude-opus-5` in the inspected
+samples); it did not invent an execution provider or billing route. Ambiguous
+legacy cache-write TTLs remained explicit unpriced reasons.
+
+Deployment acceptance is complete. The live pricing sources, service
+activation, Codex durable usage ingestion, provider/model identity, nullable
+billing semantics, and conservative Claude repricing behavior have all been
+observed on the installed release.
