@@ -198,8 +198,43 @@ func TestMerge_shouldKeepCostConceptsAndProvenanceSeparate(t *testing.T) {
 		c.PlanCredits == nil || *c.PlanCredits != 50 {
 		t.Fatalf("unlike cost concepts were not summed independently: %+v", c)
 	}
-	if c.PricingVersion != "mixed" || c.PricingRetrievedAt != "2026-08-25T10:00:00Z" || len(c.PricingSources) != 2 {
+	if c.PricingVersion != "mixed" || !c.MixedPricingVersions ||
+		c.PricingRetrievedAt != "2026-08-25T10:00:00Z" || len(c.PricingSources) != 2 {
 		t.Fatalf("provenance = %+v, want mixed versions, oldest retrieval, two sources", c)
+	}
+}
+
+func TestMerge_shouldWeightCanonicalCoverageByPricedUnits(t *testing.T) {
+	inputs := []Sourced{
+		{Provider: "a", Timeline: &Timeline{Totals: Totals{Cost: &CostEstimate{
+			APIEquivalentUSD: ptrF64(1), Status: "estimated", Coverage: ptrF64(1),
+			PricedTokens: 90, PricedToolUnits: 2, PricingProvider: "openai",
+			PricingKind: "spot_estimate", PricingEffectiveAt: "2026-08-25T00:00:00Z",
+			PricingSource: "https://example.test/openai", PricingVersion: "one",
+		}}}},
+		{Provider: "b", Timeline: &Timeline{Totals: Totals{Cost: &CostEstimate{
+			APIEquivalentUSD: ptrF64(2), Status: "partial", Coverage: ptrF64(0.5),
+			PricedTokens: 10, UnpricedTokens: 25, UnpricedToolUnits: 1, UnpricedEvents: 1,
+			UnpricedReasons: []string{"tier is unknown"}, PricingProvider: "anthropic",
+			PricingKind: "spot_estimate", PricingEffectiveAt: "2026-08-24T00:00:00Z",
+			PricingSource: "https://example.test/anthropic", PricingVersion: "two",
+		}}}},
+	}
+
+	c := Merge(inputs, MergeOptions{}).Totals.Cost
+	if c == nil || c.Coverage == nil {
+		t.Fatalf("cost = %+v, want canonical coverage", c)
+	}
+	// 102 priced units / 128 total units. Provider percentages must not be
+	// averaged because their denominators differ.
+	want := 102.0 / 128.0
+	if *c.Coverage != want {
+		t.Fatalf("coverage = %v, want %v", *c.Coverage, want)
+	}
+	if c.UnpricedEvents != 1 || len(c.UnpricedReasons) != 1 ||
+		c.PricingProvider != "mixed" || !c.MixedPricingVersions ||
+		c.PricingEffectiveAt != "2026-08-24T00:00:00Z" {
+		t.Fatalf("canonical cost metadata was not preserved: %+v", c)
 	}
 }
 

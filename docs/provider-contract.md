@@ -160,8 +160,13 @@ consumer, so never emit zero-length or inverted spans.
     "estimated_billed_usd": 3.41,
     "status": "estimated",
     "coverage": 1.0,
+    "priced_tokens": 5261000,
+    "unpriced_tokens": 0,
+    "pricing_provider": "anthropic",
+    "pricing_kind": "spot_estimate",
     "pricing_source": "https://platform.claude.com/docs/en/about-claude/pricing",
     "pricing_retrieved_at": "2026-08-25T12:00:00Z",
+    "pricing_effective_at": "2026-08-25T00:00:00Z",
     "pricing_version": "sha256:…"
   },
   "tok_in": 41000, "tok_out": 18000,
@@ -206,9 +211,13 @@ structured `cost` object. Its dollar fields are deliberately not interchangeable
 | `estimated_billed_usd` | Best supported incremental dollar charge. Null for included subscription use unless a charge is reported. |
 
 `status` is one of `estimated`, `included`, `partial`, `stale`, or `unknown`.
-Include `coverage`, unpriced counts, price source URL, retrieval/as-of time, and
-catalog version whenever available. An explicit numeric zero means a supported
-zero. An omitted amount means unknown and must never be encoded as zero.
+Include `coverage`; priced/unpriced token and tool-unit counts; unpriced event
+count and reasons; `pricing_provider`; `pricing_kind`; source URL; retrieval and
+effective time; catalog version; and `mixed_pricing_versions` whenever available.
+An explicit numeric zero means a supported zero. An omitted amount means unknown
+and must never be encoded as zero. During a rolling upgrade the dashboard also
+accepts the draft aliases `price_kind`, `pricing_as_of`, and
+`unpriced_usage_events`, but producers should emit the canonical names above.
 
 Providers may also emit a canonical `usage` object alongside the legacy token
 fields. It preserves `input_tokens`, `cached_input_tokens`,

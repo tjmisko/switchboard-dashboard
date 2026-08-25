@@ -1019,13 +1019,49 @@ test("normalizedCost should preserve canonical billing concepts and explicit zer
     coverage: 1,
     legacy: false,
     priceKind: null,
+    pricingProvider: null,
     pricingRetrievedAt: null,
     pricingAsOf: null,
     pricingVersion: null,
     pricingSources: ["https://example.test/prices"],
+    mixedPricingVersions: false,
+    pricedTokens: 0,
     unpricedUsageEvents: 0,
     unpricedTokens: 0,
+    pricedToolUnits: 0,
+    unpricedToolUnits: 0,
+    unpricedReasons: [],
   });
+});
+
+test("normalizedCost should accept canonical pricing provenance and coverage fields", () => {
+  const cost = normalizedCost({ cost: {
+    api_equivalent_usd: 2,
+    status: "partial",
+    coverage: 0.8,
+    pricing_provider: "openai",
+    pricing_kind: "spot_estimate",
+    pricing_effective_at: "2026-08-25T00:00:00Z",
+    pricing_retrieved_at: "2026-08-25T12:00:00Z",
+    pricing_version: "sha256:abc",
+    mixed_pricing_versions: true,
+    priced_tokens: 80,
+    unpriced_tokens: 20,
+    priced_tool_units: 2,
+    unpriced_tool_units: 1,
+    unpriced_events: 1,
+    unpriced_reasons: ["model is unknown"],
+  }});
+  assert.equal(cost.pricingProvider, "openai");
+  assert.equal(cost.priceKind, "spot_estimate");
+  assert.equal(cost.pricingAsOf, "2026-08-25T00:00:00Z");
+  assert.equal(cost.mixedPricingVersions, true);
+  assert.equal(cost.pricedTokens, 80);
+  assert.equal(cost.unpricedTokens, 20);
+  assert.equal(cost.pricedToolUnits, 2);
+  assert.equal(cost.unpricedToolUnits, 1);
+  assert.equal(cost.unpricedUsageEvents, 1);
+  assert.deepEqual(cost.unpricedReasons, ["model is unknown"]);
 });
 
 test("normalizedCost should keep missing, legacy zero, and unknown distinct", () => {

@@ -153,13 +153,27 @@
       status,
       coverage: raw ? finite(raw.coverage) : null,
       legacy: raw ? raw.legacy === true : legacy != null,
-      priceKind: raw && raw.price_kind ? String(raw.price_kind) : null,
+      priceKind: raw && (raw.pricing_kind || raw.price_kind)
+        ? String(raw.pricing_kind || raw.price_kind)
+        : null,
+      pricingProvider: raw && raw.pricing_provider ? String(raw.pricing_provider) : null,
       pricingRetrievedAt: raw && raw.pricing_retrieved_at ? String(raw.pricing_retrieved_at) : null,
-      pricingAsOf: raw && raw.pricing_as_of ? String(raw.pricing_as_of) : null,
+      pricingAsOf: raw && (raw.pricing_effective_at || raw.pricing_as_of)
+        ? String(raw.pricing_effective_at || raw.pricing_as_of)
+        : null,
       pricingVersion: raw && raw.pricing_version ? String(raw.pricing_version) : null,
       pricingSources: sources,
-      unpricedUsageEvents: raw && Number.isInteger(raw.unpriced_usage_events) ? raw.unpriced_usage_events : 0,
+      mixedPricingVersions: raw ? raw.mixed_pricing_versions === true : false,
+      pricedTokens: raw && Number.isFinite(raw.priced_tokens) ? raw.priced_tokens : 0,
       unpricedTokens: raw && Number.isFinite(raw.unpriced_tokens) ? raw.unpriced_tokens : 0,
+      pricedToolUnits: raw && Number.isFinite(raw.priced_tool_units) ? raw.priced_tool_units : 0,
+      unpricedToolUnits: raw && Number.isFinite(raw.unpriced_tool_units) ? raw.unpriced_tool_units : 0,
+      unpricedUsageEvents: raw && Number.isInteger(raw.unpriced_events)
+        ? raw.unpriced_events
+        : (raw && Number.isInteger(raw.unpriced_usage_events) ? raw.unpriced_usage_events : 0),
+      unpricedReasons: raw && Array.isArray(raw.unpriced_reasons)
+        ? raw.unpriced_reasons.filter((v) => typeof v === "string" && v)
+        : [],
     };
   }
 

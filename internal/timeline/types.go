@@ -282,20 +282,32 @@ type CostEstimate struct {
 	PlanCredits        *float64 `json:"plan_credits,omitempty"`
 	EstimatedBilledUSD *float64 `json:"estimated_billed_usd,omitempty"`
 
-	Status    string   `json:"status,omitempty"` // estimated, included, partial, stale, unknown
-	Coverage  *float64 `json:"coverage,omitempty"`
-	Legacy    bool     `json:"legacy,omitempty"`
-	PriceKind string   `json:"price_kind,omitempty"` // e.g. spot_estimate
+	Status   string   `json:"status,omitempty"` // estimated, included, partial, stale, unknown
+	Coverage *float64 `json:"coverage,omitempty"`
+	Legacy   bool     `json:"legacy,omitempty"`
 
-	PricedUsageEvents   int   `json:"priced_usage_events,omitempty"`
-	UnpricedUsageEvents int   `json:"unpriced_usage_events,omitempty"`
-	UnpricedTokens      int64 `json:"unpriced_tokens,omitempty"`
+	// PricingKind is the canonical producer field. PriceKind accepts the short-
+	// lived dashboard draft so a rolling upgrade does not discard provenance.
+	PricingKind string `json:"pricing_kind,omitempty"` // e.g. spot_estimate
+	PriceKind   string `json:"price_kind,omitempty"`
 
-	PricingSource      string   `json:"pricing_source,omitempty"`
-	PricingSources     []string `json:"pricing_sources,omitempty"`
-	PricingRetrievedAt string   `json:"pricing_retrieved_at,omitempty"`
-	PricingAsOf        string   `json:"pricing_as_of,omitempty"`
-	PricingVersion     string   `json:"pricing_version,omitempty"`
+	PricedUsageEvents   int      `json:"priced_usage_events,omitempty"`
+	UnpricedUsageEvents int      `json:"unpriced_usage_events,omitempty"`
+	PricedTokens        int64    `json:"priced_tokens,omitempty"`
+	UnpricedTokens      int64    `json:"unpriced_tokens,omitempty"`
+	PricedToolUnits     int64    `json:"priced_tool_units,omitempty"`
+	UnpricedToolUnits   int64    `json:"unpriced_tool_units,omitempty"`
+	UnpricedEvents      int64    `json:"unpriced_events,omitempty"`
+	UnpricedReasons     []string `json:"unpriced_reasons,omitempty"`
+
+	PricingProvider      string   `json:"pricing_provider,omitempty"`
+	PricingSource        string   `json:"pricing_source,omitempty"`
+	PricingSources       []string `json:"pricing_sources,omitempty"`
+	PricingRetrievedAt   string   `json:"pricing_retrieved_at,omitempty"`
+	PricingEffectiveAt   string   `json:"pricing_effective_at,omitempty"`
+	PricingAsOf          string   `json:"pricing_as_of,omitempty"` // rolling-upgrade alias
+	PricingVersion       string   `json:"pricing_version,omitempty"`
+	MixedPricingVersions bool     `json:"mixed_pricing_versions,omitempty"`
 }
 
 // ProviderError records a provider that failed to produce an envelope, so the
