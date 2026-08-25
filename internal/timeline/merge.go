@@ -100,6 +100,8 @@ func Merge(inputs []Sourced, opts MergeOptions) *Timeline {
 		out.Totals.TokCacheCreate += t.Totals.TokCacheCreate
 		out.Totals.Subagents += t.Totals.Subagents
 		mergeUsageBreakdown(&out.Totals.Usage, t.Totals.Usage)
+		out.Totals.PricingGroups = append(out.Totals.PricingGroups, t.Totals.PricingGroups...)
+		out.Totals.VendorUsage = mergeVendorUsage(out.Totals.VendorUsage, t.Totals.VendorUsage)
 		out.Totals.Cost = mergeCostEstimates(
 			out.Totals.Cost,
 			t.Totals.Cost,
@@ -205,10 +207,16 @@ func mergeCostEstimates(dst, incoming *CostEstimate, legacy *float64, hasUsage b
 	dst.PricingRetrievedAt = earlierTimestamp(dst.PricingRetrievedAt, src.PricingRetrievedAt)
 	dst.PricingEffectiveAt = earlierTimestamp(dst.PricingEffectiveAt, src.PricingEffectiveAt)
 	dst.PricingProvider = mergedIdentity(dst.PricingProvider, src.PricingProvider)
+	dst.PricingVersions = mergeStrings(costVersions(dst), costVersions(src))
 	version := mergedIdentity(dst.PricingVersion, src.PricingVersion)
+	if len(dst.PricingVersions) == 1 {
+		version = dst.PricingVersions[0]
+	} else if len(dst.PricingVersions) > 1 {
+		version = "mixed"
+	}
 	kind := mergedIdentity(dst.PricingKind, src.PricingKind)
 	dst.MixedPricingVersions = dst.MixedPricingVersions || src.MixedPricingVersions ||
-		version == "mixed" || kind == "mixed" || dst.PricingProvider == "mixed"
+		len(dst.PricingVersions) > 1 || version == "mixed" || kind == "mixed" || dst.PricingProvider == "mixed"
 	dst.PricingVersion = version
 	dst.PricingKind = kind
 	return dst
@@ -243,6 +251,7 @@ func normalizeCostEstimate(in *CostEstimate, legacy *float64, hasUsage bool) *Co
 	c.EstimatedBilledUSD = cloneFloat(in.EstimatedBilledUSD)
 	c.Coverage = cloneFloat(in.Coverage)
 	c.PricingSources = append([]string(nil), in.PricingSources...)
+	c.PricingVersions = append([]string(nil), in.PricingVersions...)
 	c.UnpricedReasons = append([]string(nil), in.UnpricedReasons...)
 	if c.PricingKind == "" {
 		c.PricingKind = c.PriceKind
@@ -337,6 +346,38 @@ func costSources(c *CostEstimate) []string {
 		values = append(values, c.PricingSource)
 	}
 	return mergeStrings(nil, values)
+}
+
+func costVersions(c *CostEstimate) []string {
+	if c == nil {
+		return nil
+	}
+	values := append([]string(nil), c.PricingVersions...)
+	if c.PricingVersion != "" && c.PricingVersion != "mixed" {
+		values = append(values, c.PricingVersion)
+	}
+	return mergeStrings(nil, values)
+}
+
+// mergeVendorUsage preserves provider-native cumulative estimates as their own
+// explicitly scoped aggregate. It never feeds those values into window token
+// totals or API-equivalent cost.
+func mergeVendorUsage(dst, src *VendorUsageAggregate) *VendorUsageAggregate {
+	if src == nil {
+		return dst
+	}
+	if dst == nil {
+		copy := *src
+		copy.Snapshots = append([]ScopedVendorUsage(nil), src.Snapshots...)
+		copy.Cost = *normalizeCostEstimate(&src.Cost, nil, false)
+		return &copy
+	}
+	dst.Snapshots = append(dst.Snapshots, src.Snapshots...)
+	dst.Cost = *mergeCostEstimates(&dst.Cost, &src.Cost, nil, false)
+	if dst.Scope != src.Scope {
+		dst.Scope = "mixed_cumulative_snapshots"
+	}
+	return dst
 }
 
 func mergeStrings(a, b []string) []string {
