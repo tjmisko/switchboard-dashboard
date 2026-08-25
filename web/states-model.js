@@ -1,428 +1,474 @@
 "use strict";
 
-// states-model.js — the writer-state model: the table, and the two pure
-// functions over it. DOM-free, same split as model.js/app.js — the browser
-// takes it as globals (states.js), the node suite takes it by require
-// (states.test.js).
-//
-// The TRANSITIONS table below is TRANSCRIBED FROM THE SPEC, not authored here:
-// it is generated from Switchboard's `docs/writer-state-model.md`, which is
-// itself generated from `internal/writerstate/state.go` by
-// `go generate ./internal/writerstate`. If the model changes, regenerate that
-// doc and re-derive this file rather than editing cells by hand — a page that
-// teaches a state machine the daemon no longer runs is worse than no page.
-//
-// `applyEvidence` and `fold` mirror `Apply` and `Fold` from that package,
-// branch for branch. states.test.js is what keeps them honest: it re-derives
-// the properties the Go suite asserts (totality, the single door into Blocked,
-// the fold's priority and tie-break) from this table rather than trusting the
-// transcription.
-//
-// The prose (STATES, EVIDENCE, LADDER) IS authored here: the spec argues to a
-// reader who already knows the system, and this page's job is the ramp up to
-// that reader. The two must agree on facts; they deliberately differ in voice.
-
+// Pure field-guide model. It mirrors Switchboard's shipped agentgraph enums,
+// normalization, positive-liveness predicate, and reducer.
 (function (root, factory) {
   const api = factory();
-  if (typeof module !== "undefined" && module.exports) {
-    module.exports = api; // node test
-  } else {
-    Object.assign(root, api); // browser: expose as globals for states.js
-  }
+  if (typeof module !== "undefined" && module.exports) module.exports = api;
+  else Object.assign(root, api);
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
 
-// ---------------------------------------------------------------------------
-// states
+const AXES = {
+  runtime: [
+    ["unknown", "No authoritative runtime evidence."],
+    ["not_loaded", "Known thread; runtime unavailable."],
+    ["idle", "Loaded, not processing a turn."],
+    ["active", "Processing a turn."],
+    ["system_error", "Provider-reported runtime failure."],
+  ],
+  attention: [
+    ["none", "No confirmed human-owned request."],
+    ["approval", "An unresolved human approval."],
+    ["user_input", "An unresolved blocking question."],
+  ],
+  lifecycle: [
+    ["unknown", "No orchestration lifecycle evidence."],
+    ["pending", "Initializing or queued."],
+    ["running", "Activity interval open."],
+    ["completed", "Activity interval completed.", true],
+    ["interrupted", "Activity interval interrupted.", true],
+    ["errored", "Activity interval failed.", true],
+    ["shutdown", "Child shut down.", true],
+    ["not_found", "Complete snapshot omitted the prior child.", true],
+  ],
+};
+
+const TERMINAL = new Set(AXES.lifecycle.filter((v) => v[2]).map((v) => v[0]));
+
+// Session resolution includes two process-owned branches above the reducer.
+// The remaining branches are agentgraph.Reduce in priority order.
+const RULES = [
+  ["process-gone", "root process gone", "hidden", "remove the session"],
+  ["process-suspended", "root process stopped", "suspended", "paused by you"],
+  ["graph-not-fresh", "graph absent, invalid, future, or expired", "gray", "unknown"],
+  ["live-approval", "any live node: attention = approval", "red", "permission"],
+  ["live-user-input", "any live node: attention = user_input", "red", "permission"],
+  ["root-active", "root runtime = active", "green", "working"],
+  ["root-system-error", "root runtime = system_error", "gray", "unknown + error detail"],
+  ["working-descendant", "live child active, pending, or running", "green", "delegating"],
+  ["root-idle", "root runtime = idle", "orange", "idle"],
+  ["fallback-unknown", "otherwise", "gray", "unknown"],
+];
+
+const LANES = [
+  ["working", "green", "Root work."],
+  ["delegating", "green", "Compact summary: a working descendant outranks an inactive root.", "dim"],
+  ["dormant", "green", "Derived history: a recorded child overlaps a working parent interval.", "dim"],
+  ["idle", "orange", "Root idle; no wait or working child."],
+  ["idle (away)", "orange", "Idle while the operator was away.", "dim"],
+  ["permission", "red", "Approval or user input; history flattens the reason."],
+  ["suspended", "suspended", "Root process paused."],
+  ["unknown", "gray", "No decisive compact status; graph detail may still carry an error."],
+];
+
+const PIPELINE = [
+  ["OS discovery", "creates interactive roots; owns process identity, liveness, suspension, and navigation"],
+  ["exact hook binding", "joins a provider session ID to (pid, started_at); never cwd/time/title"],
+  ["provider machines", "apply hook edges, timers, and level reconciliation to provider-owned state"],
+  ["agent graph", "normalizes explicit parentage and reduces three independent axes"],
+  ["pure projections", "reduces one root chip and separately diffs node axes into history edges"],
+];
+
+// The daemon does not have one provider-neutral transition table. These are the
+// finite control regions that actually carry memory on main. A region is shown
+// independently because the complete provider state is their product, plus
+// maps keyed by writer, node, request, and hook edge.
 //
-// `folds` is the fold branch a writer in this state contributes to, which is
-// what makes the state visible on your bar. It is a contribution, not a result:
-// only Blocked and the two active states decide a color on their own (see
-// LADDER, and the sandbox in §5).
-// ---------------------------------------------------------------------------
-const STATES = [
+// Transition tuples are [from, event, to, evidence kind, qualification].
+// `from` may be "*" or a list; `to = "="` means this region holds while another
+// region changes. Level transitions are reconciliation assignments, not hook
+// edges. The charts deliberately do not pretend either provider has a total
+// Apply(State, Evidence) table.
+const PROVIDER_MACHINES = [
   {
-    id: "Unknown",
-    folds: "gray",
-    group: "no idea",
-    short: "Nothing has been observed about this writer yet.",
-    body:
-      "Distinct from Ended: “I don't know” and “it finished” are different claims, and a " +
-      "confident wrong guess is its own class of bug.",
-    you: "Wait a tick.",
+    id: "claude",
+    label: "Claude",
+    implementation: "internal/provider/claude.Observer · rootState",
+    summary: "Hook edges mutate root runtime and one pending-prompt latch per writer; transcript and fanout scans reconcile those beliefs.",
+    shape: "rootState = runtime × pending[writer] × overlays[child] × fanout × known/retained × priorSummary",
+    regions: [
+      {
+        id: "root-runtime",
+        label: "root runtime",
+        initial: "unknown",
+        note: "Only the main writer changes this region. Child activity is projected on child nodes.",
+        states: [
+          ["unknown", "No root runtime edge has been established.", "gray"],
+          ["idle", "The root is loaded and not processing a turn.", "orange"],
+          ["active", "The root is processing a turn.", "green"],
+        ],
+        transitions: [
+          ["*", "exact session ID changes", "unknown", "reset", "A new rootState replaces the old session."],
+          ["*", "SessionStart", "idle", "hook", "Root hook."],
+          ["*", "root UserPromptSubmit", "active", "hook", "Also starts a new terminal-child cohort."],
+          ["*", "root PostToolUse", "active", "hook", "Runtime advances even when attention cannot yet clear."],
+          ["*", "root Stop", "idle", "hook", "Stop does not itself clear a pending prompt."],
+          ["idle", "new transcript activity after runtimeAt", "active", "level", "Re-readable tail correction."],
+          ["active", "new transcript interrupt after runtimeAt", "idle", "level", "Re-readable tail correction."],
+          ["*", "root pending transcript resolves resumed", "active", "level", "Clears the root writer's prompt latch."],
+          ["*", "root pending resolves interrupted or stale", "idle", "level", "Interrupt, unreadable-main TTL, or quiescent-writer cap."],
+          ["*", "PermissionRequest or child-only hook", "=", "hook", "Mutates attention or a child overlay, not root runtime."],
+        ],
+      },
+      {
+        id: "writer-attention",
+        label: "per-writer attention",
+        initial: "none",
+        note: "This is map[writer]PendingPrompt. The writer key is empty for the root and an exact child ID otherwise.",
+        states: [
+          ["none", "No pending human-owned prompt for this writer.", "gray"],
+          ["approval", "PermissionRequest for any non-question tool.", "red"],
+          ["user_input", "PermissionRequest for AskUserQuestion.", "red"],
+        ],
+        transitions: [
+          ["*", "PermissionRequest · other tool", "approval", "hook", "Creates or replaces only this writer's latch."],
+          ["*", "PermissionRequest · AskUserQuestion", "user_input", "hook", "Creates or replaces only this writer's latch."],
+          [["approval", "user_input"], "owned matching PostToolUse", "none", "hook", "Held for the root while fanout still reports in-flight work."],
+          [["approval", "user_input"], "writer transcript resumes", "none", "level", "ResolutionResumed."],
+          [["approval", "user_input"], "writer transcript interrupts", "none", "level", "ResolutionInterrupted."],
+          [["approval", "user_input"], "child becomes terminal", "none", "level", "The fanout snapshot closes only that child's prompt."],
+          [["approval", "user_input"], "unreadable main past PermissionDecayTTL", "none", "timer", "Configured bounded backstop."],
+          [["approval", "user_input"], "quiescent writer past PendingWriterStaleCap", "none", "timer", "Only when its tail does not still prove an unanswered tool."],
+          [["approval", "user_input"], "mismatched result, Stop, or unresolved tail", "=", "hold", "None proves that this exact prompt resolved."],
+          ["*", "exact session ID changes", "none", "reset", "The old session's writer map is retired."],
+        ],
+      },
+      {
+        id: "child-lifecycle",
+        label: "child lifecycle",
+        initial: "not_projected",
+        note: "Fanout artifacts own identity and lifecycle. Subagent hooks only invalidate the scan; activity hooks may overlay runtime after identity exists.",
+        states: [
+          ["not_projected", "No retained node in the current graph cohort.", "gray"],
+          ["pending", "Child artifact exists; transcript is not loaded yet.", "blue"],
+          ["running", "Transcript/workflow evidence says the child is live.", "green"],
+          ["completed", "Result or done evidence closed the child.", "gray"],
+          ["interrupted", "Quiescence force-closed the child.", "purple"],
+        ],
+        transitions: [
+          ["*", "artifact exists; transcript absent", "pending", "level", "fanout.Snapshot classification."],
+          ["*", "live transcript or workflow", "running", "level", "fanout.Snapshot classification."],
+          ["not_projected", "child PermissionRequest before artifact", "running", "hook", "A writer-owned prompt creates a bounded placeholder node."],
+          ["*", "result or done evidence", "completed", "level", "Terminal lifecycle suppresses stale runtime and attention."],
+          ["*", "child transcript stale past cap", "interrupted", "timer", "Conservative force-close."],
+          [["completed", "interrupted"], "next root UserPromptSubmit", "not_projected", "reset", "Clears the retained prior-turn terminal cohort."],
+          ["*", "SubagentStart or SubagentStop", "=", "hook", "Requests a rescan; never creates or closes topology directly."],
+          ["*", "known-child activity hook", "=", "hook", "Changes only the child's runtime overlay."],
+        ],
+      },
+    ],
   },
   {
-    id: "Working",
-    folds: "green",
-    group: "busy",
-    short: "A turn is in flight and no tool is outstanding.",
-    body: "The writer is producing tokens. The ordinary shape of work happening.",
-    you: "Nothing.",
-  },
-  {
-    id: "ToolInFlight",
-    folds: "green",
-    group: "busy",
-    short: "A tool was dispatched and its result has not come back.",
-    body: "Split out of Working only because its on-disk signature is Blocked's. See the twins below.",
-    you: "Nothing. The wait is machine-side.",
-    twin: true,
-  },
-  {
-    id: "Blocked",
-    folds: "red",
-    group: "wants you",
-    short: "A dispatched tool is gated on a human decision.",
-    body: "The only state a notification alone can establish, and the only one that folds to red.",
-    you: "Answer it. That writer is stopped until you do.",
-    twin: true,
-  },
-  {
-    id: "Ended",
-    folds: "orange",
-    group: "done",
-    short: "The turn finished — Stop fired, or the writer drained.",
-    body: "Work stopped on its own terms. Nothing is stuck and nothing is running.",
-    you: "Your move, when you can.",
-  },
-  {
-    id: "Interrupted",
-    folds: "orange",
-    group: "done",
-    short: "You stopped the turn, or a prompt was declined.",
-    body:
-      "Folds the same as Ended; the distinction is forensic, separating a decline from an " +
-      "approve.",
-    you: "Your move, when you can.",
-  },
-  {
-    id: "Dead",
-    folds: "hidden",
-    group: "gone",
-    short: "The writer no longer exists.",
-    body: "Absorbing. Anything that looks like its return is a new writer under a new key.",
-    you: "Nothing.",
+    id: "codex",
+    label: "Codex",
+    implementation: "internal/provider/codex graphState + codexHookRootState",
+    summary: "A read-only app-server owns topology and base node fields; exact hooks add bounded root latches, approval timers, and child overlays where that feed is insufficient.",
+    shape: "state = graphState(nodes[id]{baseRuntime,lifecycle,wait}) × hookRootState{session,retired,pending,approvals,overlays,queue}",
+    regions: [
+      {
+        id: "node-runtime",
+        label: "node runtime",
+        initial: "unknown",
+        note: "A newer hook can publish an immediate root edge. On later app-server samples, remembered hook fields fill only unknown/not_loaded roots and never outlive their original deadline.",
+        states: [
+          ["unknown", "No usable runtime, or an unclassified mechanical wait.", "gray"],
+          ["not_loaded", "Thread exists but this app-server has not loaded it.", "blue"],
+          ["idle", "Loaded, no active turn.", "orange"],
+          ["active", "Turn or hook activity is in flight.", "green"],
+          ["system_error", "Codex reported a runtime failure.", "purple"],
+        ],
+        transitions: [
+          ["*", "thread status · notLoaded", "not_loaded", "level", "Direct enum mapping."],
+          ["*", "thread status · idle", "idle", "level", "Direct enum mapping."],
+          ["*", "thread status · active or turn/started", "active", "level", "Direct enum mapping."],
+          ["*", "thread status · systemError", "system_error", "level", "Direct enum mapping."],
+          ["*", "unclassified waiting flag", "unknown", "level", "Raw waiting is neither green nor red without ownership evidence."],
+          ["*", "SessionStart · compact", "active", "hook", "Partial root projection."],
+          ["*", "SessionStart · non-compact", "idle", "hook", "startup/resume/clear settle for 250 ms before publication."],
+          ["*", "UserPromptSubmit, ordinary PreToolUse, or any PostToolUse", "active", "hook", "Partial root projection."],
+          ["*", "Stop", "idle", "hook", "Partial root projection."],
+          ["*", "request_user_input PreToolUse", "idle", "hook", "The question latch also sets attention=user_input."],
+          ["*", "generic PermissionRequest during grace", "active", "hook", "Ownership is unresolved; no red yet."],
+          ["*", "human-input PermissionRequest or approval timeout", "idle", "hook", "Attention carries the reason."],
+          ["*", "turn/completed", "=", "protocol", "Clears waits; a status update owns runtime."],
+        ],
+      },
+      {
+        id: "request-owner",
+        label: "per-request ownership",
+        initial: "resolved",
+        note: "This is requestEvidence.owner. Only human projects attention; automatic and ignored requests remain visible only as provider state/diagnostics.",
+        states: [
+          ["resolved", "No retained request with this request ID.", "gray"],
+          ["pending", "Request exists; human versus automatic owner is unknown.", "orange"],
+          ["human", "Confirmed human approval or blocking input.", "red"],
+          ["automatic", "Reviewer, guardian, or auto-review owns it.", "blue"],
+          ["ignored", "Input is nonblocking or auto-resolving.", "gray"],
+        ],
+        transitions: [
+          ["resolved", "approval request · unknown reviewer", "pending", "protocol", "Starts the 30 s classifier."],
+          ["resolved", "approval request · known user reviewer", "human", "protocol", "Publishes approval immediately."],
+          ["resolved", "approval request · auto/guardian evidence", "automatic", "protocol", "Suppresses human attention."],
+          ["resolved", "blocking requestUserInput or MCP elicitation", "human", "protocol", "Publishes user_input immediately."],
+          ["resolved", "nonblocking or auto-resolving input", "ignored", "protocol", "Never asks the operator."],
+          ["pending", "reviewer=user", "human", "protocol", "Explicit ownership evidence."],
+          ["pending", "reviewer=auto, guardian, or auto-review", "automatic", "protocol", "Explicit automatic ownership evidence."],
+          ["pending", "classification timeout", "human", "timer", "Request-backed ambiguity falls back to human."],
+          ["human", "late auto-review evidence after timeout", "automatic", "protocol", "Clears a fallback red."],
+          [["pending", "human", "automatic", "ignored"], "serverRequest/resolved or thread wait closes", "resolved", "protocol", "Also cleared by turn completion and thread removal."],
+        ],
+      },
+      {
+        id: "question-latch",
+        label: "hook question latch",
+        initial: "closed",
+        note: "This latch exists because the standard interactive CLI's question is not reconstructible from the disposable app-server.",
+        states: [
+          ["closed", "No exact request_user_input hook is outstanding.", "gray"],
+          ["open", "At least one exact request_user_input call is outstanding.", "red"],
+        ],
+        transitions: [
+          ["*", "request_user_input PreToolUse", "open", "hook", "Keyed by tool-use ID, otherwise writer/turn/tool/hash."],
+          ["open", "matching request_user_input PostToolUse", "closed", "hook", "Clears only matching entries; closes when the map is empty."],
+          ["open", "matching Stop", "closed", "hook", "Turn/writer-scoped; closes when the map is empty."],
+          ["open", "session rotation or root removal", "closed", "reset", "Retires the old session."],
+          ["open", "generic app-server snapshot", "=", "hold", "Cannot clear independently owned hook evidence."],
+          ["open", "daemon restart", "closed", "reset", "The latch is not reconstructed; status degrades to unknown."],
+        ],
+      },
+      {
+        id: "hook-approval",
+        label: "generic hook approval",
+        initial: "clear",
+        note: "A generic PermissionRequest cannot say whether the user or Auto-review owns the gate, so it receives a separate bounded grace machine.",
+        states: [
+          ["clear", "No generic hook gate is pending.", "gray"],
+          ["grace", "Gate observed; waiting for automatic progress or app-server evidence.", "orange"],
+          ["published", "Grace expired without contrary evidence; approval is red.", "red"],
+        ],
+        transitions: [
+          ["*", "generic PermissionRequest", "grace", "hook", "Starts or replaces a 30 s timer for the exact tool call."],
+          ["grace", "matching Pre/PostToolUse, Stop, or new turn", "clear", "hook", "Progress resolved the gate before red."],
+          ["grace", "newer app-server active with no attention", "clear", "level", "Structured evidence settles it as non-human."],
+          ["grace", "another proven human wait already exists", "clear", "level", "Avoids overwriting independently proven attention."],
+          ["grace", "30 s unresolved", "published", "timer", "Fallback publishes attention=approval."],
+          ["published", "matching progress, Stop, or new turn", "clear", "hook", "Owns the corresponding red-clear transition."],
+          [["grace", "published"], "session rotation or root removal", "clear", "reset", "Cancels the timer and retires the gate."],
+        ],
+      },
+      {
+        id: "child-hook",
+        label: "child hook overlay",
+        initial: "provider_owned",
+        note: "Hooks never create or reparent a Codex child. They are queued until a fresh app-server graph proves the exact non-root ID.",
+        states: [
+          ["provider_owned", "App-server fields are the current authority.", "blue"],
+          ["queued", "Exact child edge awaits topology proof.", "orange"],
+          ["active_overlay", "SubagentStart owns active/running fields temporarily.", "green"],
+          ["completed_overlay", "SubagentStop owns idle/completed fields until superseded.", "gray"],
+        ],
+        transitions: [
+          ["*", "SubagentStart or SubagentStop", "queued", "hook", "Root/session and agent ID must be exact; queue is bounded."],
+          ["queued", "fresh topology matches · SubagentStart", "active_overlay", "level", "Expires after at most 10 minutes."],
+          ["queued", "fresh topology matches · SubagentStop", "completed_overlay", "level", "Retains the completed child."],
+          ["queued", "no topology match for 10 minutes", "provider_owned", "timer", "The edge expires without inventing a node."],
+          ["active_overlay", "10 minute cap", "provider_owned", "timer", "Restores the last provider fields."],
+          [["active_overlay", "completed_overlay"], "provider field at least as new", "provider_owned", "level", "Supersedes only the fields the hook owned."],
+          [["active_overlay", "completed_overlay"], "complete snapshot omits child", "provider_owned", "level", "Drops the overlay with the omitted topology."],
+          ["completed_overlay", "later SubagentStart", "queued", "hook", "A proved later start can reopen the child."],
+        ],
+      },
+    ],
   },
 ];
 
-// ---------------------------------------------------------------------------
-// evidence
-//
-// Grouped by source, because the source is what BOUNDS what a kind can prove.
-// `proves` / `cannot` are the honest pair: every kind here is believed exactly
-// as far as its second line allows.
-// ---------------------------------------------------------------------------
-// Named for what a source IS, not for how Claude supplies it: the shape is the
-// adapter contract, and `claude` is what today's one instantiation happens to
-// use. A provider that cannot supply the notification source can never paint
-// red — the evidence kinds keep their shipped names because those are the
-// strings a contributor greps for in the daemon's log lines.
+const OLD_MODEL_DIVERGENCES = [
+  ["Provenance", "The seven-state table described the running daemon.", "It was executable code in unmerged commit 2040a91; it is not an ancestor of main."],
+  ["State shape", "One flat state per writer.", "Provider state is a product of runtime, attention ownership, lifecycle, timers, and keyed maps."],
+  ["Blocked", "A writer enters one Blocked state.", "Human attention is orthogonal to runtime. Codex first classifies human versus automatic ownership."],
+  ["ToolInFlight", "A shared state distinguished machine waits from human waits.", "No such shared state exists on main. Tool progress remains provider evidence, usually projected as runtime=active."],
+  ["Evidence", "Thirteen provider-neutral evidence kinds feed one total table.", "Claude hooks/transcripts/artifacts and Codex hooks/app-server notifications have different authority and recovery rules."],
+  ["Fold", "Any active writer makes green; any Blocked writer makes red.", "Only live-node attention makes red. Root activity/error precedes descendant work; a child needs affirmative liveness."],
+  ["End / death", "Ended, Interrupted, and Dead are writer states.", "Root idle is runtime; child completion/interruption is lifecycle; root process death removes the session outside the graph."],
+  ["Restart", "Blocked must survive every daemon restart.", "Claude restores writer keys. Codex's hook-only question latch is deliberately not reconstructible and degrades to unknown."],
+];
+
+const PROVIDER_ROWS = [
+  ["Graph authority", "Hooks + root/child transcripts + subagent/workflow artifacts.", "Read-only disposable codex app-server --stdio in auto mode; CLI >= 0.149.0. off leaves hook-only root projection."],
+  ["Root state", "Hooks provide edges; transcript reconciliation corrects them.", "Concrete app-server fields win; bounded exact hooks fill unavailable root fields."],
+  ["Attention", "PermissionRequest is keyed per writer; matching hooks/transcripts resolve only that writer.", "request_user_input is an exact hook latch; matching PostToolUse/Stop clears it. Request IDs and reviewer evidence classify structured waits; generic permission gets 30 s to resolve automatically."],
+  ["Children", "Artifacts own identity and lifecycle; SubagentStart/Stop only request a rescan.", "App-server must first prove exact topology. Matching start → active/running for ≤10 m; stop → retained idle/completed; a later start reopens. Hooks never create or reparent."],
+  ["Rotation / restart", "A new exact session drops the old root state. On daemon restart of the same session, persisted pending writer keys restore; correlators are re-earned.", "/clear advances the exact root and retires old IDs. Topology is resnapshotted; an in-memory question latch is not reconstructed."],
+  ["Bounds", "Observations are fresh for 15 s.", "App-server: 15 s fresh, 1 s active / 10 s idle polls. Hook fallback: active 10 m, attention 24 h, idle 7 d; startup settles for 250 ms."],
+  ["Degraded mode", "I/O failure retains a partial bounded graph; expiry reduces to unknown.", "The process stays discoverable and exact hooks can color the root; unproved children receive zero liveness."],
+];
+
 const SOURCES = [
-  {
-    id: "hook",
-    label: "Notification",
-    badge: "notify",
-    tag: "The agent tells us",
-    claude: "Hooks — Claude and Codex both",
-    strength: "Authoritative, and it names the writer it belongs to.",
-    weakness: "Edge-triggered: fires once, never repeats. A lost one is lost.",
-  },
-  {
-    id: "transcript",
-    label: "Agent Log",
-    badge: "log",
-    tag: "We read what the writer wrote",
-    claude: "Claude's transcript tail; Codex's rollout file",
-    strength: "Level-triggered: re-readable every tick, and survives a restart.",
-    weakness: "Ambiguous by construction — the same bytes fit more than one state.",
-  },
-  {
-    id: "clock/liveness",
-    label: "Clock & Liveness",
-    badge: "clock",
-    tag: "Time passed, or the process is gone",
-    claude: "PID state and file mtimes",
-    strength: "Cannot be wrong about absence.",
-    weakness: "Proves only that something stopped happening.",
-  },
+  ["codex_app_server", "Codex", 4, "complete structural authority; exact field ownership still applies"],
+  ["hook", "both", 3, "exact immediate edge; partial and bounded"],
+  ["claude_transcript", "Claude", 4, "re-readable transcript and artifact authority"],
+  ["codex_rollout", "Codex", 2, "reserved source; ordinary observation does not emit it"],
+  ["restored_last_known", "Claude", 1, "bounded startup continuity"],
 ];
 
-const EVIDENCE = [
-  {
-    id: "UserPromptSubmit", src: "hook",
-    gloss: "You submitted a turn to this writer.",
-  },
-  {
-    id: "PermissionRequest", src: "hook", key: true,
-    gloss: "A tool needs your approval. The only evidence that can establish Blocked, and it never repeats.",
-  },
-  {
-    id: "ToolMatched", src: "hook",
-    gloss:
-      "A tool came back and correlates to this writer's own pending prompt: same writer, same " +
-      "tool, input hashes agreeing or absent on both sides.",
-  },
-  {
-    id: "ToolUncorrelated", src: "hook",
-    gloss:
-      "A different tool of this writer's came back. Agents dispatch in parallel, so a blocked " +
-      "writer completing a sibling is routine. Must never resolve a prompt.",
-  },
-  { id: "Stop", src: "hook", gloss: "This writer's turn ended." },
-  {
-    id: "TailActivity", src: "transcript",
-    gloss:
-      "The writer wrote something — but not what. A blocked turn keeps emitting for seconds " +
-      "after its prompt.",
-  },
-  {
-    id: "TailAllMatched", src: "transcript", key: true,
-    gloss:
-      "Every dispatched tool has a result. The only predicate strong enough to prove a gate opened.",
-  },
-  {
-    id: "TailUnmatched", src: "transcript",
-    gloss:
-      "A dispatched tool has no result. The shared signature — fits ToolInFlight and Blocked " +
-      "alike, so it may never move a writer into or out of Blocked.",
-  },
-  { id: "TailInterrupt", src: "transcript", gloss: "An interrupt notice in the writer's own file." },
-  {
-    id: "TailUnreadable", src: "transcript",
-    gloss: "The log cannot answer: missing, truncated, or a tail window that missed the dispatch. Fails closed.",
-  },
-  {
-    id: "QuiescentPastCap", src: "clock/liveness",
-    gloss: "Silent past its cap. The backstop that stops a crashed subagent's prompt latching red forever.",
-  },
-  { id: "Gone", src: "clock/liveness", universal: "Dead", gloss: "Proof the writer no longer exists." },
-  {
-    id: "SessionRotated", src: "clock/liveness", universal: "Unknown",
-    gloss: "A context reset or fork changed the session id under the same pid, retiring every prompt recorded against it.",
-  },
+const LIMITS = [
+  ["Codex ambiguous approval", "After a 30 s ownership grace, an unresolved generic gate may fall back to approval-red without semantic human evidence."],
+  ["Codex question restart", "The hook-only request_user_input latch is in memory; restart degrades it to unknown."],
+  ["Codex structural children", "not_loaded/unknown topology is visible but contributes no liveness without concrete state or an exact matched child hook."],
+  ["Claude evidence fusion", "No single graph stream exists; hooks, transcripts, artifacts, workflows, and bounded stale caps are composed."],
+  ["Errors", "system_error/errored remain explicit, but root system_error currently uses gray rather than a dedicated chip color."],
+  ["History", "delegating is a compact summary edge; dormant is separately derived by slicing working intervals against child spans. Both attention kinds flatten to permission."],
 ];
 
-// ---------------------------------------------------------------------------
-// the fold ladder — layer 3, priority order, first match wins
-// ---------------------------------------------------------------------------
-const LADDER = [
-  { rule: "case1-gone", cond: "Liveness is gone", color: "hidden", say: "No chip at all" },
-  { rule: "case2-suspended", cond: "Liveness is suspended", color: "suspended", say: "You paused this yourself" },
-  { rule: "fold-blocked", cond: "Any writer is Blocked", color: "red", say: "Your decision is blocking work" },
-  { rule: "fold-active", cond: "Any writer is Working or ToolInFlight", color: "green", say: "Work is happening — leave it" },
-  { rule: "case13-unknown", cond: "Every writer is Unknown, or there are none", color: "gray", say: "Nothing observed yet" },
-  { rule: "fold-quiet", cond: "Otherwise", color: "orange", say: "Stopped; wants a new prompt" },
-];
+const VALID = {
+  runtime: new Set(AXES.runtime.map((v) => v[0])),
+  attention: new Set(AXES.attention.map((v) => v[0])),
+  lifecycle: new Set(AXES.lifecycle.map((v) => v[0])),
+};
 
-// How a fold color shows up on the timeline you were just looking at. The
-// dashboard's lane vocabulary predates this model and is not going to be
-// renamed, so the mapping is the page's job.
-// These are the status names in docs/provider-contract.md, which is what every
-// provider emits — so the glosses are written in plain terms rather than in
-// writer-state vocabulary. This is the first thing on the page; the reader has
-// not met a "writer" yet.
-const LANE_MAP = [
-  { color: "green", lane: "working", note: "The session is producing." },
-  { color: "green", lane: "dormant", note: "It handed off; the subagent bar underneath carries the work.", badge: "delegating" },
-  { color: "orange", lane: "idle", note: "Alive, waiting on a prompt from you." },
-  // dim is a render flag, not a fold color: an away-parked session still folds
-  // orange — the dashboard darkens it because the operator's absence, not the
-  // session's state, is what changed.
-  { color: "orange", dim: true, lane: "idle (away)", note: "Parked while you were away (overnight, typically) — darkened, and off the idle clock." },
-  { color: "red", lane: "permission", note: "Waiting on your approval — the only status that asks for anything." },
-  { color: "suspended", lane: "suspended", note: "You paused the process (Ctrl-Z)." },
-  { color: "gray", lane: "unknown", note: "Nothing observed. Drawn as an empty lane." },
-];
-
-// ---------------------------------------------------------------------------
-// TRANSITIONS — [from, evidence, to, isHold, why, shippedRuleId]
-// Generated. See the file header.
-// ---------------------------------------------------------------------------
-const TRANSITIONS = [
-  ["Unknown", "UserPromptSubmit", "Working", 0, "the user submitted a turn", "hook edge"],
-  ["Unknown", "PermissionRequest", "Blocked", 0, "the only evidence that establishes Blocked", "hook edge"],
-  ["Unknown", "ToolMatched", "Working", 0, "a tool completed, so the writer is live", "hook edge"],
-  ["Unknown", "ToolUncorrelated", "Working", 0, "a tool completed, so the writer is live", "hook edge"],
-  ["Unknown", "Stop", "Ended", 0, "the turn ended", "hook edge"],
-  ["Unknown", "TailActivity", "Working", 0, "the writer's own file grew", "resume-activity"],
-  ["Unknown", "TailAllMatched", "Unknown", 1, "proves only that no tool is outstanding — silent on whether a turn is running", ""],
-  ["Unknown", "TailUnmatched", "ToolInFlight", 0, "a tool is dispatched and unreturned", ""],
-  ["Unknown", "TailInterrupt", "Interrupted", 0, "the user stopped the turn", "case6-interrupt"],
-  ["Unknown", "TailUnreadable", "Unknown", 1, "no information; fail closed", ""],
-  ["Unknown", "QuiescentPastCap", "Unknown", 1, "already the least committal state", ""],
-  ["Working", "UserPromptSubmit", "Working", 1, "already working", "hook edge"],
-  ["Working", "PermissionRequest", "Blocked", 0, "a dispatched tool is gated on the user", "hook edge"],
-  ["Working", "ToolMatched", "Working", 1, "a tool completed and the turn continues", "hook edge"],
-  ["Working", "ToolUncorrelated", "Working", 1, "a tool completed and the turn continues", "hook edge"],
-  ["Working", "Stop", "Ended", 0, "the turn ended", "hook edge"],
-  ["Working", "TailActivity", "Working", 1, "still producing", "resume-activity"],
-  ["Working", "TailAllMatched", "Working", 1, "no tool outstanding; the turn continues", ""],
-  ["Working", "TailUnmatched", "ToolInFlight", 0, "a tool is dispatched and unreturned", ""],
-  ["Working", "TailInterrupt", "Interrupted", 0, "the user stopped the turn", "case6-interrupt"],
-  ["Working", "TailUnreadable", "Working", 1, "no information; fail closed", ""],
-  ["Working", "QuiescentPastCap", "Ended", 0, "a writer silent past the cap is not working any more", "case6-idle-title"],
-  ["ToolInFlight", "UserPromptSubmit", "Working", 0, "a new turn supersedes the outstanding call", "hook edge"],
-  ["ToolInFlight", "PermissionRequest", "Blocked", 0, "the gate is discovered after dispatch — the hook can trail the tool_use", "hook edge"],
-  ["ToolInFlight", "ToolMatched", "Working", 0, "the outstanding call returned", "hook edge"],
-  ["ToolInFlight", "ToolUncorrelated", "ToolInFlight", 1, "one tool returned, but parallel dispatch means others may remain; the tail decides", "hook edge"],
-  ["ToolInFlight", "Stop", "Ended", 0, "the turn ended", "hook edge"],
-  ["ToolInFlight", "TailActivity", "ToolInFlight", 1, "content grew, but the dispatched call is still out", ""],
-  ["ToolInFlight", "TailAllMatched", "Working", 0, "every dispatched call returned", ""],
-  ["ToolInFlight", "TailUnmatched", "ToolInFlight", 1, "still waiting on a call", ""],
-  ["ToolInFlight", "TailInterrupt", "Interrupted", 0, "the user stopped the turn", "case6-interrupt"],
-  ["ToolInFlight", "TailUnreadable", "ToolInFlight", 1, "no information; fail closed", ""],
-  ["ToolInFlight", "QuiescentPastCap", "Ended", 0, "a call outstanding past the cap is abandoned, not running", ""],
-  ["Blocked", "UserPromptSubmit", "Blocked", 1, "typing is not answering — queueing a message while a prompt waits is routine (plan Q6)", "case12-hold-nontool-event"],
-  ["Blocked", "PermissionRequest", "Blocked", 1, "a second prompt for the same writer; still blocked", ""],
-  ["Blocked", "ToolMatched", "Working", 0, "the approved call itself completed — the hook-speed approve path", "case9-approve-toolmatch"],
-  ["Blocked", "ToolUncorrelated", "Blocked", 1, "a sibling or differing call is not this prompt; parallel dispatch makes this routine", "case12-hold-bare-result / case12-hold-teammate-collision / case12-hold-input-mismatch"],
-  ["Blocked", "Stop", "Blocked", 1, "the turn ending says nothing about the prompt (defect 5)", "case12-hold-nontool-event"],
-  ["Blocked", "TailActivity", "Blocked", 1, "activity does not distinguish Blocked from ToolInFlight — the prompt's OWN turn produces it", ""],
-  ["Blocked", "TailAllMatched", "Working", 0, "the sound predicate: every dispatched call returned, so the gate opened", "case9-approve-resume"],
-  ["Blocked", "TailUnmatched", "Blocked", 1, "the shared signature — consistent with Blocked, so it proves nothing and must not move", ""],
-  ["Blocked", "TailInterrupt", "Interrupted", 0, "the prompt was declined or the turn interrupted", "case10-decline-idle / case11-decline-delegating"],
-  ["Blocked", "TailUnreadable", "Blocked", 1, "no information; fail closed and let the cap bound it", "case15-ttl-backstop"],
-  ["Blocked", "QuiescentPastCap", "Ended", 0, "an unanswerable prompt must not latch red forever (case 19)", "case19-stale-writer-backstop"],
-  ["Ended", "UserPromptSubmit", "Working", 0, "a new turn began", "hook edge"],
-  ["Ended", "PermissionRequest", "Blocked", 0, "the writer woke and immediately gated", "hook edge"],
-  ["Ended", "ToolMatched", "Working", 0, "the writer resumed and ran a tool", "hook edge"],
-  ["Ended", "ToolUncorrelated", "Working", 0, "the writer resumed and ran a tool", "hook edge"],
-  ["Ended", "Stop", "Ended", 1, "already ended", "hook edge"],
-  ["Ended", "TailActivity", "Working", 0, "the writer resumed", "resume-activity"],
-  ["Ended", "TailAllMatched", "Ended", 1, "no tool outstanding, consistent with a finished turn", ""],
-  ["Ended", "TailUnmatched", "ToolInFlight", 0, "the writer resumed and dispatched", "resume-activity"],
-  ["Ended", "TailInterrupt", "Interrupted", 0, "record the stop kind; folds identically", "case6-interrupt"],
-  ["Ended", "TailUnreadable", "Ended", 1, "no information; fail closed", ""],
-  ["Ended", "QuiescentPastCap", "Ended", 1, "already terminal for color purposes", ""],
-  ["Interrupted", "UserPromptSubmit", "Working", 0, "a new turn began", "hook edge"],
-  ["Interrupted", "PermissionRequest", "Blocked", 0, "the writer woke and immediately gated", "hook edge"],
-  ["Interrupted", "ToolMatched", "Working", 0, "the writer resumed and ran a tool", "hook edge"],
-  ["Interrupted", "ToolUncorrelated", "Working", 0, "the writer resumed and ran a tool", "hook edge"],
-  ["Interrupted", "Stop", "Ended", 0, "the interrupted turn closed out", "hook edge"],
-  ["Interrupted", "TailActivity", "Working", 0, "the writer resumed", "resume-activity"],
-  ["Interrupted", "TailAllMatched", "Interrupted", 1, "no tool outstanding, consistent with a stopped turn", ""],
-  ["Interrupted", "TailUnmatched", "ToolInFlight", 0, "the writer resumed and dispatched", "resume-activity"],
-  ["Interrupted", "TailInterrupt", "Interrupted", 1, "already interrupted", "case6-interrupt"],
-  ["Interrupted", "TailUnreadable", "Interrupted", 1, "no information; fail closed", ""],
-  ["Interrupted", "QuiescentPastCap", "Interrupted", 1, "already terminal for color purposes", ""],
-];
-
-// Cells where the SHIPPED daemon does something different from the model above.
-// These are defects, not design choices, and the page marks them in the matrix
-// rather than letting them read as ordinary rows.
-const DIVERGENCES = [
-  {
-    from: "Working", ev: "QuiescentPastCap", to: "Ended", shipped: "case6-idle-title",
-    note:
-      "The shipped demotion reads the session's terminal-pane title, which cannot be attributed " +
-      "to a writer: with a subagent live it demotes on the parent's idle glyph regardless of " +
-      "which writer went quiet.",
-  },
-  {
-    from: "Blocked", ev: "TailAllMatched", to: "Working", shipped: "case9-approve-resume",
-    note:
-      "The shipped rule fires on any assistant line dated after the prompt rather than on " +
-      "all-matched, so a parallel auto-approved sibling's line drops the red on the next tick. " +
-      "Reproduced against the 2026-08-05 transcript: cleared at age 5s, prompt unanswered for a " +
-      "further 3m07s.",
-  },
-];
-
-// State changes the model defines that no shipped rule implements. All four are
-// ToolInFlight cells, which is the finding: the daemon has no representation of
-// that state at all, which is exactly why it cannot tell Blocked from a tool
-// that is merely running.
-const GAPS = [
-  { from: "Unknown", ev: "TailUnmatched", to: "ToolInFlight", why: "a tool is dispatched and unreturned" },
-  { from: "Working", ev: "TailUnmatched", to: "ToolInFlight", why: "a tool is dispatched and unreturned" },
-  { from: "ToolInFlight", ev: "TailAllMatched", to: "Working", why: "every dispatched call returned" },
-  { from: "ToolInFlight", ev: "QuiescentPastCap", to: "Ended", why: "a call outstanding past the cap is abandoned, not running" },
-];
-
-// ---------------------------------------------------------------------------
-// derived indexes
-// ---------------------------------------------------------------------------
-
-// The live states and evidence kinds, in the order the diagram and the matrix
-// both walk them. Dead is absent from the row set because it is absorbing and
-// reached only by a universal rule; Gone and SessionRotated are absent from the
-// column set for the same reason — a column of six identical cells teaches
-// nothing the rule strip above it does not.
-const LIVE_STATES = STATES.filter((s) => s.id !== "Dead").map((s) => s.id);
-const LIVE_EVIDENCE = EVIDENCE.filter((e) => !e.universal);
-
-// The tuples above, as records — so no consumer has to know the table is
-// stored positionally — plus a (from, evidence) index for O(1) lookup.
-const ROWS = TRANSITIONS.map(([from, ev, to, hold, why, shipped]) => ({
-  from, ev, to, hold: !!hold, why, shipped,
-}));
-const TBL = new Map(ROWS.map((r) => [r.from + "|" + r.ev, r]));
-
-function transitionFor(from, ev) { return TBL.get(from + "|" + ev); }
-function divergenceFor(from, ev) { return DIVERGENCES.find((d) => d.from === from && d.ev === ev); }
-function gapFor(from, ev) { return GAPS.find((g) => g.from === from && g.ev === ev); }
-
-// applyEvidence is the per-writer transition function, mirroring
-// writerstate.Apply: three universal rules first, then the table. Total by
-// construction — an unlisted cell throws rather than guessing, because a
-// missing cell is exactly the class of gap this model exists to make
-// impossible.
-function applyEvidence(state, ev) {
-  if (state === "Dead") {
-    return { to: "Dead", hold: true, why: "a gone writer never returns; a new writer gets a new key" };
-  }
-  if (ev === "Gone") {
-    return { to: "Dead", hold: false, why: "the writer no longer exists" };
-  }
-  if (ev === "SessionRotated") {
-    return {
-      to: "Unknown", hold: state === "Unknown",
-      why: "a /clear or fork retires every prompt recorded under the old session id",
-    };
-  }
-  const t = transitionFor(state, ev);
-  if (!t) throw new Error(`states-model: no transition for (${state}, ${ev})`);
-  return t;
+function canonicalNode(node) {
+  node = node || {};
+  return {
+    ...node,
+    id: String(node.id || ""),
+    parentId: String(node.parentId || ""),
+    nickname: String(node.nickname || ""),
+    role: String(node.role || ""),
+    runtime: VALID.runtime.has(node.runtime) ? node.runtime : "unknown",
+    attention: VALID.attention.has(node.attention) ? node.attention : "none",
+    lifecycle: VALID.lifecycle.has(node.lifecycle) ? node.lifecycle : "unknown",
+  };
 }
 
-// fold maps the session's belief onto a chip color, mirroring writerstate.Fold:
-// pure, total, and with no memory. The keys are sorted so the writer NAMED as
-// the reason is the same one on every tick — a verdict that permutes between
-// ticks is unreadable and undiffable.
-function fold(writers, live) {
-  if (live === "gone") return { color: "hidden", rule: "case1-gone" };
-  if (live === "suspended") return { color: "suspended", rule: "case2-suspended" };
-
-  const keys = Object.keys(writers).sort();
-
-  for (const k of keys) {
-    if (writers[k] === "Blocked") return { color: "red", rule: "fold-blocked", writer: k };
+// Exact root, unique IDs, explicit parent chains, no cycles, deterministic
+// root-first depth-first order: the same invariants as agentgraph.Normalize.
+function normalizeGraph(graph) {
+  graph = graph || {};
+  const rootId = String(graph.rootId || "");
+  const raw = Array.isArray(graph.nodes) ? graph.nodes : [];
+  const nodes = raw.map(canonicalNode);
+  if (!rootId) throw new Error("agent graph root is missing");
+  const byId = new Map();
+  for (const node of nodes) {
+    if (!node.id) throw new Error("agent graph node ID is empty");
+    if (byId.has(node.id)) throw new Error("agent graph node ID is duplicated");
+    byId.set(node.id, node);
   }
-  for (const k of keys) {
-    if (writers[k] === "Working" || writers[k] === "ToolInFlight") {
-      return { color: "green", rule: "fold-active", writer: k, delegating: delegating(writers, k) };
+  const root = byId.get(rootId);
+  if (!root) throw new Error("agent graph root is missing");
+  if (root.parentId) throw new Error("agent graph root has a parent");
+  for (const node of nodes) {
+    if (node.id === rootId) continue;
+    if (!node.parentId) throw new Error("agent graph node is orphaned");
+    const seen = new Set([node.id]);
+    let parent = node.parentId;
+    while (parent !== rootId) {
+      if (seen.has(parent)) throw new Error("agent graph contains a cycle");
+      seen.add(parent);
+      const next = byId.get(parent);
+      if (!next) throw new Error("agent graph node is orphaned");
+      parent = next.parentId;
     }
   }
-  // Every writer Unknown — or no writers at all — is "we have no idea", which
-  // is its own color. Guessing working or idle here is the confident-wrong-
-  // guess error the model names as its own class.
-  if (keys.every((k) => writers[k] === "Unknown")) return { color: "gray", rule: "case13-unknown" };
-  return { color: "orange", rule: "fold-quiet" };
-}
-
-// delegating reports the shape where the writer carrying the green is a
-// teammate while the main thread ("" by convention) has finished. Purely a
-// rendering hint — the fold already returns green for it without a special case.
-function delegating(writers, active) {
-  if (active === "") return false;
-  const main = writers[""];
-  if (main === undefined) return true;
-  return main !== "Working" && main !== "ToolInFlight";
-}
-
-  return {
-    STATES, SOURCES, EVIDENCE, LADDER, LANE_MAP,
-    TRANSITIONS, ROWS, DIVERGENCES, GAPS,
-    LIVE_STATES, LIVE_EVIDENCE,
-    transitionFor, divergenceFor, gapFor, applyEvidence, fold, delegating,
+  const children = new Map();
+  for (const node of nodes) {
+    if (node.id === rootId) continue;
+    if (!children.has(node.parentId)) children.set(node.parentId, []);
+    children.get(node.parentId).push(node);
+  }
+  const lexical = (a, b) => {
+    const left = Array.from(a), right = Array.from(b);
+    for (let i = 0; i < Math.min(left.length, right.length); i++) {
+      const delta = left[i].codePointAt(0) - right[i].codePointAt(0);
+      if (delta) return delta;
+    }
+    return left.length - right.length;
   };
+  const compare = (a, b) => lexical(a.nickname, b.nickname) || lexical(a.role, b.role) || lexical(a.id, b.id);
+  for (const list of children.values()) list.sort(compare);
+  const ordered = [root];
+  const append = (id) => { for (const child of children.get(id) || []) { ordered.push(child); append(child.id); } };
+  append(rootId);
+  return { ...graph, rootId, root, children: ordered.slice(1), nodes: ordered };
+}
+
+function positivelyLive(node) {
+  node = canonicalNode(node);
+  if (TERMINAL.has(node.lifecycle)) return false;
+  if (node.attention === "approval" || node.attention === "user_input") return true;
+  if (node.runtime === "active" || node.runtime === "idle") return true;
+  return node.lifecycle === "pending" || node.lifecycle === "running";
+}
+
+function isFresh(graph, now) {
+  const observed = Date.parse(graph?.observedAt || graph?.observed_at || "");
+  const until = Date.parse(graph?.freshUntil || graph?.fresh_until || "");
+  now = now instanceof Date ? now.getTime() : Number.isFinite(now) ? now : Date.now();
+  return Number.isFinite(observed) && Number.isFinite(until) && now >= observed && now < until;
+}
+
+function verdict(rule, color, status, extra) {
+  return {
+    rule, color, status, runtime: "unknown", attention: "none",
+    liveChildren: 0, waitingNodes: 0, approvalNodes: 0, userInputNodes: 0, errorNodes: 0,
+    ...(extra || {}),
+  };
+}
+
+const DERIVED_KEYS = [
+  "runtime", "attention", "status", "liveChildren", "waitingNodes",
+  "approvalNodes", "userInputNodes", "errorNodes",
+];
+
+function stampSince(next, prior, now) {
+  const unchanged = prior?.since && DERIVED_KEYS.every((key) => next[key] === prior[key]);
+  const at = now instanceof Date ? now.getTime() : Number.isFinite(now) ? now : Date.now();
+  next.since = unchanged ? prior.since : new Date(at).toISOString();
+  return next;
+}
+
+function reduceGraph(graph, options) {
+  options = options || {};
+  if (options.processState === "gone") return verdict("process-gone", "hidden", "");
+  if (options.processState === "suspended") return verdict("process-suspended", "suspended", "suspended");
+  const finish = (next) => stampSince(next, options.prior, options.now);
+  if (!isFresh(graph, options.now)) return finish(verdict("graph-not-fresh", "gray", ""));
+  let normalized;
+  try {
+    normalized = normalizeGraph(graph);
+  } catch (_) {
+    return finish(verdict("graph-not-fresh", "gray", ""));
+  }
+  const root = normalized.root;
+  let liveChildren = 0, approvalNodes = 0, userInputNodes = 0, errorNodes = 0;
+  let workingChild = false;
+  for (const node of normalized.nodes) {
+    const isRoot = node.id === normalized.rootId;
+    const live = isRoot || positivelyLive(node);
+    if (!isRoot && live) {
+      liveChildren++;
+      if (node.runtime === "active" || node.lifecycle === "pending" || node.lifecycle === "running") workingChild = true;
+    }
+    if (live && node.attention === "approval") approvalNodes++;
+    if (live && node.attention === "user_input") userInputNodes++;
+    if (node.runtime === "system_error" || node.lifecycle === "errored") errorNodes++;
+  }
+  const summary = {
+    runtime: root.runtime, liveChildren, approvalNodes, userInputNodes, errorNodes,
+    waitingNodes: approvalNodes + userInputNodes,
+  };
+  if (approvalNodes) return finish(verdict("live-approval", "red", "permission", { ...summary, attention: "approval" }));
+  if (userInputNodes) return finish(verdict("live-user-input", "red", "permission", { ...summary, attention: "user_input" }));
+  if (root.runtime === "active") return finish(verdict("root-active", "green", "working", summary));
+  if (root.runtime === "system_error") return finish(verdict("root-system-error", "gray", "", summary));
+  if (workingChild) return finish(verdict("working-descendant", "green", "delegating", summary));
+  if (root.runtime === "idle") return finish(verdict("root-idle", "orange", "idle", summary));
+  return finish(verdict("fallback-unknown", "gray", "", summary));
+}
+
+return {
+  AXES, TERMINAL, RULES, LANES, PIPELINE, PROVIDER_MACHINES,
+  OLD_MODEL_DIVERGENCES, PROVIDER_ROWS, SOURCES, LIMITS,
+  canonicalNode, normalizeGraph, positivelyLive, isFresh, stampSince, reduceGraph,
+};
 });
