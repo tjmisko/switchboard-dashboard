@@ -290,6 +290,24 @@ are harvested verbatim from the session's `subagents/` metadata (falling back to
 The condenser sees only the digest, never the raw transcript, so the `claude -p`
 call stays cheap and grounded.
 
+**The summarizer runs with no tools.** It is spawned as `claude -p --model <m>
+--tools "" --restricted --strict-mcp-config`: `--tools ""` disables every
+built-in tool, and `--restricted` makes the child ignore user, project and local
+settings files so the constraint does not depend on what your own
+`settings.json` grants. It reads a prompt on stdin and returns JSON; it has no
+use for a tool, so it is given none. This is deliberately a property of the argv
+rather than of configuration — fencing an agent is a configuration, and
+configurations are got wrong. `claudeArgv` in `internal/sessiondigest/condense.go`
+is the whole of the guarantee, and a test asserts it.
+
+Its reply is checked before it is believed. `Summary.Validate` restates the
+bounds the prompt states to the model — kebab-case name of at most six words, a
+description under 120 characters, each task a clause under 120 — and refuses a
+reply that breaks one, naming the field. A refusal is an ordinary failure: the
+record goes unstamped and is retried next run, with `summaryRejectedReason` and
+`summaryRejectedAt` recording why. Those two fields are provenance, never
+lifecycle — see the retry invariant below.
+
 Runs are incremental: digests rebuild when the transcript is newer than the
 record, summaries generate when missing or written by an older schema version
 (`-force` regenerates everything), transcripts
@@ -298,6 +316,16 @@ sessions with no extractable signal are never sent to the model. The
 summarizer's own `claude -p` transcripts are excluded from scanning. To keep the
 archive current automatically, wire `scripts/session-summary-hook` into a
 `SessionEnd` hook in `~/.claude/settings.json` (instructions in the script).
+
+**A crashed condense is self-healing, and that is load-bearing.** `NeedsCondense`
+decides staleness purely from the record's content — no summary, an older schema
+version, or a digest hash that no longer matches — and `CondenseRecord` mutates
+the record only *after* the model returns. So nothing is ever marked "in
+progress", and a run killed mid-`claude -p` leaves a record that simply looks
+unfinished and is retried. Worth knowing before adding a status field: a
+persisted in-progress marker would turn every crash into a record that is stuck
+until someone edits it by hand. The refusal fields above are deliberately kept
+out of `NeedsCondense` for exactly this reason, and a test pins it.
 
 ### Token counts
 
@@ -465,6 +493,12 @@ ready-made helper for the common case, summing one lane's own intervals.
 Providers this repo compiles itself (arachne) run the same check with the caps in
 `internal/timeline/suspect.go`; a provider that omits the fields entirely is
 merged exactly as before, never silently clipped.
+
+[`docs/ghost-lanes.md`](docs/ghost-lanes.md) records how the defect these caps
+guard against was diagnosed, including the two shapes that look identical to it
+and are not. [`docs/view-time-repair.md`](docs/view-time-repair.md) is a shelved
+design for repairing a bad lane by hand without touching the producer's log —
+not implemented, kept for the failure cases it works out.
 
 ## Development
 
