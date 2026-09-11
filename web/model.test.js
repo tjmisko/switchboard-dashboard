@@ -8,7 +8,8 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
-  laneIdentity, rawSessionId, laneProvider, providerLabel, providerLegend, adaptProviderTimeline,
+  laneIdentity, rawSessionId, laneProvider, providerLabel, billingProviderLabel, providerLegend, adaptProviderTimeline,
+  normalizedCost, apiEquivalentCost,
   leadLabel, nameSegments, buildBars, spanInefficiency, switchArrivals,
   deflickerIntervals, deflickerLanes, FLICKER_MS,
   presenceSplitMs, awayIdleMs, packLanes,
@@ -704,12 +705,21 @@ test("projectHoursMs parts with unparseable lane starts sort last with null star
 
 test("projectHoursMs sums cost over the lanes that contributed the time", () => {
   const lanes = [
-    { project: "sb", start: at(0), cost_usd: 4.5, intervals: [interval("working", ms(0), ms(10))] },
-    { project: "sb", start: at(20), cost_usd: 1.25, intervals: [interval("working", ms(20), ms(30))] },
+    { project: "sb", start: at(0), cost: { api_equivalent_usd: 4.5, status: "estimated" }, intervals: [interval("working", ms(0), ms(10))] },
+    { project: "sb", start: at(20), cost: { api_equivalent_usd: 1.25, status: "estimated" }, intervals: [interval("working", ms(20), ms(30))] },
   ];
   const row = projectHoursMs(lanes)[0];
   assert.equal(row.costUsd, 5.75);
   assert.deepEqual(row.parts.map((p) => p.costUsd), [4.5, 1.25]);
+});
+
+test("projectHoursMs uses canonical API-equivalent cost before the legacy alias", () => {
+  const lanes = [{
+    project: "sb", start: at(0), cost_usd: 99,
+    cost: { api_equivalent_usd: 2.75, status: "estimated" },
+    intervals: [interval("working", ms(0), ms(10))],
+  }];
+  assert.equal(projectHoursMs(lanes)[0].costUsd, 2.75);
 });
 
 test("projectHoursMs reports costUsd null when no contributing lane recorded a cost", () => {
@@ -724,8 +734,8 @@ test("projectHoursMs cost counts only lanes that contributed work", () => {
   // a part of the stack, so its spend is not in the row's total either — the
   // total always equals the sum of the parts drawn under it.
   const lanes = [
-    { project: "sb", start: at(0), cost_usd: 2, intervals: [interval("working", ms(0), ms(10))] },
-    { project: "sb", start: at(20), cost_usd: 99, intervals: [interval("idle", ms(20), ms(30))] },
+    { project: "sb", start: at(0), cost: { api_equivalent_usd: 2, status: "estimated" }, intervals: [interval("working", ms(0), ms(10))] },
+    { project: "sb", start: at(20), cost: { api_equivalent_usd: 99, status: "estimated" }, intervals: [interval("idle", ms(20), ms(30))] },
   ];
   const row = projectHoursMs(lanes)[0];
   assert.equal(row.costUsd, 2);
@@ -736,7 +746,7 @@ test("projectHoursMs keeps a suspect lane's full cost while clipping its time", 
   // the evidence bound is a claim about observed TIME; the tokens were bought
   // either way, so the dollars are not clipped with the tail.
   const lanes = [{
-    project: "sb", start: at(0), cost_usd: 3,
+    project: "sb", start: at(0), cost: { api_equivalent_usd: 3, status: "estimated" },
     suspect: true, suspect_since: at(10),
     intervals: [interval("working", ms(0), ms(60))],
   }];
@@ -979,10 +989,124 @@ test("laneProvider should distinguish Codex from Claude inside one switchboard s
   assert.equal(laneProvider({ provider: "arachne", agent: "opus" }), "arachne");
 });
 
-test("providerLabel should give Codex its product and company identity", () => {
-  assert.equal(providerLabel("codex"), "Codex / OpenAI");
+test("providerLabel should identify the agent client without assuming its execution provider", () => {
+  assert.equal(providerLabel("codex"), "Codex");
   assert.equal(providerLabel("claude"), "Claude");
   assert.equal(providerLabel("arachne"), "Arachne");
+});
+
+test("billingProviderLabel should identify client and execution provider separately", () => {
+  assert.equal(billingProviderLabel({ agent: "codex", execution_provider: "openai" }), "Codex via OpenAI");
+  assert.equal(billingProviderLabel({ agent: "claude", execution_provider: "aws-bedrock" }), "Claude via Amazon Bedrock");
+  assert.equal(billingProviderLabel({ agent: "codex" }), "Codex");
+  assert.equal(billingProviderLabel({ agent: "codex", pricing_groups: [
+    { identity: { execution_provider: "openai" } },
+  ] }), "Codex via OpenAI");
+  assert.equal(billingProviderLabel({ agent: "codex", pricing_groups: [
+    { identity: { execution_provider: "openai" } },
+    { identity: { execution_provider: "azure-openai" } },
+  ] }), "Codex via multiple providers");
+});
+
+test("normalizedCost should preserve canonical billing concepts and explicit zero", () => {
+  assert.deepEqual(normalizedCost({ cost: {
+    api_equivalent_usd: 1.25,
+    vendor_estimated_usd: 1.1,
+    estimated_billed_usd: 0,
+    plan_credits: 42,
+    status: "included",
+    coverage: 1,
+    pricing_source: "https://example.test/prices",
+  }}), {
+    apiEquivalentUsd: 1.25,
+    vendorEstimatedUsd: 1.1,
+    planCredits: 42,
+    estimatedBilledUsd: 0,
+    status: "included",
+    coverage: 1,
+    priceKind: null,
+    pricingProvider: null,
+    pricingRetrievedAt: null,
+    pricingAsOf: null,
+    pricingVersion: null,
+    pricingVersions: [],
+    pricingSources: ["https://example.test/prices"],
+    mixedPricingVersions: false,
+    vendorStatus: null,
+    vendorScope: null,
+    pricedTokens: 0,
+    unpricedUsageEvents: 0,
+    unpricedTokens: 0,
+    pricedToolUnits: 0,
+    unpricedToolUnits: 0,
+    unpricedReasons: [],
+  });
+});
+
+test("normalizedCost should expose a provider-native cumulative estimate without treating it as API cost", () => {
+  const cost = normalizedCost({
+    cost: { api_equivalent_usd: 2, status: "estimated", pricing_versions: ["a", "b"] },
+    vendor_usage: {
+      scope: "latest_cumulative_thread_snapshot",
+      cost: { vendor_estimated_usd: 1.5, plan_credits: 10, status: "stale" },
+    },
+  });
+  assert.equal(cost.apiEquivalentUsd, 2);
+  assert.equal(cost.vendorEstimatedUsd, 1.5);
+  assert.equal(cost.planCredits, 10);
+  assert.equal(cost.vendorStatus, "stale");
+  assert.equal(cost.vendorScope, "latest_cumulative_thread_snapshot");
+  assert.deepEqual(cost.pricingVersions, ["a", "b"]);
+});
+
+test("normalizedCost should accept canonical pricing provenance and coverage fields", () => {
+  const cost = normalizedCost({ cost: {
+    api_equivalent_usd: 2,
+    status: "partial",
+    coverage: 0.8,
+    pricing_provider: "openai",
+    pricing_kind: "spot_estimate",
+    pricing_effective_at: "2026-08-25T00:00:00Z",
+    pricing_retrieved_at: "2026-08-25T12:00:00Z",
+    pricing_version: "sha256:abc",
+    mixed_pricing_versions: true,
+    priced_tokens: 80,
+    unpriced_tokens: 20,
+    priced_tool_units: 2,
+    unpriced_tool_units: 1,
+    unpriced_events: 1,
+    unpriced_reasons: ["model is unknown"],
+  }});
+  assert.equal(cost.pricingProvider, "openai");
+  assert.equal(cost.priceKind, "spot_estimate");
+  assert.equal(cost.pricingAsOf, "2026-08-25T00:00:00Z");
+  assert.equal(cost.mixedPricingVersions, true);
+  assert.equal(cost.pricedTokens, 80);
+  assert.equal(cost.unpricedTokens, 20);
+  assert.equal(cost.pricedToolUnits, 2);
+  assert.equal(cost.unpricedToolUnits, 1);
+  assert.equal(cost.unpricedUsageEvents, 1);
+  assert.deepEqual(cost.unpricedReasons, ["model is unknown"]);
+});
+
+test("normalizedCost should ignore legacy estimates and preserve structured zero", () => {
+  assert.equal(apiEquivalentCost({}), null);
+  assert.equal(normalizedCost({}).status, "unknown");
+  assert.equal(apiEquivalentCost({ cost_usd: 0 }), null);
+  assert.equal(normalizedCost({ cost_usd: 0 }).status, "unknown");
+  assert.equal(apiEquivalentCost({ cost: { api_equivalent_usd: 99, status: "partial", legacy: true } }), null);
+  assert.equal(normalizedCost({ cost: { api_equivalent_usd: 99, status: "partial", legacy: true } }).status, "unknown");
+  assert.equal(apiEquivalentCost({
+    cost: { api_equivalent_usd: 99, status: "partial", legacy: true },
+    cost_estimate: { api_equivalent_usd: 2, status: "estimated" },
+  }), 2);
+  const legacyVendor = normalizedCost({ vendor_usage: { scope: "legacy", cost: {
+    vendor_estimated_usd: 99, status: "partial", legacy: true,
+  } } });
+  assert.equal(legacyVendor.vendorEstimatedUsd, null);
+  assert.equal(legacyVendor.vendorStatus, null);
+  assert.equal(apiEquivalentCost({ cost: { api_equivalent_usd: 0, status: "estimated" } }), 0);
+  assert.equal(normalizedCost({ cost: { status: "unknown" } }).apiEquivalentUsd, null);
 });
 
 test("adaptProviderTimeline should project nested Codex threads without duplicating Claude subagents", () => {
@@ -1068,7 +1192,7 @@ test("adaptProviderTimeline should degrade without changing accounting when cano
   assert.equal(got.lanes[0].data_provider, "codex",
     "a Codex-only live feed still opts into the provider label and accent");
   assert.deepEqual(providerLegend(got.lanes), [{
-    provider: "codex", label: "Codex / OpenAI", count: 1,
+    provider: "codex", label: "Codex", count: 1,
   }], "the rendered provider key remains visible for one online Codex session");
   assert.deepEqual(got.lanes[0].subagents, undefined);
   assert.deepEqual(graphAwareAttention(input.summary, got.lanes), {

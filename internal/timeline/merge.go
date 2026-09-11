@@ -63,6 +63,8 @@ func Merge(inputs []Sourced, opts MergeOptions) *Timeline {
 			if lane.Provider == "" {
 				lane.Provider = in.Provider
 			}
+			lane.Cost = mergeCostEstimates(nil, lane.Cost, laneHasUsage(lane))
+			lane.CostUSD = apiEquivalentAlias(lane.Cost)
 			lane.SessionID = namespaceID(in.Provider, lane.SessionID, lane.PID, i)
 			out.Lanes = append(out.Lanes, lane)
 		}
@@ -97,10 +99,22 @@ func Merge(inputs []Sourced, opts MergeOptions) *Timeline {
 		out.Totals.TokCacheRead += t.Totals.TokCacheRead
 		out.Totals.TokCacheCreate += t.Totals.TokCacheCreate
 		out.Totals.Subagents += t.Totals.Subagents
-		out.Totals.CostUSD += t.Totals.CostUSD
+		mergeUsageBreakdown(&out.Totals.Usage, t.Totals.Usage)
+		out.Totals.PricingGroups = append(out.Totals.PricingGroups, t.Totals.PricingGroups...)
+		out.Totals.VendorUsage = mergeVendorUsage(out.Totals.VendorUsage, t.Totals.VendorUsage)
+		out.Totals.UsageCoverage = mergedIdentity(out.Totals.UsageCoverage, t.Totals.UsageCoverage)
+		out.Totals.Cost = mergeCostEstimates(
+			out.Totals.Cost,
+			t.Totals.Cost,
+			totalsHaveUsage(t.Totals),
+		)
+		out.Totals.CostUSD = apiEquivalentAlias(out.Totals.Cost)
 
 		if out.PlanWindow == nil && t.PlanWindow != nil {
-			out.PlanWindow = t.PlanWindow
+			plan := *t.PlanWindow
+			plan.Cost = mergeCostEstimates(nil, t.PlanWindow.Cost, planWindowHasUsage(plan))
+			plan.CostUSD = apiEquivalentAlias(plan.Cost)
+			out.PlanWindow = &plan
 		}
 		mergeAgentTimeline(out, in)
 		out.ProviderErrors = append(out.ProviderErrors, t.ProviderErrors...)
@@ -140,6 +154,316 @@ func Merge(inputs []Sourced, opts MergeOptions) *Timeline {
 		out.Window = opts.Window
 	}
 	return out
+}
+
+// mergeCostEstimates combines like-for-like structured amounts while preserving
+// absence. Legacy-only estimates are deliberately ignored: cost_usd carries no
+// billing semantics or pricing provenance. Usage with no supported structured
+// estimate creates an explicit unknown component instead of adding zero.
+func mergeCostEstimates(dst, incoming *CostEstimate, hasUsage bool) *CostEstimate {
+	src := normalizeCostEstimate(incoming, hasUsage)
+	if src == nil {
+		return dst
+	}
+	if dst == nil {
+		return src
+	}
+
+	dst.APIEquivalentUSD = sumOptionalFloat(dst.APIEquivalentUSD, src.APIEquivalentUSD)
+	dst.VendorEstimatedUSD = sumOptionalFloat(dst.VendorEstimatedUSD, src.VendorEstimatedUSD)
+	dst.PlanCredits = sumOptionalFloat(dst.PlanCredits, src.PlanCredits)
+	dst.EstimatedBilledUSD = sumOptionalFloat(dst.EstimatedBilledUSD, src.EstimatedBilledUSD)
+	dst.Status = mergedCostStatus(dst.Status, src.Status, costHasAmount(dst))
+	dst.Legacy = dst.Legacy || src.Legacy
+	dst.PricedUsageEvents += src.PricedUsageEvents
+	dst.UnpricedUsageEvents += src.UnpricedUsageEvents
+	dst.PricedTokens += src.PricedTokens
+	dst.UnpricedTokens += src.UnpricedTokens
+	dst.PricedToolUnits += src.PricedToolUnits
+	dst.UnpricedToolUnits += src.UnpricedToolUnits
+	dst.UnpricedEvents += src.UnpricedEvents
+	dst.UnpricedReasons = mergeStrings(dst.UnpricedReasons, src.UnpricedReasons)
+
+	if dst.Coverage != nil && src.Coverage != nil {
+		// Event counts, when supplied, are the exact aggregate. Otherwise retain
+		// the conservative minimum rather than averaging provider percentages
+		// whose denominators may differ.
+		v := min(*dst.Coverage, *src.Coverage)
+		dst.Coverage = &v
+	} else if dst.Coverage == nil && src.Coverage != nil {
+		dst.Coverage = cloneFloat(src.Coverage)
+	}
+	if total := dst.PricedTokens + dst.UnpricedTokens + dst.PricedToolUnits + dst.UnpricedToolUnits; total > 0 {
+		v := float64(dst.PricedTokens+dst.PricedToolUnits) / float64(total)
+		dst.Coverage = &v
+	} else if total := dst.PricedUsageEvents + dst.UnpricedUsageEvents; total > 0 {
+		v := float64(dst.PricedUsageEvents) / float64(total)
+		dst.Coverage = &v
+	}
+
+	dst.PricingSources = mergeStrings(costSources(dst), costSources(src))
+	if len(dst.PricingSources) == 1 {
+		dst.PricingSource = dst.PricingSources[0]
+	} else if len(dst.PricingSources) > 1 {
+		dst.PricingSource = ""
+	}
+	dst.PricingRetrievedAt = earlierTimestamp(dst.PricingRetrievedAt, src.PricingRetrievedAt)
+	dst.PricingEffectiveAt = earlierTimestamp(dst.PricingEffectiveAt, src.PricingEffectiveAt)
+	dst.PricingProvider = mergedIdentity(dst.PricingProvider, src.PricingProvider)
+	dst.PricingVersions = mergeStrings(costVersions(dst), costVersions(src))
+	version := mergedIdentity(dst.PricingVersion, src.PricingVersion)
+	if len(dst.PricingVersions) == 1 {
+		version = dst.PricingVersions[0]
+	} else if len(dst.PricingVersions) > 1 {
+		version = "mixed"
+	}
+	kind := mergedIdentity(dst.PricingKind, src.PricingKind)
+	dst.MixedPricingVersions = dst.MixedPricingVersions || src.MixedPricingVersions ||
+		len(dst.PricingVersions) > 1 || version == "mixed" || kind == "mixed" || dst.PricingProvider == "mixed"
+	dst.PricingVersion = version
+	dst.PricingKind = kind
+	return dst
+}
+
+func normalizeCostEstimate(in *CostEstimate, hasUsage bool) *CostEstimate {
+	if in != nil && in.Legacy {
+		in = nil
+	}
+	if in == nil {
+		if !hasUsage {
+			return nil
+		}
+		zero := 0.0
+		return &CostEstimate{Status: "unknown", Coverage: &zero, UnpricedUsageEvents: 1}
+	}
+
+	c := *in
+	c.APIEquivalentUSD = cloneFloat(in.APIEquivalentUSD)
+	c.VendorEstimatedUSD = cloneFloat(in.VendorEstimatedUSD)
+	c.PlanCredits = cloneFloat(in.PlanCredits)
+	c.EstimatedBilledUSD = cloneFloat(in.EstimatedBilledUSD)
+	c.Coverage = cloneFloat(in.Coverage)
+	c.PricingSources = append([]string(nil), in.PricingSources...)
+	c.PricingVersions = append([]string(nil), in.PricingVersions...)
+	c.UnpricedReasons = append([]string(nil), in.UnpricedReasons...)
+	if c.PricingKind == "" {
+		c.PricingKind = c.PriceKind
+	}
+	c.PriceKind = ""
+	if c.PricingEffectiveAt == "" {
+		c.PricingEffectiveAt = c.PricingAsOf
+	}
+	c.PricingAsOf = ""
+	if c.Status == "" {
+		if costHasAmount(&c) {
+			c.Status = "estimated"
+		} else if hasUsage {
+			c.Status = "unknown"
+		}
+	}
+	if hasUsage && c.PricedUsageEvents == 0 && c.UnpricedUsageEvents == 0 && c.UnpricedEvents == 0 {
+		if costHasAmount(&c) {
+			c.PricedUsageEvents = 1
+		} else {
+			c.UnpricedUsageEvents = 1
+		}
+	}
+	return &c
+}
+
+func sumOptionalFloat(a, b *float64) *float64 {
+	if a == nil {
+		return cloneFloat(b)
+	}
+	if b == nil {
+		return a
+	}
+	v := *a + *b
+	return &v
+}
+
+func cloneFloat(v *float64) *float64 {
+	if v == nil {
+		return nil
+	}
+	c := *v
+	return &c
+}
+
+func costHasAmount(c *CostEstimate) bool {
+	return c != nil && (c.APIEquivalentUSD != nil || c.VendorEstimatedUSD != nil ||
+		c.PlanCredits != nil || c.EstimatedBilledUSD != nil)
+}
+
+func apiEquivalentAlias(c *CostEstimate) *float64 {
+	if c == nil {
+		return nil
+	}
+	return cloneFloat(c.APIEquivalentUSD)
+}
+
+func mergedCostStatus(a, b string, haveAmount bool) string {
+	if a == "" {
+		return b
+	}
+	if b == "" {
+		return a
+	}
+	if a == "partial" || b == "partial" {
+		return "partial"
+	}
+	if a == "unknown" || b == "unknown" {
+		if haveAmount {
+			return "partial"
+		}
+		return "unknown"
+	}
+	if a == "stale" || b == "stale" {
+		return "stale"
+	}
+	if a == "included" && b == "included" {
+		return "included"
+	}
+	return "estimated"
+}
+
+func costSources(c *CostEstimate) []string {
+	if c == nil {
+		return nil
+	}
+	values := append([]string(nil), c.PricingSources...)
+	if c.PricingSource != "" {
+		values = append(values, c.PricingSource)
+	}
+	return mergeStrings(nil, values)
+}
+
+func costVersions(c *CostEstimate) []string {
+	if c == nil {
+		return nil
+	}
+	values := append([]string(nil), c.PricingVersions...)
+	if c.PricingVersion != "" && c.PricingVersion != "mixed" {
+		values = append(values, c.PricingVersion)
+	}
+	return mergeStrings(nil, values)
+}
+
+// mergeVendorUsage preserves provider-native cumulative estimates as their own
+// explicitly scoped aggregate. It never feeds those values into window token
+// totals or API-equivalent cost.
+func mergeVendorUsage(dst, src *VendorUsageAggregate) *VendorUsageAggregate {
+	if src == nil {
+		return dst
+	}
+	if dst == nil {
+		copy := *src
+		copy.Snapshots = append([]ScopedVendorUsage(nil), src.Snapshots...)
+		cost := normalizeCostEstimate(&src.Cost, false)
+		if cost != nil {
+			copy.Cost = *cost
+		} else {
+			copy.Cost = CostEstimate{Status: "unknown"}
+		}
+		return &copy
+	}
+	dst.Snapshots = append(dst.Snapshots, src.Snapshots...)
+	dst.Cost = *mergeCostEstimates(&dst.Cost, &src.Cost, false)
+	if dst.Scope != src.Scope {
+		dst.Scope = "mixed_cumulative_snapshots"
+	}
+	return dst
+}
+
+func mergeStrings(a, b []string) []string {
+	seen := make(map[string]bool, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, values := range [][]string{a, b} {
+		for _, value := range values {
+			if value == "" || seen[value] {
+				continue
+			}
+			seen[value] = true
+			out = append(out, value)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func earlierTimestamp(a, b string) string {
+	if a == "" {
+		return b
+	}
+	if b == "" {
+		return a
+	}
+	at, aerr := time.Parse(time.RFC3339Nano, a)
+	bt, berr := time.Parse(time.RFC3339Nano, b)
+	if aerr == nil && berr == nil {
+		if bt.Before(at) {
+			return b
+		}
+		return a
+	}
+	if b < a {
+		return b
+	}
+	return a
+}
+
+func mergedIdentity(a, b string) string {
+	if a == "" {
+		return b
+	}
+	if b == "" || a == b {
+		return a
+	}
+	return "mixed"
+}
+
+func laneHasUsage(lane Lane) bool {
+	return lane.TokIn != 0 || lane.TokOut != 0 || lane.TokCacheRead != 0 ||
+		lane.TokCacheCreate != 0 || usageHasValues(lane.Usage)
+}
+
+func totalsHaveUsage(t Totals) bool {
+	return t.TokIn != 0 || t.TokOut != 0 || t.TokCacheRead != 0 ||
+		t.TokCacheCreate != 0 || usageHasValues(t.Usage)
+}
+
+func planWindowHasUsage(p PlanWindow) bool {
+	return p.TokIn != 0 || p.TokOut != 0 || p.TokCacheRead != 0 ||
+		p.TokCacheCreate != 0 || usageHasValues(p.Usage)
+}
+
+func usageHasValues(u *UsageBreakdown) bool {
+	return u != nil && *u != (UsageBreakdown{})
+}
+
+func mergeUsageBreakdown(dst **UsageBreakdown, src *UsageBreakdown) {
+	if src == nil {
+		return
+	}
+	if *dst == nil {
+		copy := *src
+		*dst = &copy
+		return
+	}
+	d := *dst
+	d.InputTokens += src.InputTokens
+	d.CachedInputTokens += src.CachedInputTokens
+	d.CacheWriteInputTokens += src.CacheWriteInputTokens
+	d.CacheWrite5mInputTokens += src.CacheWrite5mInputTokens
+	d.CacheWrite1hInputTokens += src.CacheWrite1hInputTokens
+	d.OutputTokens += src.OutputTokens
+	d.ReasoningOutputTokens += src.ReasoningOutputTokens
+	d.TotalTokens += src.TotalTokens
+	d.ModelContextWindow = max(d.ModelContextWindow, src.ModelContextWindow)
+	d.WebSearchRequests += src.WebSearchRequests
+	d.WebFetchRequests += src.WebFetchRequests
+	d.CodeExecutionRequests += src.CodeExecutionRequests
+	d.UnclassifiedServerToolUnits += src.UnclassifiedServerToolUnits
 }
 
 // mergeAgentTimeline preserves Switchboard's additive child-thread surface in

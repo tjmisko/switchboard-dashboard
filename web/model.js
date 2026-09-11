@@ -67,7 +67,19 @@
   // an older merged config still calls that subprocess provider "claude").
   const PROVIDER_ADAPTERS = Object.freeze({
     claude: Object.freeze({ children: "lane.subagents", label: "Claude" }),
-    codex: Object.freeze({ children: "agent_timeline", label: "Codex / OpenAI" }),
+    codex: Object.freeze({ children: "agent_timeline", label: "Codex" }),
+  });
+
+  const EXECUTION_PROVIDER_LABELS = Object.freeze({
+    anthropic: "Anthropic",
+    openai: "OpenAI",
+    "aws-bedrock": "Amazon Bedrock",
+    bedrock: "Amazon Bedrock",
+    "google-vertex": "Google Vertex AI",
+    vertex: "Google Vertex AI",
+    azure: "Microsoft Azure",
+    "azure-openai": "Azure OpenAI",
+    custom: "custom provider",
   });
 
   // laneProvider is the semantic agent-data provider shown by the dashboard.
@@ -91,6 +103,104 @@
     const adapter = PROVIDER_ADAPTERS[id];
     if (adapter && adapter.label) return adapter.label;
     return id.charAt(0).toUpperCase() + id.slice(1);
+  }
+
+  // billingProviderLabel separates the agent client from the company/service
+  // that executed the request. "Codex" alone is not evidence of OpenAI API
+  // billing, just as "Claude" alone does not prove a direct Anthropic route.
+  function billingProviderLabel(lane) {
+    if (!lane) return "";
+    const client = providerLabel(laneProvider(lane));
+    let raw = String(
+      lane.execution_provider ||
+      (lane.billing_identity && lane.billing_identity.execution_provider) ||
+      ""
+    ).toLowerCase();
+    if (!raw && Array.isArray(lane.pricing_groups)) {
+      const providers = [...new Set(lane.pricing_groups
+        .map((group) => group && group.identity && group.identity.execution_provider)
+        .filter((provider) => typeof provider === "string" && provider)
+        .map((provider) => provider.toLowerCase()))];
+      if (providers.length > 1) return client ? `${client} via multiple providers` : "Multiple providers";
+      if (providers.length === 1) raw = providers[0];
+    }
+    if (!raw) return client;
+    const execution = EXECUTION_PROVIDER_LABELS[raw] || providerLabel(raw);
+    if (!client || client.toLowerCase() === execution.toLowerCase()) return execution;
+    return `${client} via ${execution}`;
+  }
+
+  // normalizedCost accepts only structured cost data. Legacy cost_usd aliases
+  // and estimates explicitly marked legacy lack billing semantics and pricing
+  // provenance, so the dashboard treats them as unknown. Missing remains null,
+  // while an explicit zero in a supported structured estimate remains zero.
+  function normalizedCost(record) {
+    const obj = record || {};
+    const raw = [obj.cost, obj.cost_estimate]
+      .find((candidate) => candidate && typeof candidate === "object" && candidate.legacy !== true) || null;
+    const vendorCandidate = obj.vendor_usage && obj.vendor_usage.cost && typeof obj.vendor_usage.cost === "object"
+      ? obj.vendor_usage.cost
+      : null;
+    const vendor = vendorCandidate && vendorCandidate.legacy !== true ? vendorCandidate : null;
+    const finite = (v) => Number.isFinite(v) ? v : null;
+    const apiEquivalentUsd = raw ? finite(raw.api_equivalent_usd) : null;
+    const status = String(
+      (raw && (raw.status || raw.cost_status)) || "unknown"
+    ).toLowerCase();
+    const sources = raw && Array.isArray(raw.pricing_sources)
+      ? raw.pricing_sources.filter((v) => typeof v === "string" && v)
+      : [];
+    if (raw && typeof raw.pricing_source === "string" && raw.pricing_source && !sources.includes(raw.pricing_source)) {
+      sources.push(raw.pricing_source);
+    }
+    const versions = raw && Array.isArray(raw.pricing_versions)
+      ? raw.pricing_versions.filter((v) => typeof v === "string" && v)
+      : [];
+    if (raw && typeof raw.pricing_version === "string" && raw.pricing_version && raw.pricing_version !== "mixed" && !versions.includes(raw.pricing_version)) {
+      versions.push(raw.pricing_version);
+    }
+    return {
+      apiEquivalentUsd,
+      vendorEstimatedUsd: raw && finite(raw.vendor_estimated_usd) != null
+        ? finite(raw.vendor_estimated_usd)
+        : (vendor ? finite(vendor.vendor_estimated_usd) : null),
+      planCredits: raw && finite(raw.plan_credits) != null
+        ? finite(raw.plan_credits)
+        : (vendor ? finite(vendor.plan_credits) : null),
+      estimatedBilledUsd: raw && finite(raw.estimated_billed_usd) != null
+        ? finite(raw.estimated_billed_usd)
+        : (vendor ? finite(vendor.estimated_billed_usd) : null),
+      status,
+      coverage: raw ? finite(raw.coverage) : null,
+      priceKind: raw && (raw.pricing_kind || raw.price_kind)
+        ? String(raw.pricing_kind || raw.price_kind)
+        : null,
+      pricingProvider: raw && raw.pricing_provider ? String(raw.pricing_provider) : null,
+      pricingRetrievedAt: raw && raw.pricing_retrieved_at ? String(raw.pricing_retrieved_at) : null,
+      pricingAsOf: raw && (raw.pricing_effective_at || raw.pricing_as_of)
+        ? String(raw.pricing_effective_at || raw.pricing_as_of)
+        : null,
+      pricingVersion: raw && raw.pricing_version ? String(raw.pricing_version) : null,
+      pricingVersions: versions,
+      pricingSources: sources,
+      mixedPricingVersions: raw ? raw.mixed_pricing_versions === true : false,
+      vendorStatus: vendor && vendor.status ? String(vendor.status).toLowerCase() : null,
+      vendorScope: obj.vendor_usage && obj.vendor_usage.scope ? String(obj.vendor_usage.scope) : null,
+      pricedTokens: raw && Number.isFinite(raw.priced_tokens) ? raw.priced_tokens : 0,
+      unpricedTokens: raw && Number.isFinite(raw.unpriced_tokens) ? raw.unpriced_tokens : 0,
+      pricedToolUnits: raw && Number.isFinite(raw.priced_tool_units) ? raw.priced_tool_units : 0,
+      unpricedToolUnits: raw && Number.isFinite(raw.unpriced_tool_units) ? raw.unpriced_tool_units : 0,
+      unpricedUsageEvents: raw && Number.isInteger(raw.unpriced_events)
+        ? raw.unpriced_events
+        : (raw && Number.isInteger(raw.unpriced_usage_events) ? raw.unpriced_usage_events : 0),
+      unpricedReasons: raw && Array.isArray(raw.unpriced_reasons)
+        ? raw.unpriced_reasons.filter((v) => typeof v === "string" && v)
+        : [],
+    };
+  }
+
+  function apiEquivalentCost(record) {
+    return normalizedCost(record).apiEquivalentUsd;
   }
 
   // providerLegend returns the semantic provider key the UI should render.
@@ -698,9 +808,10 @@
   // can hang "what this session actually did" off a bar segment without being
   // handed the lane.
   //
-  // costUsd is the project's dollar spend: Σ lane.cost_usd over the SAME lanes
-  // that contributed the time, so the row's total always equals the sum of its
-  // parts. Null (not 0) when no contributing lane reported a cost at all —
+  // costUsd is the project's API-equivalent subtotal from structured lane.cost
+  // objects over the SAME lanes that contributed the time, so the row's total
+  // always equals the sum of its parts. Legacy cost_usd aliases are ignored.
+  // Null (not 0) when no contributing lane reported a supported cost at all —
   // "not recorded" and "free" are different claims, and a provider that omits
   // cost must not be shown spending nothing. Unlike the time it sits next to,
   // cost is NOT clipped at a suspect lane's evidence bound: the tokens were
@@ -730,7 +841,7 @@
       if (laneMs <= 0) continue;
       const project = lane.project_full || lane.project || "(no project)";
       const start = Date.parse(lane.start);
-      const cost = Number.isFinite(lane.cost_usd) ? lane.cost_usd : null;
+      const cost = apiEquivalentCost(lane);
       const acc = totals.get(project) || { ms: 0, cost: 0, hasCost: false, parts: [] };
       acc.ms += laneMs;
       if (cost != null) { acc.cost += cost; acc.hasCost = true; }
@@ -1670,7 +1781,8 @@
 
   return {
     scaleGeometry,
-    laneIdentity, rawSessionId, laneProvider, providerLabel, providerLegend, adaptProviderTimeline,
+    laneIdentity, rawSessionId, laneProvider, providerLabel, billingProviderLabel, providerLegend, adaptProviderTimeline,
+    normalizedCost, apiEquivalentCost,
     leadLabel, nameSegments, buildBar, buildBars,
     spanInefficiency, switchArrivals, presenceSplitMs, awayIdleMs,
     deflickerIntervals, deflickerLanes, FLICKER_MS,

@@ -400,8 +400,10 @@ The JSON shape and units are owned by Switchboard (`docs/history-schema.md`);
 [`docs/provider-contract.md`](docs/provider-contract.md) restates it as an
 implementer's spec for anyone writing a provider:
 
-- **Durations are nanoseconds**, **token fields are raw counts**, and **`cost_usd`
-  is a float in dollars** recomputed by the producer from tokens × per-model price.
+- **Durations are nanoseconds**, **token fields are raw counts**, and cost is a
+  structured object whose nullable dollar fields carry billing semantics and
+  pricing provenance. The deprecated `cost_usd` wire alias is never used by the
+  dashboard as an estimate on its own.
 - The envelope is `{window, lanes, summary, totals}` with optional top-level
   `activity`, `agent_timeline`, and `plan_window`. `agent_timeline` is additive:
   it contains descendant threads only, leaving root work in `lanes`. One child
