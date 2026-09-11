@@ -1,6 +1,7 @@
 package sessiondigest
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -526,4 +527,206 @@ func contains(argv []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// validSummary is a reply that meets the contract in every respect. Each case
+// below mutates exactly one thing about it, so a failure names one rule.
+func validSummary() Summary {
+	return Summary{
+		Name:        "fixed-the-merged-view-lookup",
+		Description: "Fixed the session-id lookup in the merged view and pinned it with a test.",
+		Summary:     "The merged view resolved ids against the wrong map. It now resolves against the merged one.",
+		Tasks:       []string{"Fixed the merged-view session-id lookup", "Added a regression test"},
+	}
+}
+
+func TestValidateShouldAcceptAReplyThatMeetsTheContract(t *testing.T) {
+	if err := validSummary().Validate(); err != nil {
+		t.Fatalf("valid summary rejected: %v", err)
+	}
+}
+
+func TestValidateShouldRejectAndNameTheFieldWhenAReplyBreaksTheContract(t *testing.T) {
+	long := strings.Repeat("x", maxSummaryFieldRunes)
+	cases := []struct {
+		name    string
+		mutate  func(*Summary)
+		wantHas string // the error must name the offending field
+	}{
+		{"empty name", func(s *Summary) { s.Name = "" }, "name"},
+		{"name in title case", func(s *Summary) { s.Name = "Fixed-The-Lookup" }, "name"},
+		{"name with spaces", func(s *Summary) { s.Name = "fixed the lookup" }, "name"},
+		{"name with leading hyphen", func(s *Summary) { s.Name = "-fixed-lookup" }, "name"},
+		{"name with doubled hyphen", func(s *Summary) { s.Name = "fixed--lookup" }, "name"},
+		{"name of seven words", func(s *Summary) { s.Name = "a-b-c-d-e-f-g" }, "name"},
+		{"empty description", func(s *Summary) { s.Description = "" }, "description"},
+		{"description at the limit", func(s *Summary) { s.Description = long }, "description"},
+		{"empty prose", func(s *Summary) { s.Summary = "" }, "prose"},
+		{"empty task", func(s *Summary) { s.Tasks = []string{"ok", ""} }, "task 1"},
+		{"whitespace-only task", func(s *Summary) { s.Tasks = []string{"ok", "   "} }, "task 1"},
+		{"task at the limit", func(s *Summary) { s.Tasks = []string{long} }, "task 0"},
+		{"more tasks than the cap", func(s *Summary) {
+			s.Tasks = make([]string, maxSummaryTasks+1)
+			for i := range s.Tasks {
+				s.Tasks[i] = "did a thing"
+			}
+		}, "tasks"},
+		{"NUL in description", func(s *Summary) { s.Description = "fixed the\x00lookup" }, "description"},
+		{"NUL in name", func(s *Summary) { s.Name = "fixed\x00lookup" }, "name"},
+		{"control byte in task", func(s *Summary) { s.Tasks = []string{"fixed the\x07lookup"} }, "task 0"},
+		{"newline in description", func(s *Summary) { s.Description = "fixed the\nlookup" }, "description"},
+		{"RTL override in description", func(s *Summary) { s.Description = "fixed ‮the lookup" }, "description"},
+		{"RTL override in prose", func(s *Summary) { s.Summary = "fixed ‮the lookup" }, "prose"},
+		{"bidi isolate in task", func(s *Summary) { s.Tasks = []string{"fixed ⁦the lookup"} }, "task 0"},
+		{"invalid UTF-8 in description", func(s *Summary) { s.Description = "fixed \xff\xfe lookup" }, "description"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			summary := validSummary()
+			c.mutate(&summary)
+			err := summary.Validate()
+			if err == nil {
+				t.Fatalf("%s was accepted", c.name)
+			}
+			if !strings.Contains(err.Error(), c.wantHas) {
+				t.Errorf("error %q does not name %q", err, c.wantHas)
+			}
+		})
+	}
+}
+
+func TestValidateShouldAllowNewlinesInProseButNotInTheOneLineFields(t *testing.T) {
+	// The prompt asks for 3-6 sentences when tasks is empty, so a newline there
+	// is formatting. A one-line field has no such licence.
+	summary := validSummary()
+	summary.Summary = "First sentence.\nSecond sentence."
+	if err := summary.Validate(); err != nil {
+		t.Errorf("prose newline rejected: %v", err)
+	}
+}
+
+func TestValidateShouldAcceptAReplyCarryingNoTasks(t *testing.T) {
+	// tasks is legitimately [] for a single continuous session — the prompt says
+	// so explicitly. An empty list must not read as a contract violation.
+	summary := validSummary()
+	summary.Tasks = nil
+	if err := summary.Validate(); err != nil {
+		t.Errorf("task-free summary rejected: %v", err)
+	}
+}
+
+func TestCondenseShouldRejectTheReplyWhenTheModelIgnoresTheContract(t *testing.T) {
+	// The end-to-end shape: a reply that parses cleanly but does not meet the
+	// contract must not become a summary.
+	run := func(string) (string, error) {
+		return `{"name":"Not Kebab Case","description":"d","tasks":[],"summary":"s"}`, nil
+	}
+	if _, err := Condense(Digest{Title: "t"}, run); err == nil {
+		t.Fatal("a non-conforming reply was accepted")
+	} else if !strings.Contains(err.Error(), "rejected") {
+		t.Errorf("error %q does not say the reply was rejected", err)
+	}
+}
+
+func TestCondenseShouldRejectHostileOrMalformedRepliesWithoutPanicking(t *testing.T) {
+	// Every one of these must produce an error rather than a summary, and none
+	// may panic — this is the transport boundary, so the inputs are whatever a
+	// confused or truncated model run can put on stdout.
+	replies := []struct {
+		name  string
+		reply string
+	}{
+		{"empty stdout", ""},
+		{"prose with no object", "I could not summarize that."},
+		{"truncated object", `{"name":"a-b","description":"d","summary":"s"`},
+		{"stray opening brace before the object", `note { then {"name":"a-b","description":"d","summary":"s","tasks":[]}`},
+		{"description as a number", `{"name":"a-b","description":42,"summary":"s","tasks":[]}`},
+		{"name as an array", `{"name":["a"],"description":"d","summary":"s","tasks":[]}`},
+		{"null object", "null"},
+		{"bare array", "[]"},
+		{"whitespace-only description", `{"name":"a-b","description":"   ","summary":"s","tasks":[]}`},
+		{"nothing but braces", "{}"},
+		{"a megabyte of prose", strings.Repeat("no json here. ", 80000)},
+	}
+
+	for _, c := range replies {
+		t.Run(c.name, func(t *testing.T) {
+			run := func(string) (string, error) { return c.reply, nil }
+			summary, err := Condense(Digest{Title: "t"}, run)
+			if err == nil {
+				t.Fatalf("reply was accepted as %+v", summary)
+			}
+		})
+	}
+}
+
+func TestCondenseShouldReportTheRunnerErrorWhenTheReplyArrivesWithOne(t *testing.T) {
+	// A non-zero exit or a killed context surfaces as a Runner error. Even when
+	// stdout happens to hold a valid object, the run failed and the reply is not
+	// trustworthy — the error wins.
+	valid := `{"name":"a-b","description":"d","summary":"s","tasks":[]}`
+	for _, c := range []struct {
+		name string
+		err  error
+	}{
+		{"non-zero exit with valid JSON on stdout", errors.New("claude -p: exit status 1")},
+		{"context deadline with valid JSON on stdout", context.DeadlineExceeded},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			run := func(string) (string, error) { return valid, c.err }
+			if _, err := Condense(Digest{Title: "t"}, run); err == nil {
+				t.Fatal("a failed run was accepted")
+			}
+		})
+	}
+}
+
+func TestCondenseRecordShouldLeaveTheRecordStaleWhenTheReplyIsRejected(t *testing.T) {
+	// The rejection must behave exactly like any other failure: nothing stamped,
+	// so NeedsCondense queues the record for the next run rather than marking a
+	// missing summary current.
+	record := Record{Digest: Digest{Title: "t", SessionID: "s"}}
+	run := func(string) (string, error) {
+		return `{"name":"Not Kebab","description":"d","summary":"s","tasks":[]}`, nil
+	}
+	if err := CondenseRecord(&record, run, "haiku", time.Now()); err == nil {
+		t.Fatal("CondenseRecord accepted a rejected reply")
+	}
+	if record.Summary != nil {
+		t.Errorf("summary = %+v, want nil", record.Summary)
+	}
+	if record.SummaryVersion != 0 || record.GeneratedAt != "" || record.DigestHash != "" {
+		t.Errorf("record was stamped by a rejected reply: %+v", record)
+	}
+	if !NeedsCondense(record, false) {
+		t.Error("want the rejected record still queued for the next run")
+	}
+}
+
+func TestCondenseShouldKeepTheCardWhenOnlyTheOptionalTasksFieldIsMalformed(t *testing.T) {
+	// The deliberate asymmetry, pinned so it is not "fixed" by accident. tasks
+	// is optional enrichment: a shape parseTasks cannot read costs the tasks,
+	// never the whole card. Every field the card actually needs is present and
+	// conforming here, so there is nothing to reject.
+	//
+	// Contrast TestCondenseShouldRejectHostileOrMalformedRepliesWithoutPanicking,
+	// where the malformed part IS the card.
+	for _, reply := range []string{
+		`{"name":"a-b","description":"d","summary":"s","tasks":{"one":"did a thing"}}`,
+		`{"name":"a-b","description":"d","summary":"s","tasks":42}`,
+		`{"name":"a-b","description":"d","summary":"s","tasks":null}`,
+	} {
+		summary, err := Condense(Digest{Title: "t"}, func(string) (string, error) { return reply, nil })
+		if err != nil {
+			t.Errorf("%s: rejected over its tasks field: %v", reply, err)
+			continue
+		}
+		if len(summary.Tasks) != 0 {
+			t.Errorf("%s: tasks = %q, want none", reply, summary.Tasks)
+		}
+		if summary.Description != "d" {
+			t.Errorf("%s: lost the description", reply)
+		}
+	}
 }
