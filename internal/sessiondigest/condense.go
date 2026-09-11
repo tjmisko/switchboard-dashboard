@@ -347,15 +347,41 @@ func CondenseRecord(record *Record, run Runner, model string, now time.Time) err
 	return nil
 }
 
-// ClaudeRunner shells out to `claude -p` in headless mode. dir becomes the
-// subprocess working directory so the summarizer's own transcripts land under
-// dir's project slug — which callers skip via SlugFor — instead of polluting
-// real projects.
+// claudeArgv is the summarizer's command line, split out from ClaudeRunner so
+// the constraint below is a pure value a test can assert on. The exec call
+// itself stays untested; the argv is the part that matters.
+//
+// The summarizer reads a prompt on stdin and returns JSON. It needs no tools
+// whatever, so it is given none — that is what --tools "" does. This is
+// deliberately a property of the argv rather than of configuration: fencing an
+// agent by allowlisting tools, or by trusting the ambient settings file to
+// withhold them, is a configuration, and configurations are got wrong. An agent
+// with no tools at all cannot damage anything whatever it concludes.
+//
+// --restricted also makes the child ignore user, project and local settings
+// files, so the constraint does not depend on what ~/.claude/settings.json
+// happens to grant today. --strict-mcp-config skips MCP servers, which the
+// summarizer has no use for and which would otherwise be spawned on every
+// SessionEnd.
+func claudeArgv(model string) []string {
+	return []string{
+		"-p",
+		"--model", model,
+		"--tools", "",
+		"--restricted",
+		"--strict-mcp-config",
+	}
+}
+
+// ClaudeRunner shells out to `claude -p` in headless mode with no tools; see
+// claudeArgv for why. dir becomes the subprocess working directory so the
+// summarizer's own transcripts land under dir's project slug — which callers
+// skip via SlugFor — instead of polluting real projects.
 func ClaudeRunner(model, dir string, timeout time.Duration) Runner {
 	return func(prompt string) (string, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, "claude", "-p", "--model", model)
+		cmd := exec.CommandContext(ctx, "claude", claudeArgv(model)...)
 		cmd.Dir = dir
 		cmd.Stdin = strings.NewReader(prompt)
 		out, err := cmd.Output()

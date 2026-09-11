@@ -443,3 +443,87 @@ func TestCondenseRecordShouldLeaveTheRecordStaleWhenTheRunnerFails(t *testing.T)
 		}
 	}
 }
+
+// The summarizer is an agent we spawn on every SessionEnd. These tests pin the
+// one thing that keeps it harmless — that it is given no tools at all — because
+// the argv is the whole of that guarantee. ClaudeRunner's exec call is not
+// tested; claudeArgv is where the constraint lives.
+
+func TestClaudeArgvShouldGiveTheSummarizerNoToolsWhateverTheAmbientSettingsGrant(t *testing.T) {
+	argv := claudeArgv("haiku")
+
+	index := -1
+	for i, arg := range argv {
+		if arg == "--tools" {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		t.Fatalf("argv does not pass --tools: %q", argv)
+	}
+	if index == len(argv)-1 {
+		t.Fatalf("--tools has no value: %q", argv)
+	}
+	// "" is the documented way to disable every built-in tool. A tool name here
+	// — even a read-only one — would be a grant, so the empty string is the
+	// assertion, not merely a default.
+	if argv[index+1] != "" {
+		t.Errorf("--tools = %q, want \"\" (all tools disabled)", argv[index+1])
+	}
+
+	// --restricted makes the child ignore user, project and local settings, so
+	// the no-tools property does not depend on what the operator's own
+	// settings.json happens to say today.
+	if !contains(argv, "--restricted") {
+		t.Errorf("argv does not pass --restricted: %q", argv)
+	}
+	if !contains(argv, "--strict-mcp-config") {
+		t.Errorf("argv does not pass --strict-mcp-config: %q", argv)
+	}
+}
+
+func TestClaudeArgvShouldNeverCarryAPermissionBypassFlag(t *testing.T) {
+	// A bypass would undo --tools and --restricted in one token. Nothing in the
+	// summarizer's job needs one, so its presence at any point would be a
+	// regression worth failing loudly for.
+	banned := []string{
+		"--dangerously-skip-permissions",
+		"--allow-dangerously-skip-permissions",
+		"--permission-mode",
+		"--allowedTools",
+		"--allowed-tools",
+		"--add-dir",
+	}
+	argv := claudeArgv("haiku")
+	for _, flag := range banned {
+		if contains(argv, flag) {
+			t.Errorf("argv carries %s, which widens what the summarizer may do: %q", flag, argv)
+		}
+	}
+}
+
+func TestClaudeArgvShouldRunHeadlessOnTheRequestedModel(t *testing.T) {
+	argv := claudeArgv("sonnet-test")
+	if !contains(argv, "-p") {
+		t.Errorf("argv is not headless (-p missing): %q", argv)
+	}
+	for i, arg := range argv {
+		if arg == "--model" {
+			if i == len(argv)-1 || argv[i+1] != "sonnet-test" {
+				t.Errorf("--model does not carry the requested model: %q", argv)
+			}
+			return
+		}
+	}
+	t.Errorf("argv does not pass --model: %q", argv)
+}
+
+func contains(argv []string, want string) bool {
+	for _, arg := range argv {
+		if arg == want {
+			return true
+		}
+	}
+	return false
+}
