@@ -10,3 +10,7 @@
 .DS_Store
 *.swp
 .worktrees/
+
+# Local secrets
+.env
+.secrets
