@@ -113,6 +113,13 @@ and the v2 fields) and history recording enabled in Switchboard
 Use `--ctl` to point at a specific binary and `--dir` for a non-default history
 directory.
 
+Before deploying a new Switchboard CLI, verify the cost contract against the
+exact binary with `SWITCHBOARD_TEST_CTL=/absolute/path/to/switchboard-ctl go test
+-run TestPricingProviderContract .`. This uses synthetic history and checks both
+the direct proxy and multi-provider merge. In merged mode, the `exec` entry in
+the providers config overrides `--ctl`; point it at the daemon's shared release
+path so the two components advance together.
+
 ### Run against the bundled fixture
 
 `testdata/` ships a synthetic v2 timeline and a stub `ctl`, so the full UI runs

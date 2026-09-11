@@ -203,6 +203,15 @@
     return normalizedCost(record).apiEquivalentUsd;
   }
 
+  // costCoveragePercent converts the canonical 0..1 coverage fraction into the
+  // compact whole-number percentage used by the cost card. Producers should
+  // already stay in range, but clamping keeps a malformed value from turning a
+  // small display qualification into a believable negative or >100% claim.
+  function costCoveragePercent(cost) {
+    if (!cost || !Number.isFinite(cost.coverage)) return null;
+    return Math.round(Math.max(0, Math.min(1, cost.coverage)) * 100);
+  }
+
   // providerLegend returns the semantic provider key the UI should render.
   // An adapter namespace or data_provider marker opts a single-provider feed
   // into the key; a completely untagged single Claude feed stays compact.
@@ -1782,7 +1791,7 @@
   return {
     scaleGeometry,
     laneIdentity, rawSessionId, laneProvider, providerLabel, billingProviderLabel, providerLegend, adaptProviderTimeline,
-    normalizedCost, apiEquivalentCost,
+    normalizedCost, apiEquivalentCost, costCoveragePercent,
     leadLabel, nameSegments, buildBar, buildBars,
     spanInefficiency, switchArrivals, presenceSplitMs, awayIdleMs,
     deflickerIntervals, deflickerLanes, FLICKER_MS,

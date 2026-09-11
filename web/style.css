@@ -749,6 +749,10 @@ body.view-projects .boxes { grid-template-columns: minmax(0, 2.15fr) minmax(0, 0
 .headline .hv { font-family: var(--mono); font-size: 30px; font-weight: 700; letter-spacing: -0.6px; line-height: 1.05; }
 .headline .hv.green { color: var(--c-working); }
 .headline .hk { font-size: 11px; color: var(--fg-muted); margin-top: 4px; }
+.card.cost .cost-estimate-mark {
+  margin-left: 1px; color: var(--fg-muted); font-size: 0.48em;
+  line-height: 0; vertical-align: super; letter-spacing: 0;
+}
 
 .card.attention { background: linear-gradient(135deg, var(--attention-tint), var(--bg-elev)); }
 

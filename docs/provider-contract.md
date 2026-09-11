@@ -221,6 +221,13 @@ and must never be encoded as zero. During a rolling upgrade the dashboard also
 accepts the draft aliases `price_kind`, `pricing_as_of`, and
 `unpriced_usage_events`, but producers should emit the canonical names above.
 
+The live cost card keeps only an asterisked API-equivalent amount and the
+rounded coverage percentage visible. Hovering that topline exposes status,
+source/as-of, unpriced reasons, estimated-billed/vendor/credit values, and the
+billing caveat. Official 5-hour and weekly plan gauges render only when their
+utilization value is present; their reset and cache-freshness details live in
+the gauge hover. This is presentation only and does not discard contract data.
+
 Providers may also emit a canonical `usage` object alongside the legacy token
 fields. It preserves `input_tokens`, `cached_input_tokens`,
 `cache_write_input_tokens`, `cache_write_5m_input_tokens`,

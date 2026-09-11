@@ -4294,7 +4294,7 @@ function suspectNoteHTML(summary) {
 }
 
 // ---------------------------------------------------------------------------
-// render: cost card (window total + per-session + 5h plan gauge)
+// render: cost card (qualified window total + official plan gauges)
 // ---------------------------------------------------------------------------
 
 function gaugeBar(pct) {
@@ -4307,98 +4307,95 @@ function pctColor(pct) {
   return pct >= 80 ? "var(--c-permission)" : pct >= 50 ? "var(--c-idle)" : "var(--c-working)";
 }
 
+// costDetailTipHTML keeps every qualification attached to the asterisked cost
+// without making the live card read like a billing report. The structured cost
+// object remains intact; this only changes which of its fields are always inked.
+function costDetailTipHTML(cost, planCost) {
+  const coverage = costCoveragePercent(cost);
+  const row = (label, value) => `<div class="t-row"><span class="dim">${escapeHTML(label)}</span> ${escapeHTML(value)}</div>`;
+  let html = formulaTipHTML({
+    title: "API-equivalent cost",
+    formula: "Σ per-turn billable usage × sourced on-demand rate",
+    result: fmtUSD(cost.apiEquivalentUsd),
+  });
+  html += `<div class="t-hist">estimate details</div>`;
+  html += row("Status", costStatusText(cost));
+  html += row("Coverage", coverage == null ? "Unknown" : `${coverage}%`);
+  html += row("Price source", costSourceText(cost));
+
+  if (cost.estimatedBilledUsd != null) {
+    html += row("Estimated billed", fmtUSD(cost.estimatedBilledUsd));
+  } else if (cost.status === "included") {
+    html += row("Billing route", "Included plan; no incremental dollar estimate");
+  } else {
+    html += row("Estimated billed", "Unavailable");
+  }
+  if (cost.vendorEstimatedUsd != null) {
+    const suffix = cost.vendorStatus === "stale" ? " (stale)" : "";
+    html += row("Vendor estimate", fmtUSD(cost.vendorEstimatedUsd) + suffix);
+  }
+  if (cost.planCredits != null) html += row("Plan usage", fmtCredits(cost.planCredits));
+  if (planCost.apiEquivalentUsd != null) html += row("5h API equivalent", fmtUSD(planCost.apiEquivalentUsd));
+  if (planCost.estimatedBilledUsd != null) html += row("5h estimated billed", fmtUSD(planCost.estimatedBilledUsd));
+  if (planCost.vendorEstimatedUsd != null) html += row("5h vendor estimate", fmtUSD(planCost.vendorEstimatedUsd));
+  if (planCost.planCredits != null) html += row("5h plan usage", fmtCredits(planCost.planCredits));
+  for (const reason of cost.unpricedReasons) html += row("Unpriced", reason);
+  html += `<div class="t-why">The asterisk marks a public on-demand API comparison, not necessarily the amount billed. Subscription inclusion, negotiated rates, vendor credits, and incomplete usage coverage can make actual spend differ.</div>`;
+  return html;
+}
+
+function officialPlanGaugeHTML(label, pct, bucket, plan, stacked) {
+  const detail = ["Official utilization from the read-only plan-usage cache."];
+  if (bucket && bucket.resets_at) detail.push(resetCountdown(bucket.resets_at) + ".");
+  const mtime = plan && plan.mtime ? Date.parse(plan.mtime) : NaN;
+  if (Number.isFinite(mtime)) detail.push(`Updated ${agoString(mtime)}.`);
+  if (plan && plan.stale) detail.push("The cached utilization is stale.");
+  const hover = escapeHTML(formulaTipHTML({
+    title: `${label} plan usage`,
+    formula: "official plan utilization",
+    result: fmtPct(pct),
+    why: detail.join(" "),
+  }));
+  return `<div class="plan-gauge has-tip" data-tip="${hover}">
+    <div class="gauge-head${stacked ? " week" : ""}">
+      <span>${escapeHTML(label)}</span>
+      <span class="gauge-figs"><b style="color:${pctColor(pct)}">${fmtPct(pct)}</b></span>
+    </div>
+    ${gaugeBar(pct)}
+  </div>`;
+}
+
 function renderCostCard(data, plan) {
   const totals = data.totals || {};
   const pw = data.plan_window || null;
   const totalCost = normalizedCost(totals);
   const planCost = normalizedCost(pw);
-
-  // tip() → escaped formula-descriptor HTML for a data-tip attribute.
-  const tip = (obj) => escapeHTML(formulaTipHTML(obj));
-
-  // 5h plan gauge: our $ (plan_window) + official % (plan cache)
   const fh = plan && plan.available ? plan.five_hour : null;
   const wk = plan && plan.available ? plan.seven_day : null;
-  const fhPct = fh && fh.utilization != null ? fh.utilization : null;
-  const wkPct = wk && wk.utilization != null ? wk.utilization : null;
-  const stale = plan && plan.available && plan.stale;
-  const freshness = !plan || !plan.available
-    ? `<span class="dim">Official % unavailable</span>`
-    : `<span class="${stale ? "stale" : "dim"}">Official % · updated ${agoString(Date.parse(plan.mtime))}${stale ? " (stale)" : ""}</span>`;
-
+  const fhPct = fh && Number.isFinite(fh.utilization) ? fh.utilization : null;
+  const wkPct = wk && Number.isFinite(wk.utilization) ? wk.utilization : null;
   const apiEquivalent = totalCost.apiEquivalentUsd;
-  const windowDollars = planCost.apiEquivalentUsd;
-  const statusText = costStatusText(totalCost);
-  const coverageRows = [];
-  if (totalCost.estimatedBilledUsd != null) {
-    coverageRows.push(`<div class="kv"><span>Estimated billed</span><b>${fmtUSD(totalCost.estimatedBilledUsd)}</b></div>`);
-  } else if (totalCost.status === "included") {
-    coverageRows.push(`<div class="kv"><span>Billing route</span><b>Included</b></div>`);
-  }
-  if (totalCost.vendorEstimatedUsd != null && totalCost.vendorEstimatedUsd !== totalCost.estimatedBilledUsd) {
-    coverageRows.push(`<div class="kv"><span>Vendor estimate</span><b>${fmtUSD(totalCost.vendorEstimatedUsd)}</b></div>`);
-  }
-  if (totalCost.planCredits != null) {
-    coverageRows.push(`<div class="kv"><span>Plan usage</span><b>${escapeHTML(fmtCredits(totalCost.planCredits))}</b></div>`);
-  }
-  coverageRows.push(`<div class="kv"><span>Estimate status</span><b>${escapeHTML(statusText)}</b></div>`);
-  if (totalCost.unpricedReasons.length) {
-    coverageRows.push(`<div class="kv muted-note">${escapeHTML(totalCost.unpricedReasons.join(" · "))}</div>`);
-  }
-  coverageRows.push(`<div class="kv muted-note">${escapeHTML(costSourceText(totalCost))}</div>`);
+  const amountText = apiEquivalent == null ? "—" : fmtUSD(apiEquivalent);
+  const estimateMark = apiEquivalent == null ? "" : `<sup class="cost-estimate-mark">*</sup>`;
+  const coverage = costCoveragePercent(totalCost);
+  const coverageText = coverage == null ? "—" : `${coverage}%`;
+  const headlineTip = escapeHTML(costDetailTipHTML(totalCost, planCost));
+  const gauges = [];
+  if (fhPct != null) gauges.push(officialPlanGaugeHTML("5h plan", fhPct, fh, plan, false));
+  if (wkPct != null) gauges.push(officialPlanGaugeHTML("Weekly", wkPct, wk, plan, gauges.length > 0));
 
   el.cardCost.innerHTML = `
     <div class="card-label">cost</div>
-    <div class="headline-row">
-      <div class="headline has-tip" data-tip="${tip({
-        title: "API-equivalent cost",
-        formula: "Σ per-turn billable usage × sourced on-demand rate",
-        result: fmtUSD(apiEquivalent),
-        why: "Comparable on-demand API value for this window. Subscription inclusion, vendor credits, and estimated billed dollars are shown separately.",
-      })}">
-        <div class="hv">${fmtUSD(apiEquivalent)}</div>
-        <div class="hk">API equivalent · ${escapeHTML(statusText)}</div>
+    <div class="headline-row has-tip" data-tip="${headlineTip}">
+      <div class="headline">
+        <div class="hv">${amountText}${estimateMark}</div>
+      </div>
+      <div class="headline">
+        <div class="hv">${coverageText}</div>
+        <div class="hk">coverage</div>
       </div>
     </div>
-
-    ${coverageRows.join("")}
-
-    <div class="gauge-block">
-      <div class="gauge-head">
-        <span>5h plan window</span>
-        <span class="gauge-figs">
-          ${windowDollars != null ? `<span class="has-tip" data-tip="${tip({
-            title: "5h window — API equivalent",
-            formula: "per-turn usage × sourced on-demand rate",
-            result: fmtUSD(windowDollars),
-            why: "Comparable API value for sessions in this plan window, not necessarily an incremental subscription charge.",
-          })}"><b>${fmtUSD(windowDollars)}</b> <span class="dim">API eq.</span></span>` : ""}
-          ${fhPct != null ? `<b class="has-tip" style="color:${pctColor(fhPct)}" data-tip="${tip({
-            title: "5h plan usage — official",
-            formula: "from the read-only plan-usage cache",
-            result: fmtPct(fhPct),
-            why: "Official utilization of your 5-hour plan window, read from the local plan-usage cache.",
-          })}">${fmtPct(fhPct)}</b>` : `<span class="dim">—</span>`}
-        </span>
-      </div>
-      ${gaugeBar(fhPct)}
-      <div class="gauge-foot">
-        <span>${fh && fh.resets_at ? resetCountdown(fh.resets_at) : ""}</span>
-        ${freshness}
-      </div>
-      ${wkPct != null ? `
-        <div class="gauge-head week">
-          <span>Weekly</span>
-          <span class="gauge-figs"><b class="has-tip" style="color:${pctColor(wkPct)}" data-tip="${tip({
-            title: "Weekly plan usage",
-            formula: "7-day plan utilization",
-            result: fmtPct(wkPct),
-            why: "Utilization of your 7-day (weekly) plan allowance.",
-          })}">${fmtPct(wkPct)}</b></span>
-        </div>
-        ${gaugeBar(wkPct)}
-      ` : ""}
-    </div>`;
+    ${gauges.length ? `<div class="gauge-block">${gauges.join("")}</div>` : ""}`;
 
   el.cardTokens.innerHTML = tokensBlockHTML(totals);
 
