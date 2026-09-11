@@ -396,7 +396,7 @@ func TestCondenseRecordShouldStampTheSchemaVersionWhenTheRunnerSucceeds(t *testi
 		return `{"name":"projects-tab","description":"Added a stacked hours tab","summary":"Built the tab.","tasks":["Added the tab","Wired the totals"]}`, nil
 	}
 	now := time.Date(2026, 7, 31, 22, 0, 0, 0, time.UTC)
-	if err := CondenseRecord(&record, run, "haiku", now); err != nil {
+	if _, err := CondenseRecord(&record, run, "haiku", now); err != nil {
 		t.Fatal(err)
 	}
 	if record.Summary == nil || record.Summary.Name != "projects-tab" {
@@ -433,7 +433,7 @@ func TestCondenseRecordShouldLeaveTheRecordStaleWhenTheRunnerFails(t *testing.T)
 		func(string) (string, error) { return "I could not summarize that.", nil },
 	} {
 		record := Record{Digest: Digest{Title: "Wire projects view"}}
-		if err := CondenseRecord(&record, run, "haiku", time.Now()); err == nil {
+		if _, err := CondenseRecord(&record, run, "haiku", time.Now()); err == nil {
 			t.Fatal("want an error from a failed condense")
 		}
 		if record.Summary != nil || record.SummaryVersion != 0 || record.GeneratedAt != "" || record.DigestHash != "" {
@@ -690,7 +690,7 @@ func TestCondenseRecordShouldLeaveTheRecordStaleWhenTheReplyIsRejected(t *testin
 	run := func(string) (string, error) {
 		return `{"name":"Not Kebab","description":"d","summary":"s","tasks":[]}`, nil
 	}
-	if err := CondenseRecord(&record, run, "haiku", time.Now()); err == nil {
+	if _, err := CondenseRecord(&record, run, "haiku", time.Now()); err == nil {
 		t.Fatal("CondenseRecord accepted a rejected reply")
 	}
 	if record.Summary != nil {
@@ -728,5 +728,98 @@ func TestCondenseShouldKeepTheCardWhenOnlyTheOptionalTasksFieldIsMalformed(t *te
 		if summary.Description != "d" {
 			t.Errorf("%s: lost the description", reply)
 		}
+	}
+}
+
+func TestCondenseRecordShouldRecordWhyTheReplyWasRefusedWithoutStampingTheRecord(t *testing.T) {
+	record := Record{Digest: Digest{Title: "t", SessionID: "s"}}
+	run := func(string) (string, error) {
+		return `{"name":"Not Kebab","description":"d","summary":"s","tasks":[]}`, nil
+	}
+	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+
+	changed, err := CondenseRecord(&record, run, "haiku", now)
+	if err == nil {
+		t.Fatal("a non-conforming reply was accepted")
+	}
+	if !changed {
+		t.Error("want the newly recorded refusal reported as a change to persist")
+	}
+	if record.SummaryRejectedReason == "" {
+		t.Fatal("no reason recorded")
+	}
+	if !strings.Contains(record.SummaryRejectedReason, "name") {
+		t.Errorf("reason %q does not name the offending field", record.SummaryRejectedReason)
+	}
+	if record.SummaryRejectedAt != "2026-09-11T12:00:00Z" {
+		t.Errorf("SummaryRejectedAt = %q", record.SummaryRejectedAt)
+	}
+	// The refusal is provenance, never lifecycle: the record must still look
+	// exactly as unfinished as it did before, or it would never be retried.
+	if record.SummaryVersion != 0 || record.DigestHash != "" || record.Summary != nil {
+		t.Errorf("a refusal stamped the record: %+v", record)
+	}
+	if !NeedsCondense(record, false) {
+		t.Error("want a refused record still queued for the next run")
+	}
+}
+
+func TestCondenseRecordShouldNotRewriteTheRecordWhenTheReplyFailsTheSameWayTwice(t *testing.T) {
+	// A session that fails identically every run would otherwise churn its file
+	// on every pass, for no new information.
+	record := Record{Digest: Digest{Title: "t", SessionID: "s"}}
+	run := func(string) (string, error) {
+		return `{"name":"Not Kebab","description":"d","summary":"s","tasks":[]}`, nil
+	}
+	first := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	if changed, _ := CondenseRecord(&record, run, "haiku", first); !changed {
+		t.Fatal("want the first refusal persisted")
+	}
+
+	later := first.Add(time.Hour)
+	changed, err := CondenseRecord(&record, run, "haiku", later)
+	if err == nil {
+		t.Fatal("want the second attempt to fail too")
+	}
+	if changed {
+		t.Error("want an unchanged reason reported as no change to write")
+	}
+	if record.SummaryRejectedAt != "2026-09-11T12:00:00Z" {
+		t.Errorf("SummaryRejectedAt moved to %q on an unchanged reason", record.SummaryRejectedAt)
+	}
+}
+
+func TestCondenseRecordShouldClearAnOldRefusalWhenTheNextReplyConforms(t *testing.T) {
+	// Leaving the reason behind would describe a record that now has a summary.
+	record := Record{
+		Digest:                Digest{Title: "t", SessionID: "s"},
+		SummaryRejectedReason: "model reply rejected: summary name \"Not Kebab\" is not kebab-case",
+		SummaryRejectedAt:     "2026-09-11T12:00:00Z",
+	}
+	run := func(string) (string, error) {
+		return `{"name":"fixed-the-lookup","description":"Fixed it.","summary":"It is fixed now.","tasks":[]}`, nil
+	}
+	if _, err := CondenseRecord(&record, run, "haiku", time.Now()); err != nil {
+		t.Fatalf("conforming reply rejected: %v", err)
+	}
+	if record.SummaryRejectedReason != "" || record.SummaryRejectedAt != "" {
+		t.Errorf("a stale refusal survived a success: %q at %q", record.SummaryRejectedReason, record.SummaryRejectedAt)
+	}
+	if record.Summary == nil {
+		t.Error("want the summary stamped")
+	}
+}
+
+func TestNeedsCondenseShouldIgnoreARecordedRefusal(t *testing.T) {
+	// The refusal fields must stay invisible to the staleness check. If either
+	// ever fed it, a rejected record would stop being retried — the exact stuck
+	// state this design avoids by keeping the check content-derived.
+	record := Record{
+		Digest:                Digest{Title: "t", SessionID: "s"},
+		SummaryRejectedReason: "model reply rejected: summary description is empty",
+		SummaryRejectedAt:     "2026-09-11T12:00:00Z",
+	}
+	if !NeedsCondense(record, false) {
+		t.Error("a refused record was treated as settled")
 	}
 }

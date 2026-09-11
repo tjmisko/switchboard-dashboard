@@ -39,6 +39,14 @@ type Record struct {
 	// under an unchanged summary — is caught by NeedsCondense. Empty means
 	// "unknown", never "stale"; see NeedsCondense.
 	DigestHash string `json:"digestHash,omitempty"`
+	// SummaryRejectedReason and SummaryRejectedAt hold why the last condense
+	// attempt produced no summary. They are provenance, not lifecycle: neither
+	// is read by NeedsCondense, so a rejected record stays queued and is retried
+	// on the next run exactly as an unattempted one is. Without them a refusal
+	// reached only the log, and a session that never acquires a summary looked
+	// the same as one that was never attempted.
+	SummaryRejectedReason string `json:"summaryRejectedReason,omitempty"`
+	SummaryRejectedAt     string `json:"summaryRejectedAt,omitempty"`
 }
 
 // CurrentSummaryVersion is the condenser's output-schema version. v2 added
@@ -453,20 +461,35 @@ func Condense(d Digest, run Runner) (Summary, error) {
 // CondenseRecord condenses the record's digest in place and stamps the schema
 // version and the digest hash that produced the summary, which is what makes
 // the next run's NeedsCondense skip it — without the stamps every plain
-// -condense run would re-summarize the whole archive. A failed run leaves the
-// record untouched, so the retry happens next time rather than marking a
-// missing summary current.
-func CondenseRecord(record *Record, run Runner, model string, now time.Time) error {
+// -condense run would re-summarize the whole archive. A failed run stamps none
+// of them, so the retry happens next time rather than marking a missing summary
+// current; it records why it failed instead.
+//
+// Reporting whether the record changed lets the caller write a refusal without
+// having to know which fields carry one.
+func CondenseRecord(record *Record, run Runner, model string, now time.Time) (changed bool, err error) {
 	summary, err := Condense(record.Digest, run)
 	if err != nil {
-		return err
+		reason := err.Error()
+		// Rewriting an unchanged reason every run would churn the file for a
+		// session that fails the same way each time.
+		if record.SummaryRejectedReason == reason {
+			return false, err
+		}
+		record.SummaryRejectedReason = reason
+		record.SummaryRejectedAt = now.UTC().Format(time.RFC3339)
+		return true, err
 	}
 	record.Summary = &summary
 	record.SummaryVersion = CurrentSummaryVersion
 	record.Model = model
 	record.GeneratedAt = now.UTC().Format(time.RFC3339)
 	record.DigestHash = HashDigest(record.Digest)
-	return nil
+	// A success supersedes whatever the last attempt failed on; leaving the
+	// reason behind would describe a record that now has a summary.
+	record.SummaryRejectedReason = ""
+	record.SummaryRejectedAt = ""
+	return true, nil
 }
 
 // claudeArgv is the summarizer's command line, split out from ClaudeRunner so

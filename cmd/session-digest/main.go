@@ -102,8 +102,12 @@ func main() {
 		if *condense && sessiondigest.NeedsCondense(record, *force) {
 			if record.Digest.Thin() {
 				skippedThin++
-			} else if err := sessiondigest.CondenseRecord(&record, run, *model, time.Now()); err != nil {
+			} else if noted, err := sessiondigest.CondenseRecord(&record, run, *model, time.Now()); err != nil {
+				// noted means the refusal is newly recorded on the record and
+				// wants persisting; the record stays unstamped either way, so
+				// NeedsCondense will try again next run.
 				log.Printf("condense %s/%s: %v", ref.ProjectSlug, ref.SessionID, err)
+				changed = changed || noted
 			} else {
 				condensed++
 				changed = true
