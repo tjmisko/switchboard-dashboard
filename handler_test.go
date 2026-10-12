@@ -305,6 +305,57 @@ func TestServer_servesEmbeddedIndex(t *testing.T) {
 	}
 }
 
+func TestServer_embeddedCostCardKeepsQualificationsInHoverOnly(t *testing.T) {
+	srv := &Server{Ctl: "unused"}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/app.js", nil)
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Result().StatusCode != http.StatusOK {
+		t.Fatalf("GET /app.js status = %d, want 200", rec.Result().StatusCode)
+	}
+	source := rec.Body.String()
+	start := strings.Index(source, "el.cardCost.innerHTML =")
+	if start < 0 {
+		t.Fatal("embedded app.js has no cost-card renderer")
+	}
+	end := strings.Index(source[start:], "el.cardTokens.innerHTML")
+	if end < 0 {
+		t.Fatal("embedded app.js cost-card renderer has no end boundary")
+	}
+	liveMarkup := source[start : start+end]
+
+	for _, required := range []string{
+		`data-tip="${headlineTip}"`, `${amountText}${estimateMark}`, `<div class="hk">coverage</div>`,
+		`gauges.length ?`,
+	} {
+		if !strings.Contains(liveMarkup, required) {
+			t.Fatalf("live cost markup missing %q", required)
+		}
+	}
+	for _, hoverOnly := range []string{
+		"Estimate status", "Price source", "Unpriced", "Unavailable", "API equivalent",
+	} {
+		if strings.Contains(liveMarkup, hoverOnly) {
+			t.Fatalf("qualification %q escaped the cost hover into live markup", hoverOnly)
+		}
+	}
+	for _, requiredHover := range []string{
+		`function costDetailTipHTML`, `row("Status"`, `row("Coverage"`,
+		`row("Price source"`, `row("Unpriced"`, `Estimated billed`,
+	} {
+		if !strings.Contains(source, requiredHover) {
+			t.Fatalf("cost hover missing %q", requiredHover)
+		}
+	}
+	if !strings.Contains(source, `const estimateMark = apiEquivalent == null ? "" : `+"`"+`<sup class="cost-estimate-mark">*</sup>`+"`") {
+		t.Fatal("cost estimate asterisk must be conditional on a known amount")
+	}
+	if strings.Contains(source, "Official % unavailable") {
+		t.Fatal("embedded app.js reintroduced unavailable-plan prose")
+	}
+}
+
 // The field guide is a second embedded page, and its three assets are listed on
 // their own //go:embed line. A missing one is a 404 the compiler cannot catch,
 // so each is fetched here — the page is inert without any of them.

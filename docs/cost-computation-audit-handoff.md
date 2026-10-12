@@ -1,11 +1,54 @@
 # Claude and Codex cost computation: audit and implementation handoff
 
-Status: live pricing release deployed; legacy-display correction installed, dashboard restart pending
+Status: 2026-09-11 reconciliation prepared; host activation pending
 Audit date: 2026-08-25  
 Repositories:
 
 - `switchboard`: provider observation, history events, pricing, aggregation, and `switchboard-ctl timeline`
 - `switchboard-dashboard`: timeline proxying, multi-provider merge, and browser presentation
+
+## Current reconciliation — 2026-09-11
+
+The prior deployment record below is historical. Inspection found that the
+daemon's shared release was `28b3491`, while the dashboard's provider registry
+used a private `18c9ba5` dirty CLI build. That CLI emitted only `cost_usd`, which
+the installed dashboard correctly rejected as unknown. The canonical pricing
+branch had not been merged into Switchboard's current `main`.
+
+Reconciliation commit `69ca5cfe9b066562fbb31b1320a5d3cfd6166003` merges the
+pricing branch into `9ae403d`, preserving the retirement of memory sampling,
+reconciliation outside the live-state lock, and publication suppression.
+Pricing tests now inject their catalog and clock instead of depending on the
+host's cache. The suppression regression uses distinct message identities and
+duplicate streamed fragments to verify durable accounting without broadcasts.
+
+The dashboard cost-card test now checks the interpolated estimate marker at the
+correct boundary. `pricing_integration_test.go` adds an opt-in check against a
+real CLI, exercising revised canonical usage, explicit unknown costs, and both
+single-provider and merged HTTP paths. It passes with the reconciled CLI and
+fails with the installed legacy CLI.
+
+Validated: dashboard Go/JavaScript tests, pricing/history/transcript/Codex/state
+race tests, focused daemon and CLI race tests, builds, and vet. The remaining
+full-suite failures are the pre-existing Unix-socket restrictions and the
+conformance fixture's assumption that PID 2 is a kernel thread.
+
+The managed environment mounts `~/Projects/switchboard` read-only; even the
+escalated fast-forward could not write `.git/FETCH_HEAD`. The merge is preserved
+in `.worktrees/switchboard-pricing-reconciliation` and in a verified Git bundle.
+Matched release artifacts and a reviewable activation script live under
+`.bin/cost-reconciliation-20260911/`. Run its `activate.py --check` for read-only
+preflight, then `activate.py` in the normal host session to apply the release.
+
+Activation verifies checksums and repository/configuration preconditions,
+refreshes the official catalogs before changing services, fast-forwards the
+Switchboard checkout, and installs immutable releases. The dashboard registry
+then resolves its CLI through `~/.local/share/switchboard/current`, the same
+release path as the daemon. Configuration and the previous release pointer are
+backed up; a failed service verification restores them. No activation has been
+claimed: this environment blocks the user systemd bus, localhost, and vendor
+pricing domains. The bundled and existing cached catalogs have expired and must
+not be relabeled current without a successful vendor refresh.
 
 ## Goal
 
@@ -390,10 +433,14 @@ Update `switchboard-dashboard/internal/timeline/types.go`, `merge.go`, `docs/pro
 
 Presentation requirements:
 
-- Show API equivalent and estimated billed cost as separate labels.
-- Display `—` for unknown, never `$0.00`.
-- Mark partial or stale totals visibly and expose coverage/source/as-of details in accessible text or a tooltip.
-- For subscription-included Codex usage, use wording such as `Included · $X API equivalent`; do not claim `$0 billed` unless that fact is supported.
+- Keep the live cost card to an asterisked API-equivalent amount and rounded
+  coverage percentage; display `—` for an unknown amount, never a fabricated
+  `$0.00`.
+- Put estimate semantics, status, source/as-of, unpriced reasons,
+  estimated-billed/vendor/credit values, and subscription/billing caveats in the
+  cost topline hover without discarding them from the data model.
+- Render official 5-hour or weekly plan gauges only when the corresponding
+  utilization value exists, with reset and freshness details in hover.
 - Identify `Claude via Anthropic`, `Claude via Bedrock`, `Codex via OpenAI`, or the resolved equivalent when available.
 - Multi-provider merge must preserve nullability, statuses, unpriced counts, and mixed-source metadata.
 - Keep deprecated numeric aliases parseable at the wire boundary, but never
@@ -984,5 +1031,7 @@ systemctl --user show switchboard-dashboard.service \
 ```
 
 Then hard-refresh `http://localhost:8780`. The cost card should show a sourced
-structured estimate when supported, or `— · Unknown`; it must never show the
-removed legacy status.
+structured estimate as `$amount*` plus rounded coverage, or `—` when unknown;
+all qualifications should be available from its hover and it must never show
+the removed legacy status. Empty official plan gauges and unavailable copy are
+not rendered.

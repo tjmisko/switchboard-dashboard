@@ -9,7 +9,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   laneIdentity, rawSessionId, laneProvider, providerLabel, billingProviderLabel, providerLegend, adaptProviderTimeline,
-  normalizedCost, apiEquivalentCost,
+  normalizedCost, apiEquivalentCost, costCoveragePercent,
   leadLabel, nameSegments, buildBars, spanInefficiency, switchArrivals,
   deflickerIntervals, deflickerLanes, FLICKER_MS,
   presenceSplitMs, awayIdleMs, packLanes,
@@ -1107,6 +1107,15 @@ test("normalizedCost should ignore legacy estimates and preserve structured zero
   assert.equal(legacyVendor.vendorStatus, null);
   assert.equal(apiEquivalentCost({ cost: { api_equivalent_usd: 0, status: "estimated" } }), 0);
   assert.equal(normalizedCost({ cost: { status: "unknown" } }).apiEquivalentUsd, null);
+});
+
+test("costCoveragePercent should round, clamp, and preserve unknown coverage", () => {
+  assert.equal(costCoveragePercent({ coverage: 0.834 }), 83);
+  assert.equal(costCoveragePercent({ coverage: 1 }), 100);
+  assert.equal(costCoveragePercent({ coverage: -0.2 }), 0);
+  assert.equal(costCoveragePercent({ coverage: 1.4 }), 100);
+  assert.equal(costCoveragePercent({ coverage: null }), null);
+  assert.equal(costCoveragePercent(null), null);
 });
 
 test("adaptProviderTimeline should project nested Codex threads without duplicating Claude subagents", () => {
