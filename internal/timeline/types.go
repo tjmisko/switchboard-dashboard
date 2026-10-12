@@ -68,7 +68,9 @@ type Lane struct {
 	// Agent is the client implementation. These fields identify who executed and
 	// billed the request; neither can safely be inferred from Agent alone.
 	ExecutionProvider string `json:"execution_provider,omitempty"`
+	Gateway           string `json:"gateway,omitempty"`
 	BillingRoute      string `json:"billing_route,omitempty"`
+	RouteEvidence     string `json:"route_evidence,omitempty"`
 	Model             string `json:"model,omitempty"`
 	ServiceTier       string `json:"service_tier,omitempty"`
 	Speed             string `json:"speed,omitempty"`
@@ -292,6 +294,7 @@ type UsageBreakdown struct {
 // Empty fields remain unknown; consumers must not infer them from AgentClient.
 type BillingIdentity struct {
 	AgentClient       string `json:"agent_client,omitempty"`
+	Gateway           string `json:"gateway,omitempty"`
 	ExecutionProvider string `json:"execution_provider,omitempty"`
 	BillingRoute      string `json:"billing_route,omitempty"`
 	AccountKind       string `json:"account_kind,omitempty"`
