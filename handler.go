@@ -91,6 +91,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/summaries", s.handleSummaries)
 	mux.HandleFunc("/api/memory", s.handleMemory)
 	mux.HandleFunc("/api/settings", s.handleSettings)
+	mux.HandleFunc("/api/billing", s.handleBilling)
 	mux.Handle("/", s.staticHandler())
 	return mux
 }
