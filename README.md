@@ -420,6 +420,11 @@ pins one, digest or no digest; the hover's `▸` line says what the click holds.
   (`away_after_ms`, `switch_recovery_ms`, `switch_flicker_ms`, `min_engage_ms`)
   loaded from `--settings`. Always `200`; an unconfigured server serves the
   documented defaults, which are also the frontend's fallbacks.
+- **`GET /api/billing`** — reads `~/.config/switchboard/billing.json` and returns
+  only declared expected routes. For example,
+  `{ "claude": { "expected_route": "subscription" } }`. The dashboard warns
+  when a measured route differs. This declaration never changes usage history
+  or cost estimates. A missing file returns an empty object.
 - Static assets are served from `/`. The UI also reads `?day`, `?since`, and
   `?until` from its own URL, so a window is shareable.
 
