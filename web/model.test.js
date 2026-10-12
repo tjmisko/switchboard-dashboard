@@ -9,7 +9,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   laneIdentity, rawSessionId, laneProvider, providerLabel, billingProviderLabel, providerLegend, adaptProviderTimeline,
-  normalizedCost, apiEquivalentCost, costCoveragePercent,
+  normalizedCost, apiEquivalentCost, costCoveragePercent, routeCosts, billingMismatches,
   leadLabel, nameSegments, buildBars, spanInefficiency, switchArrivals,
   deflickerIntervals, deflickerLanes, FLICKER_MS,
   presenceSplitMs, awayIdleMs, packLanes,
@@ -993,12 +993,14 @@ test("providerLabel should identify the agent client without assuming its execut
   assert.equal(providerLabel("codex"), "Codex");
   assert.equal(providerLabel("claude"), "Claude");
   assert.equal(providerLabel("arachne"), "Arachne");
+  assert.equal(providerLabel("pi"), "Pi");
 });
 
 test("billingProviderLabel should identify client and execution provider separately", () => {
   assert.equal(billingProviderLabel({ agent: "codex", execution_provider: "openai" }), "Codex via OpenAI");
   assert.equal(billingProviderLabel({ agent: "claude", execution_provider: "aws-bedrock" }), "Claude via Amazon Bedrock");
   assert.equal(billingProviderLabel({ agent: "codex" }), "Codex");
+  assert.equal(billingProviderLabel({ agent: "pi", gateway: "openrouter", execution_provider: "" }), "Pi via OpenRouter");
   assert.equal(billingProviderLabel({ agent: "codex", pricing_groups: [
     { identity: { execution_provider: "openai" } },
   ] }), "Codex via OpenAI");
@@ -1006,6 +1008,27 @@ test("billingProviderLabel should identify client and execution provider separat
     { identity: { execution_provider: "openai" } },
     { identity: { execution_provider: "azure-openai" } },
   ] }), "Codex via multiple providers");
+});
+
+test("routeCosts preserves mixed session routes and unknown amounts", () => {
+  assert.deepEqual(routeCosts([{ agent: "claude", pricing_groups: [
+    { identity: { billing_route: "subscription" }, cost: { api_equivalent_usd: 2, status: "included" } },
+    { identity: { billing_route: "api" }, cost: { api_equivalent_usd: 3, estimated_billed_usd: 3, status: "estimated" } },
+  ] }, { agent: "pi", billing_route: "gateway", cost: { status: "unknown" } }]), [
+    { route: "api", sessions: 1, apiEquivalentUsd: 3, estimatedBilledUsd: 3 },
+    { route: "gateway", sessions: 1, apiEquivalentUsd: null, estimatedBilledUsd: null },
+    { route: "subscription", sessions: 1, apiEquivalentUsd: 2, estimatedBilledUsd: null },
+  ]);
+});
+
+test("billingMismatches warns only on a detected route that differs from the declaration", () => {
+  assert.deepEqual(billingMismatches([
+    { agent: "claude", session_id: "a", billing_route: "api" },
+    { agent: "claude", session_id: "b", billing_route: "subscription" },
+    { agent: "claude", session_id: "c" },
+  ], { claude: { expected_route: "subscription" } }), [
+    { client: "claude", sessionId: "a", expected: "subscription", detected: "api" },
+  ]);
 });
 
 test("normalizedCost should preserve canonical billing concepts and explicit zero", () => {

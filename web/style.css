@@ -753,6 +753,10 @@ body.view-projects .boxes { grid-template-columns: minmax(0, 2.15fr) minmax(0, 0
   margin-left: 1px; color: var(--fg-muted); font-size: 0.48em;
   line-height: 0; vertical-align: super; letter-spacing: 0;
 }
+.route-breakdown { border-top: 1px solid var(--border-soft); padding-top: 10px; margin-bottom: 10px; }
+.route-breakdown .kv { font-size: 11px; }
+.route-breakdown .v { font-size: 11px; white-space: normal; text-align: right; }
+.billing-mismatch { color: var(--c-permission); font-size: 11px; margin: 9px 0; }
 
 .card.attention { background: linear-gradient(135deg, var(--attention-tint), var(--bg-elev)); }
 

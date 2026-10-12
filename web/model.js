@@ -68,11 +68,13 @@
   const PROVIDER_ADAPTERS = Object.freeze({
     claude: Object.freeze({ children: "lane.subagents", label: "Claude" }),
     codex: Object.freeze({ children: "agent_timeline", label: "Codex" }),
+    pi: Object.freeze({ children: "lane.subagents", label: "Pi" }),
   });
 
   const EXECUTION_PROVIDER_LABELS = Object.freeze({
     anthropic: "Anthropic",
     openai: "OpenAI",
+    openrouter: "OpenRouter",
     "aws-bedrock": "Amazon Bedrock",
     bedrock: "Amazon Bedrock",
     "google-vertex": "Google Vertex AI",
@@ -111,6 +113,8 @@
   function billingProviderLabel(lane) {
     if (!lane) return "";
     const client = providerLabel(laneProvider(lane));
+    const gateway = String(lane.gateway || (lane.billing_identity && lane.billing_identity.gateway) || "").toLowerCase();
+    if (gateway) return `${client} via ${EXECUTION_PROVIDER_LABELS[gateway] || providerLabel(gateway)}`;
     let raw = String(
       lane.execution_provider ||
       (lane.billing_identity && lane.billing_identity.execution_provider) ||
@@ -128,6 +132,49 @@
     const execution = EXECUTION_PROVIDER_LABELS[raw] || providerLabel(raw);
     if (!client || client.toLowerCase() === execution.toLowerCase()) return execution;
     return `${client} via ${execution}`;
+  }
+
+  // Preserve unknown routes as unknown. A client name or model prefix does not
+  // establish who paid, and a missing amount must never become a $0.00 row.
+  function routeCosts(lanes) {
+    const rows = new Map();
+    for (const lane of lanes || []) {
+      const groups = Array.isArray(lane.pricing_groups) && lane.pricing_groups.length
+        ? lane.pricing_groups : [lane];
+      const seen = new Set();
+      for (const group of groups) {
+        const route = String((group.identity && group.identity.billing_route) || lane.billing_route ||
+          (lane.billing_identity && lane.billing_identity.billing_route) || "unknown").toLowerCase();
+        const cost = normalizedCost(group);
+        const row = rows.get(route) || { route, apiEquivalentUsd: 0, estimatedBilledUsd: 0, hasAPI: false, hasBilled: false, sessions: 0 };
+        if (!seen.has(route)) { row.sessions++; seen.add(route); }
+        if (cost.apiEquivalentUsd != null) { row.apiEquivalentUsd += cost.apiEquivalentUsd; row.hasAPI = true; }
+        if (cost.estimatedBilledUsd != null) { row.estimatedBilledUsd += cost.estimatedBilledUsd; row.hasBilled = true; }
+        rows.set(route, row);
+      }
+    }
+    return [...rows.values()].map((row) => ({
+      route: row.route, sessions: row.sessions,
+      apiEquivalentUsd: row.hasAPI ? row.apiEquivalentUsd : null,
+      estimatedBilledUsd: row.hasBilled ? row.estimatedBilledUsd : null,
+    })).sort((a, b) => a.route.localeCompare(b.route));
+  }
+
+  function billingMismatches(lanes, expectations) {
+    const mismatches = [];
+    for (const lane of lanes || []) {
+      const client = laneProvider(lane);
+      const expected = expectations && expectations[client] && expectations[client].expected_route;
+      if (!expected) continue;
+      const groups = Array.isArray(lane.pricing_groups) && lane.pricing_groups.length
+        ? lane.pricing_groups : [lane];
+      const routes = new Set(groups.map((group) => String((group.identity && group.identity.billing_route) ||
+        lane.billing_route || "").toLowerCase()).filter((route) => route && route !== "unknown"));
+      for (const detected of routes) {
+        if (detected !== expected) mismatches.push({ client, expected, detected, sessionId: rawSessionId(lane) });
+      }
+    }
+    return mismatches;
   }
 
   // normalizedCost accepts only structured cost data. Legacy cost_usd aliases
@@ -1791,7 +1838,7 @@
   return {
     scaleGeometry,
     laneIdentity, rawSessionId, laneProvider, providerLabel, billingProviderLabel, providerLegend, adaptProviderTimeline,
-    normalizedCost, apiEquivalentCost, costCoveragePercent,
+    normalizedCost, apiEquivalentCost, costCoveragePercent, routeCosts, billingMismatches,
     leadLabel, nameSegments, buildBar, buildBars,
     spanInefficiency, switchArrivals, presenceSplitMs, awayIdleMs,
     deflickerIntervals, deflickerLanes, FLICKER_MS,

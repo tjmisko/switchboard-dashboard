@@ -352,6 +352,7 @@ function focusEnabled() {
 // state
 // ---------------------------------------------------------------------------
 let lastData = null;       // parsed timeline (for resize re-render)
+let billingExpectations = {};
 let lastTimelineText = ""; // raw timeline JSON (repaint-on-change guard)
 let lastPlan = null;       // parsed /api/plan
 let lastPlanText = "";
@@ -583,6 +584,12 @@ function settleTimeline(day, text, opts) {
   lastTimelineText = text;
   dataDay = day;
   lastData = adaptProviderTimeline(JSON.parse(text));
+  const providerErrors = Array.isArray(lastData.provider_errors) ? lastData.provider_errors : [];
+  if (providerErrors.length) {
+    showError(providerErrors.map((item) => `${item.provider || "Provider"}: ${item.error || "unavailable"}`).join("\n"));
+  } else {
+    hideError();
+  }
   // Smooth the status stream ONCE, here, before anything reads it. A sub-5s
   // `idle` mid-run is the state machine catching its breath, not the agent
   // waiting on anyone — but `idle` is not a running status, so left in place it
@@ -955,6 +962,13 @@ async function loadSettings() {
       if (typeof v === "number" && isFinite(v) && v > 0) OP[key] = v;
     }
   } catch (_) { /* keep the built-in defaults */ }
+}
+
+async function loadBillingExpectations() {
+  try {
+    const res = await fetch("/api/billing", { cache: "no-store" });
+    if (res.ok) billingExpectations = await res.json();
+  } catch (_) { /* route detection remains visible without a declaration */ }
 }
 
 async function loadPlan() {
@@ -4381,6 +4395,16 @@ function renderCostCard(data, plan) {
   const coverageText = coverage == null ? "—" : `${coverage}%`;
   const headlineTip = escapeHTML(costDetailTipHTML(totalCost, planCost));
   const gauges = [];
+  const routeRows = routeCosts(data.lanes || []);
+  const mismatches = billingMismatches(data.lanes || [], billingExpectations);
+  const mismatchHTML = mismatches.length ? `<div class="billing-mismatch" role="alert">${mismatches.length} billing route mismatch${mismatches.length === 1 ? "" : "es"}: ${mismatches.map((item) => `${escapeHTML(providerLabel(item.client))} expected ${escapeHTML(item.expected)}, used ${escapeHTML(item.detected)}`).join("; ")}</div>` : "";
+  const routeNames = { subscription: "Plan", chatgpt_subscription: "Plan", api: "API", gateway: "Gateway", cloud: "Cloud", unknown: "Unconfirmed" };
+  const routeHTML = routeRows.length ? `<div class="route-breakdown"><div class="kv-head">By billing route</div>${routeRows.map((row) => {
+    const name = routeNames[row.route] || displayName(row.route);
+    const billed = row.route === "subscription" || row.route === "chatgpt_subscription"
+      ? "included" : (row.estimatedBilledUsd == null ? "billed —" : `billed ${fmtUSD(row.estimatedBilledUsd)}`);
+    return `<div class="kv"><span class="k">${escapeHTML(name)} · ${row.sessions}</span><span class="v">${fmtUSD(row.apiEquivalentUsd)} API eq. · ${billed}</span></div>`;
+  }).join("")}</div>` : "";
   if (fhPct != null) gauges.push(officialPlanGaugeHTML("5h plan", fhPct, fh, plan, false));
   if (wkPct != null) gauges.push(officialPlanGaugeHTML("Weekly", wkPct, wk, plan, gauges.length > 0));
 
@@ -4395,6 +4419,8 @@ function renderCostCard(data, plan) {
         <div class="hk">coverage</div>
       </div>
     </div>
+    ${routeHTML}
+    ${mismatchHTML}
     ${gauges.length ? `<div class="gauge-block">${gauges.join("")}</div>` : ""}`;
 
   el.cardTokens.innerHTML = tokensBlockHTML(totals);
@@ -4979,7 +5005,7 @@ function init() {
   // live polling — no manual refresh controls. Settings land first: every
   // operator figure depends on them, and re-rendering the page a beat later with
   // different thresholds would be a visible flicker of the numbers.
-  loadSettings().then(() => loadTimeline({ reason: "day" }));
+  Promise.all([loadSettings(), loadBillingExpectations()]).then(() => loadTimeline({ reason: "day" }));
   loadPlan();
   loadSummaries();
   loadMemory();
