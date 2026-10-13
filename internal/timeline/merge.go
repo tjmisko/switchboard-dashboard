@@ -156,6 +156,25 @@ func Merge(inputs []Sourced, opts MergeOptions) *Timeline {
 	return out
 }
 
+// MergeLanes folds src into dst for the operator overlay that rejoins a lane the
+// reader split in two. It sums the additive figures and merges the structured
+// usage, cost, vendor, and pricing-group fields so a rejoined lane keeps the
+// billing semantics the rest of the envelope uses. Slice fields (intervals,
+// spans, names, bounds) are the caller's responsibility.
+func MergeLanes(dst, src Lane) Lane {
+	mergeUsageBreakdown(&dst.Usage, src.Usage)
+	dst.Cost = mergeCostEstimates(dst.Cost, src.Cost, laneHasUsage(src))
+	dst.CostUSD = apiEquivalentAlias(dst.Cost)
+	dst.VendorUsage = mergeVendorUsage(dst.VendorUsage, src.VendorUsage)
+	dst.PricingGroups = append(append([]PricingGroup(nil), dst.PricingGroups...), src.PricingGroups...)
+	dst.TokIn += src.TokIn
+	dst.TokOut += src.TokOut
+	dst.TokCacheRead += src.TokCacheRead
+	dst.TokCacheCreate += src.TokCacheCreate
+	dst.UsageCoverage = mergedIdentity(dst.UsageCoverage, src.UsageCoverage)
+	return dst
+}
+
 // mergeCostEstimates combines like-for-like structured amounts while preserving
 // absence. Legacy-only estimates are deliberately ignored: cost_usd carries no
 // billing semantics or pricing provenance. Usage with no supported structured

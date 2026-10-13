@@ -136,12 +136,16 @@ go build -o switchboard-dashboard .
 | Flag          | Default                       | Description                                                              |
 | ------------- | ----------------------------- | ------------------------------------------------------------------------ |
 | `--port`      | `8780`                        | HTTP port.                                                               |
+| `--bind`      | `127.0.0.1`                   | Listen interface. Loopback by default — the dashboard has no auth.       |
 | `--ctl`       | `switchboard-ctl`             | The `switchboard-ctl` binary for the default Switchboard adapter.        |
 | `--dir`       | `""`                          | History dir passed to ctl; empty uses ctl's own.                         |
 | `--plan`      | `/tmp/claude-plan-usage.json` | Cached plan-usage file, read-only, for the gauge.                        |
 | `--summaries` | `~/.local/share/switchboard/summaries` | Session-summary records from `session-digest`; empty disables.  |
 | `--providers` | `""`                          | Providers config JSON; when set, merges the listed adapters (see below). |
 | `--settings`  | `~/.config/switchboard/dashboard.json` | Operator-model settings (see below); a missing file means defaults. |
+| `--flags-dir` | `~/.local/state/switchboard/flags` | Data-quality flag store (see below); empty disables flagging.       |
+| `--investigate` | `sonnet`                    | Model for the investigation a flag spawns; empty records flags without investigating. |
+| `--investigate-budget` | `0.50`               | Dollar ceiling for a single investigation.                               |
 
 ## Settings
 
@@ -387,6 +391,38 @@ session spanned several), the memory high-water marks, what the machine was
 doing underneath, and the session's identity down to its UUID. Every session bar
 pins one, digest or no digest; the hover's `▸` line says what the click holds.
 
+## Flagging bad data
+
+The dashboard renders whatever the envelope says, and the envelope is sometimes
+wrong. **Right-click a lane → "Flag as bad data"** (optionally with a note) and
+two things happen: the flag is recorded, and a tightly scoped `claude -p` reads
+the raw activity log to work out why the timeline drew what it drew.
+
+The activity log is append-only and owned by the producer, so nothing here writes
+to it. A repair is a reversible **overlay** applied to the envelope on its way to
+the browser — suppress this lane, clip it here, fold it into that one — which
+leaves `switchboard-ctl timeline --json` byte-identical for everyone else.
+
+The case it was built on: on 2026-08-05 a session that ran for **19 seconds**
+drew a three-hour idle bar in its own project group. Its `session_end` was
+stamped 1.16ms *before* the final transition but written after it, so the reader
+— which orders by timestamp — closed the lane and then opened a second one that
+nothing ever closed. The producer's own `suspect` check misses it: three hours is
+under the 4h cap. Flagging it takes about a minute and the ghost is gone, with
+the diagnosis and a drafted upstream bug report kept in `issues.jsonl`.
+
+**The investigating agent has no write tool.** Its entire effect is a
+schema-validated verdict from a closed enum, which the Go process then acts on —
+a stronger guarantee than fencing `Write`/`Edit` to a directory, because the
+worst a confused model can produce is a wrong overlay, and overlays revert. Only
+a high-confidence verdict applies on its own; anything less waits for you.
+
+[`docs/flags.md`](docs/flags.md) is the full contract: the record lifecycle, the
+four repairs and when each is right, why `summary` is deliberately not
+recomputed, the exact agent scope, and the two caveats worth knowing (an
+investigation shows up on your own timeline, and its drafted upstream issue is
+worth reading before you file it).
+
 ## HTTP API
 
 - **`GET /api/timeline`** — with one provider, proxies its `timeline --json`,
@@ -425,6 +461,13 @@ pins one, digest or no digest; the hover's `▸` line says what the click holds.
   `{ "claude": { "expected_route": "subscription" } }`. The dashboard warns
   when a measured route differs. This declaration never changes usage history
   or cost estimates. A missing file returns an empty object.
+- **`GET /api/flags`** — `{flags: {<key>: record}}`, the operator's data-quality
+  flags keyed by `<session-id>__<lane-start-epoch-ms>`. Always `200`; an
+  unconfigured store is an empty set.
+- **`POST /api/flags`** — files a flag on one lane and starts its investigation.
+  **`POST /api/flags/revert`** — withdraws an applied overlay. Both `404` when
+  `--flags-dir` is empty, and both require a same-origin request. See
+  [`docs/flags.md`](docs/flags.md).
 - Static assets are served from `/`. The UI also reads `?day`, `?since`, and
   `?until` from its own URL, so a window is shareable.
 

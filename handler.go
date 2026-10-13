@@ -6,12 +6,14 @@ import (
 	"errors"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/tjmisko/switchboard-dashboard/internal/flags"
 	"github.com/tjmisko/switchboard-dashboard/internal/provider"
 	"github.com/tjmisko/switchboard-dashboard/internal/sessiondigest"
 	"github.com/tjmisko/switchboard-dashboard/internal/timeline"
@@ -27,6 +29,14 @@ var webFS embed.FS
 // session runs. The dashboard reads it READ-ONLY for the official utilization %
 // — it never calls the OAuth endpoint or refreshes the token.
 const DefaultPlanPath = "/tmp/claude-plan-usage.json"
+
+// DefaultBindAddr keeps the listener on the loopback interface. The server used
+// to bind every interface (an empty host) while logging "http://localhost", so
+// the whole dashboard — and now a POST that spawns an investigation agent — was
+// reachable from any host that could route to this machine. Loopback is the only
+// default that matches what the log line has always claimed; --bind takes an
+// explicit address for anyone who genuinely wants it exposed.
+const DefaultBindAddr = "127.0.0.1"
 
 // planStaleAfter is how old the cached file may be before the % is flagged
 // stale. The file only refreshes while a Claude Code session is live, so a gap
@@ -51,6 +61,13 @@ type Server struct {
 	// Settings are the operator-model tunables served to the frontend. The zero
 	// value is not meaningful — main loads them (defaults when unconfigured).
 	Settings Settings
+	// Flags holds operator-filed data-quality flags and the reversible overlays
+	// derived from them. A nil or disabled store makes the flag endpoints 404 and
+	// leaves every envelope untouched.
+	Flags *flags.Store
+	// Investigator diagnoses a newly filed flag. nil records flags without
+	// investigating them.
+	Investigator Investigator
 
 	// days memoizes closed-day timeline envelopes; see daycache.go. Built on
 	// first use so a zero-value Server stays usable (tests construct one
@@ -92,6 +109,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/memory", s.handleMemory)
 	mux.HandleFunc("/api/settings", s.handleSettings)
 	mux.HandleFunc("/api/billing", s.handleBilling)
+	// Method-scoped so a GET can never reach the handlers that spawn work, and so
+	// the mux answers 405 rather than the list handler for a stray verb.
+	mux.HandleFunc("GET /api/flags", s.handleFlagsList)
+	mux.HandleFunc("POST /api/flags", s.handleFlagCreate)
+	mux.HandleFunc("POST /api/flags/revert", s.handleFlagRevert)
 	mux.Handle("/", s.staticHandler())
 	return mux
 }
@@ -105,6 +127,43 @@ func (s *Server) staticHandler() http.Handler {
 		panic(err)
 	}
 	return http.FileServer(http.FS(sub))
+}
+
+// requireSameOrigin rejects a state-changing request that a page on some other
+// origin could have caused a browser to send. The flag endpoints spawn an
+// investigation subprocess, so a drive-by POST from any tab the user happens to
+// have open must not reach them: binding loopback keeps the network out, and
+// this keeps the browser out.
+//
+// Sec-Fetch-Site is the signal to trust — every current browser sends it and
+// page script cannot forge it. Origin is the fallback for anything that does
+// not. A request carrying neither header is not a browser request at all (curl,
+// the test client), so it is allowed: CSRF is a browser-only threat, and
+// refusing those would break scripting the API locally without closing any hole.
+func requireSameOrigin(w http.ResponseWriter, r *http.Request) bool {
+	reject := func() bool {
+		http.Error(w, "cross-origin request rejected", http.StatusForbidden)
+		return false
+	}
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "same-origin", "none":
+		return true
+	case "":
+		// No Sec-Fetch-Site; fall through to the Origin check below.
+	default:
+		// "cross-site" and "same-site" alike: a different port on localhost is
+		// still a different origin, and nothing legitimate posts here from one.
+		return reject()
+	}
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host != r.Host {
+		return reject()
+	}
+	return true
 }
 
 // timelineError is the JSON body returned when ctl fails.
@@ -133,6 +192,9 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 	cacheable := cache.cacheable(day, since, until, dir)
 	if cacheable {
 		if body, ok := cache.get(day); ok {
+			// The cache holds the provider's envelope; apply the operator overlay
+			// on read so a revert is reflected without waiting out the TTL.
+			body, _ = s.applyFlags(body)
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Cache", "hit")
 			_, _ = w.Write(body)
@@ -150,6 +212,12 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 		if cacheable {
 			cache.put(day, raw)
 		}
+		// applyFlags hands back the original bytes untouched unless a flag
+		// actually bit, so the verbatim proxy above survives for every window
+		// nobody has flagged — which is nearly all of them. It runs after the
+		// cache write so the cache stays the provider's envelope and a revert
+		// takes effect on the next read.
+		raw, _ = s.applyFlags(raw)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(raw)
 		return
@@ -212,12 +280,15 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(timelineError{Error: "merge encode failed: " + err.Error()})
 		return
 	}
+	// Cache the provider envelope, not an overlay of it: flags are applied on
+	// every read so a later revert is reflected without waiting out the TTL.
 	// Only a clean merge is cached: an envelope carrying provider_errors is a
 	// partial view of the day, and serving it back for ten minutes would pin a
 	// transient provider failure into the UI long after it recovered.
 	if cacheable && len(merged.ProviderErrors) == 0 {
 		cache.put(day, out)
 	}
+	out, _ = s.applyFlags(out)
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(out)
 }
