@@ -217,9 +217,10 @@ func TestMergeShouldFoldSplitLaneBackIntoItsSiblingWhenBothHoldRealWork(t *testi
 	tl.Lanes[1].Intervals = []timeline.Interval{
 		{Status: "working", Start: ghostLaneStart, End: ghostLaneEnd},
 	}
-	tl.Lanes[1].CostUSD = 2.5
+	twoFifty, one := 2.5, 1.0
+	tl.Lanes[1].Cost = &timeline.CostEstimate{APIEquivalentUSD: &twoFifty}
 	tl.Lanes[1].TokOut = 400
-	tl.Lanes[0].CostUSD = 1.0
+	tl.Lanes[0].Cost = &timeline.CostEstimate{APIEquivalentUSD: &one}
 	tl.Lanes[0].TokOut = 100
 
 	applied := Apply(tl, flagFor(ghostLaneStart, Action{
@@ -245,8 +246,8 @@ func TestMergeShouldFoldSplitLaneBackIntoItsSiblingWhenBothHoldRealWork(t *testi
 			t.Errorf("merged intervals are out of order at %d: %+v", i, merged.Intervals)
 		}
 	}
-	if merged.CostUSD != 3.5 || merged.TokOut != 500 {
-		t.Errorf("merged usage = $%.2f / %d tok, want $3.50 / 500", merged.CostUSD, merged.TokOut)
+	if merged.CostUSD == nil || *merged.CostUSD != 3.5 || merged.TokOut != 500 {
+		t.Errorf("merged usage = %v / %d tok, want $3.50 / 500", merged.CostUSD, merged.TokOut)
 	}
 	if merged.Name != "screening-overhaul-86" {
 		t.Errorf("merged lane name = %q, want the surviving name", merged.Name)
