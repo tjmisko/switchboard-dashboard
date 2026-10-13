@@ -17,6 +17,21 @@ const (
 	DefaultSuspectSubagentCap = 2 * time.Hour
 )
 
+// LiveBoundQuantum is the grid every provider truncates "now" onto before using
+// it to close a session that is still running. It mirrors nowQuantum in the
+// switchboard daemon's cmd/switchboard-ctl, and the two must stay equal.
+//
+// The point is byte-stability: the dashboard polls /api/timeline every 3s and
+// repaints only when the payload changes, so a bound read at full precision puts
+// a fresh timestamp on every live lane and defeats that guard on every poll.
+// Truncating onto a grid an order of magnitude coarser than the poll leaves nine
+// polls in ten byte-identical. Equal grids matter in the MERGED envelope
+// specifically: providers quantizing onto different grids would move the merged
+// bytes on the union of their two grids, and the coarser one would buy nothing.
+//
+// Truncated, never rounded up — a lane must not extend past the present.
+const LiveBoundQuantum = 30 * time.Second
+
 // trustedEndNanos is the last instant of a lane that is backed by evidence: its
 // SuspectSince when the producer flagged it, otherwise its end. The bool is
 // false when the lane is unflagged (or carries an unparsable SuspectSince), in
